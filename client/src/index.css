@@ -39,4 +39,27 @@
     font-family: Inter, system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
   }
+
+  /* Scrollbar: track matches the card background so it disappears,
+     thumb is a muted border colour that picks up only on hover. */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: hsl(var(--card));
+  }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--border));
+    border: 2px solid hsl(var(--card));
+    border-radius: 5px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground));
+  }
+  /* Firefox */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) hsl(var(--card));
+  }
 }
