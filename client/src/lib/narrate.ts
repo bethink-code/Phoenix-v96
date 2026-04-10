@@ -195,11 +195,12 @@ export function narrate(row: DecisionRow): Narration {
       // Nested reasons from the risk manager
       if (innerReason === "rr_below_minimum") {
         const rr = riskDetail?.plannedRR ?? decision?.plannedRR ?? 0;
+        const rrFmt = rr < 1 ? rr.toFixed(2) : rr.toFixed(1);
         return {
           text: pick(seed, [
-            `Saw a setup but the reward's too thin — ${rr.toFixed(1)}:1. Want at least 2:1. Passing.`,
-            `Sweep was clean but the target's too close. ${rr.toFixed(1)}:1 isn't worth it.`,
-            `Tempting, but the reward side doesn't pay. ${rr.toFixed(1)}:1. No.`,
+            `Saw a setup but the reward's too thin — ${rrFmt}:1. Want at least 2:1. Passing.`,
+            `Sweep was clean but the target's too close. ${rrFmt}:1 isn't worth it.`,
+            `Tempting, but the reward side doesn't pay. ${rrFmt}:1. No.`,
           ]),
           mood: "interested",
           subtext: proposal ? `${proposal.side} @ ${price(proposal.entryPrice)}` : undefined,

@@ -57,7 +57,12 @@ export function generateProposal(
       ? sweep.wickExtreme * 1.0005 // just beyond the wick
       : sweep.wickExtreme * 0.9995;
 
-  const target = findTargetLevel(allLevels, entryPrice, side);
+  const riskPerUnit = Math.abs(entryPrice - stopPrice);
+  // Require the target to give at least 1.5× the risk distance, otherwise
+  // there's no point — the risk manager would reject it on R:R anyway,
+  // and tight ranges produce same-price targets that look valid but aren't.
+  const minTargetDistance = riskPerUnit * 1.5;
+  const target = findTargetLevel(allLevels, entryPrice, side, minTargetDistance);
   if (!target) return null;
 
   const reasoning = [
@@ -80,17 +85,22 @@ export function generateProposal(
   };
 }
 
-// Target is the next significant opposing-side level in the direction of the
-// trade. For a short: the nearest support below entry. For a long: the
-// nearest resistance above entry. Uses rank as a tiebreaker.
+// Target is the next significant opposing-side level in the direction of
+// the trade, but only counts if it's far enough from entry to give a useful
+// reward. For a short: the nearest support below entry, separated by at
+// least minDistance. For a long: the nearest resistance above entry,
+// separated by at least minDistance. Uses rank as a tiebreaker.
 function findTargetLevel(
   levels: Level[],
   entry: number,
-  side: "long" | "short"
+  side: "long" | "short",
+  minDistance: number
 ): Level | null {
   const candidates = levels.filter((l) => {
-    if (side === "short") return l.side === "support" && l.price < entry;
-    return l.side === "resistance" && l.price > entry;
+    if (side === "short") {
+      return l.side === "support" && l.price < entry && entry - l.price >= minDistance;
+    }
+    return l.side === "resistance" && l.price > entry && l.price - entry >= minDistance;
   });
   if (candidates.length === 0) return null;
   // Prefer closer levels first, but weight by rank. A closer weak level is
