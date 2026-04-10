@@ -162,6 +162,20 @@ export function narrate(row: DecisionRow): Narration {
     if (topReason === "no_active_pair") {
       return { text: "No pair selected. Pick one in Settings.", mood: "idle" };
     }
+    if (topReason === "exchange_fetch_failed") {
+      const err = String(out.error ?? "unknown");
+      // Geo-block from Binance is the most likely culprit
+      const isGeoBlock = /restricted location|451/i.test(err);
+      return {
+        text: isGeoBlock
+          ? "Exchange is geo-blocking my server. I can't fetch market data from here."
+          : `Couldn't reach the exchange. ${err.slice(0, 120)}`,
+        mood: "halted",
+        subtext: typeof out.consecutiveFailures === "number"
+          ? `failure ${out.consecutiveFailures}/3`
+          : undefined,
+      };
+    }
     if (topReason === "temporal_filter_closed") {
       const gate = String((out as { gate?: string }).gate ?? "");
       return {
