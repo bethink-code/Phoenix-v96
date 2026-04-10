@@ -164,9 +164,10 @@ export function narrate(row: DecisionRow): Narration {
     }
 
     if (topReason === "risk_rejected") {
+      const riskDetail = out.riskDetail as { plannedRR?: number; effectiveMinRR?: number } | undefined;
       // Nested reasons from the risk manager
       if (innerReason === "rr_below_minimum") {
-        const rr = decision?.plannedRR ?? 0;
+        const rr = riskDetail?.plannedRR ?? decision?.plannedRR ?? 0;
         return {
           text: pick(seed, [
             `Saw a setup but the reward's too thin — ${rr.toFixed(1)}:1. Want at least 2:1. Passing.`,

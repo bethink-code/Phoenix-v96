@@ -168,53 +168,39 @@ export default function Dashboard() {
       </header>
 
       <main className="mx-auto max-w-6xl space-y-6 p-6">
-        {/* Alter ego — first-person voice of the bot, the dashboard's centrepiece */}
-        <AgentFeed botStatus={botStatus} activeRegime={currentRegime} />
-
-        {/* Bot control + weekly narrative (PRD §3.1 + §3.2) */}
-        <Card>
-          <CardHeader>
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <CardTitle>This week</CardTitle>
-                <CardDescription>
-                  {botStatus === "active" && "Bot operating normally. Next review: Sunday."}
-                  {botStatus === "paused" && "Bot paused — no new entries. Existing positions still managed to exit."}
-                  {botStatus === "off" && "Bot is OFF. No positions opened until started."}
-                  {botStatus === "halted" && "Bot halted. A fresh regime decision is required before resuming."}
-                  {botStatus === "error" && "Bot in error state. Check logs and reset from here."}
-                </CardDescription>
-              </div>
-              <BotStatusBadge status={botStatus} />
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-4">
+        {/* Alter ego — voice + stats + actions, all in one card */}
+        <AgentFeed
+          botStatus={botStatus}
+          activeRegime={currentRegime}
+          stats={
             <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-              <Stat label="Bot status" value={botStatus.toUpperCase()} />
-              <Stat label="Active regime" value={regimeHuman} />
-              <Stat label="Open positions" value={String(stats.openCount)} />
-              <Stat label="Weekly P&L" value={fmtMoney(stats.weeklyPnl)} />
+              <Stat label="Status" value={botStatus.toUpperCase()} />
+              <Stat label="Regime" value={regimeHuman} />
+              <Stat label="Open" value={String(stats.openCount)} />
+              <Stat label="Week P&L" value={fmtMoney(stats.weeklyPnl)} />
             </div>
-            <div className="flex flex-wrap gap-2 border-t border-border/50 pt-4">
+          }
+          actions={
+            <div className="flex flex-wrap gap-2">
               <Button
                 disabled={botStatus === "active" || setBotStatus.isPending}
                 onClick={() => setModal({ kind: "bot", status: "active" })}
               >
-                Start bot
+                Start
               </Button>
               <Button
                 variant="outline"
                 disabled={botStatus !== "active" || setBotStatus.isPending}
                 onClick={() => setModal({ kind: "bot", status: "paused" })}
               >
-                Pause bot
+                Pause
               </Button>
               <Button
                 variant="outline"
                 disabled={botStatus === "off" || setBotStatus.isPending}
                 onClick={() => setModal({ kind: "bot", status: "off" })}
               >
-                Stop bot
+                Stop
               </Button>
               <div className="ml-auto">
                 <Button
@@ -226,8 +212,8 @@ export default function Dashboard() {
                 </Button>
               </div>
             </div>
-          </CardContent>
-        </Card>
+          }
+        />
 
         {/* Regime control (PRD §5.6 — most prominent interactive element) */}
         <Card>
@@ -332,17 +318,6 @@ export default function Dashboard() {
       />
     </div>
   );
-}
-
-function BotStatusBadge({ status }: { status: string }) {
-  const map: Record<string, string> = {
-    active: "bg-primary/20 text-primary",
-    paused: "bg-amber-500/10 text-amber-300",
-    off: "bg-muted text-muted-foreground",
-    halted: "bg-destructive/20 text-destructive",
-    error: "bg-destructive/20 text-destructive",
-  };
-  return <Badge className={map[status] ?? map.off}>{status.toUpperCase()}</Badge>;
 }
 
 function botModalTitle(s: "active" | "paused" | "off") {

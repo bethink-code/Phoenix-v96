@@ -1,7 +1,8 @@
+import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { useAuth } from "@/hooks/useAuth";
-import { narrate, type Mood } from "@/lib/narrate";
+import { narrate, type Mood, type Narration } from "@/lib/narrate";
 import { cn } from "@/lib/utils";
 
 // The dashboard's centrepiece — the operator's alter ego watching the
@@ -20,6 +21,8 @@ interface DecisionRow {
 interface AgentFeedProps {
   botStatus: string;
   activeRegime: string;
+  stats?: ReactNode;
+  actions?: ReactNode;
 }
 
 const MOOD_CLASSES: Record<Mood, string> = {
@@ -33,20 +36,54 @@ const MOOD_CLASSES: Record<Mood, string> = {
   regime: "border-blue-500/40 text-blue-200",
 };
 
-export default function AgentFeed({ botStatus, activeRegime }: AgentFeedProps) {
+interface CollapsedEntry {
+  key: string;
+  narration: Narration;
+  latestAt: Date;
+  earliestAt: Date;
+  count: number;
+}
+
+// Collapse consecutive decisions that produce the same narration text into
+// a single entry with a count. The bot evaluates the same sweep every 60s
+// when nothing changes, so the raw feed would be 90% duplicates.
+function collapse(rows: DecisionRow[]): CollapsedEntry[] {
+  const out: CollapsedEntry[] = [];
+  for (const row of rows) {
+    const n = narrate(row);
+    const last = out[out.length - 1];
+    if (last && last.narration.text === n.text) {
+      last.count++;
+      // latestAt is the most recent (rows come newest first) so keep it
+      last.earliestAt = new Date(row.createdAt);
+      continue;
+    }
+    out.push({
+      key: row.id,
+      narration: n,
+      latestAt: new Date(row.createdAt),
+      earliestAt: new Date(row.createdAt),
+      count: 1,
+    });
+  }
+  return out;
+}
+
+export default function AgentFeed({ botStatus, activeRegime, stats, actions }: AgentFeedProps) {
   const { user } = useAuth();
   const { data } = useQuery<DecisionRow[]>({
     queryKey: ["/api/tenant/decisions"],
     refetchInterval: 15_000, // quiet poll — the feed updates on its own
   });
 
-  const lines = (data ?? []).slice(0, 80);
+  const entries = collapse((data ?? []).slice(0, 120));
   const firstName = user?.firstName ?? user?.email?.split("@")[0] ?? "You";
   const avatar = user?.profileImageUrl;
   const initials = (firstName.charAt(0) + (user?.lastName?.charAt(0) ?? "")).toUpperCase();
 
   return (
     <Card className="overflow-hidden">
+      {/* Header: avatar + name + status sentence */}
       <div className="flex items-start gap-5 border-b border-border/50 p-6">
         {avatar ? (
           <img
@@ -73,33 +110,47 @@ export default function AgentFeed({ botStatus, activeRegime }: AgentFeedProps) {
         <MoodIndicator status={botStatus} />
       </div>
 
+      {/* Optional stats strip (injected from Dashboard) */}
+      {stats && (
+        <div className="border-b border-border/50 px-6 py-4">{stats}</div>
+      )}
+
+      {/* Feed */}
       <div className="max-h-[420px] space-y-3 overflow-y-auto p-6">
-        {lines.length === 0 ? (
+        {entries.length === 0 ? (
           <p className="text-sm text-muted-foreground">
             Nothing to say yet — start the bot to hear from me.
           </p>
         ) : (
-          lines.map((row) => {
-            const n = narrate(row);
-            const when = new Date(row.createdAt);
-            return (
-              <div
-                key={row.id}
-                className={cn(
-                  "border-l-2 pl-4 leading-snug",
-                  MOOD_CLASSES[n.mood]
+          entries.map((e) => (
+            <div
+              key={e.key}
+              className={cn("border-l-2 pl-4 leading-snug", MOOD_CLASSES[e.narration.mood])}
+            >
+              <div className="flex items-baseline justify-between gap-3 text-sm">
+                <span>{e.narration.text}</span>
+                {e.count > 1 && (
+                  <span className="shrink-0 text-xs text-muted-foreground/80">
+                    × {e.count}
+                  </span>
                 )}
-              >
-                <div className="text-sm">{n.text}</div>
-                <div className="mt-0.5 flex gap-2 text-[11px] text-muted-foreground/70">
-                  <span>{formatWhen(when)}</span>
-                  {n.subtext && <span>· {n.subtext}</span>}
-                </div>
               </div>
-            );
-          })
+              <div className="mt-0.5 flex gap-2 text-[11px] text-muted-foreground/70">
+                <span>
+                  {formatWhen(e.latestAt)}
+                  {e.count > 1 ? ` — ${formatWhen(e.earliestAt)}` : ""}
+                </span>
+                {e.narration.subtext && <span>· {e.narration.subtext}</span>}
+              </div>
+            </div>
+          ))
         )}
       </div>
+
+      {/* Optional action bar (injected from Dashboard) */}
+      {actions && (
+        <div className="border-t border-border/50 px-6 py-4">{actions}</div>
+      )}
     </Card>
   );
 }

@@ -213,6 +213,7 @@ async function tickTenant(tenant: Tenant) {
     return logDecision(tenant.id, "skip", tenant.activeRegime, {
       reason: "risk_rejected",
       detail: decision.reason,
+      riskDetail: decision.detail,
       proposal,
     });
   }
