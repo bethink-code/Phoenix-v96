@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "buildCommand": "npm run build && npm run build:api",
+  "outputDirectory": "dist",
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/index.mjs" },
+    { "source": "/auth/(.*)", "destination": "/api/index.mjs" }
+  ]
+}
