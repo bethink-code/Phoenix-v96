@@ -267,8 +267,9 @@ const niceAsset = (a: string) => ASSET_NAMES[a] ?? a;
 function PairsTab() {
   const qc = useQueryClient();
   const { data: pairs } = useQuery<any[]>({ queryKey: ["/api/admin/pairs"] });
-  const { data: symbols, isLoading: symbolsLoading } = useQuery<BinanceSymbol[]>({
+  const { data: symbols, isLoading: symbolsLoading, error: symbolsError } = useQuery<BinanceSymbol[]>({
     queryKey: ["/api/admin/exchanges/binance/symbols"],
+    retry: false,
   });
   const [search, setSearch] = useState("");
   const [quoteFilter, setQuoteFilter] = useState("USDT");
@@ -358,11 +359,19 @@ function PairsTab() {
               <option value="ETH">ETH</option>
             </select>
           </div>
-          {symbolsLoading ? (
+          {symbolsError ? (
+            <p className="text-sm text-destructive">
+              Failed to fetch Binance pair list: {(symbolsError as Error).message}
+            </p>
+          ) : symbolsLoading ? (
             <p className="text-sm text-muted-foreground">Loading Binance pair list…</p>
+          ) : !symbols || symbols.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              Binance returned no symbols. Check the BINANCE_API_BASE_URL env var.
+            </p>
           ) : filtered.length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              No new pairs match. Try a different search or quote currency.
+              No matches in {symbols.length} symbols. Try a different search or quote currency.
             </p>
           ) : (
             <div className="grid gap-2 md:grid-cols-2">
