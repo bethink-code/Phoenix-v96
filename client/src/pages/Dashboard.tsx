@@ -99,6 +99,9 @@ export default function Dashboard() {
     queryKey: ["/api/tenant/trades"],
     refetchInterval: 15_000,
   });
+  const { data: marketPairs } = useQuery<any[]>({ queryKey: ["/api/markets"] });
+  const activePair = marketPairs?.find((p) => p.id === data?.tenant.activePairId);
+  const assetLabel = activePair?.baseAsset ?? undefined;
   const stats = computeStats(tradesData);
   const [modal, setModal] = useState<ModalState>({ kind: "none" });
   const [tab, setTab] = useState<"heartbeat" | "positions" | "regime" | "risk">("heartbeat");
@@ -206,6 +209,7 @@ export default function Dashboard() {
         <IdentityCard
           botStatus={botStatus}
           activeRegime={currentRegime}
+          assetLabel={assetLabel}
           stats={
             <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
               <Stat label="Status" value={botStatus.toUpperCase()} />

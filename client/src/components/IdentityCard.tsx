@@ -11,6 +11,7 @@ import { cn } from "@/lib/utils";
 interface IdentityCardProps {
   botStatus: string;
   activeRegime: string;
+  assetLabel?: string;
   stats?: ReactNode;
   actions?: ReactNode;
 }
@@ -18,6 +19,7 @@ interface IdentityCardProps {
 export default function IdentityCard({
   botStatus,
   activeRegime,
+  assetLabel,
   stats,
   actions,
 }: IdentityCardProps) {
@@ -48,7 +50,7 @@ export default function IdentityCard({
             </span>
           </div>
           <p className="mt-1 text-sm text-muted-foreground">
-            {statusLine(botStatus, activeRegime)}
+            {statusLine(botStatus, activeRegime, assetLabel)}
           </p>
         </div>
         <MoodIndicator status={botStatus} />
@@ -59,13 +61,13 @@ export default function IdentityCard({
   );
 }
 
-function statusLine(botStatus: string, regime: string): string {
+function statusLine(botStatus: string, regime: string, asset?: string): string {
   if (botStatus === "off") return "Resting. Wake me up when you're ready.";
   if (botStatus === "paused") return "Paused — watching the positions I'm already in, not opening new ones.";
   if (botStatus === "halted") return "Halted. Need you to decide what to do next.";
   if (botStatus === "error") return "Something went wrong. Check logs.";
-  if (regime === "no_trade") return "Watching, but not trading — regime says sit.";
-  return `Watching BTC. ${prettyRegime(regime)}.`;
+  if (regime === "no_trade") return `Watching ${asset ?? "the market"}, but not trading — regime says sit.`;
+  return `Watching ${asset ?? "the market"}. ${prettyRegime(regime)}.`;
 }
 
 function prettyRegime(r: string): string {
