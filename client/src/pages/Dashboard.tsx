@@ -1,7 +1,9 @@
+import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import ConfirmModal from "@/components/ConfirmModal";
 import { useAuth } from "@/hooks/useAuth";
 import { apiRequest } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
@@ -12,6 +14,7 @@ interface Tenant {
   name: string;
   botStatus: "off" | "active" | "paused" | "halted" | "error";
   activeRegime: string;
+  activePairId: string | null;
   paperTradingMode: boolean;
 }
 
@@ -61,12 +64,25 @@ function fmtMoney(n: number) {
   return `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+type ModalState =
+  | { kind: "none" }
+  | { kind: "regime"; toRegime: string }
+  | { kind: "bot"; status: "active" | "paused" | "off" }
+  | { kind: "emergency" };
+
 export default function Dashboard() {
   const { user } = useAuth();
   const qc = useQueryClient();
   const { data } = useQuery<TenantEnvelope>({ queryKey: ["/api/tenant"] });
   const { data: tradesData } = useQuery<TradeRow[]>({ queryKey: ["/api/tenant/trades"] });
   const stats = computeStats(tradesData);
+  const [modal, setModal] = useState<ModalState>({ kind: "none" });
+
+  const invalidateAll = () => {
+    qc.invalidateQueries({ queryKey: ["/api/tenant"] });
+    qc.invalidateQueries({ queryKey: ["/api/tenant/trades"] });
+    qc.invalidateQueries({ queryKey: ["/api/tenant/decisions"] });
+  };
 
   const setRegime = useMutation({
     mutationFn: async (toRegime: string) => {
@@ -77,8 +93,26 @@ export default function Dashboard() {
       return r.json();
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["/api/tenant"] });
-      qc.invalidateQueries({ queryKey: ["/api/tenant/decisions"] });
+      setModal({ kind: "none" });
+      invalidateAll();
+    },
+  });
+
+  const setBotStatus = useMutation({
+    mutationFn: async (status: "active" | "paused" | "off") => {
+      const r = await apiRequest("/api/tenant/bot-status", {
+        method: "PATCH",
+        body: JSON.stringify({ status }),
+      });
+      return r.json();
+    },
+    onSuccess: () => {
+      setModal({ kind: "none" });
+      invalidateAll();
+    },
+    onError: (e) => {
+      setModal({ kind: "none" });
+      alert(`Cannot change status: ${(e as Error).message}`);
     },
   });
 
@@ -88,14 +122,18 @@ export default function Dashboard() {
       return r.json();
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["/api/tenant"] });
-      qc.invalidateQueries({ queryKey: ["/api/tenant/trades"] });
-      qc.invalidateQueries({ queryKey: ["/api/tenant/decisions"] });
+      setModal({ kind: "none" });
+      invalidateAll();
     },
   });
 
   const logout = () =>
     apiRequest("/auth/logout", { method: "POST" }).then(() => location.reload());
+
+  const botStatus = data?.tenant.botStatus ?? "off";
+  const currentRegime = data?.tenant.activeRegime ?? "no_trade";
+  const regimeHuman = regimeLabel(currentRegime);
+  const hasPair = Boolean(data?.tenant.activePairId);
 
   return (
     <div className="min-h-screen bg-background">
@@ -129,19 +167,61 @@ export default function Dashboard() {
       </header>
 
       <main className="mx-auto max-w-6xl space-y-6 p-6">
-        {/* Weekly narrative (PRD §3.1 — weekly view as default) */}
+        {/* Bot control + weekly narrative (PRD §3.1 + §3.2) */}
         <Card>
           <CardHeader>
-            <CardTitle>This week</CardTitle>
-            <CardDescription>
-              Bot operating normally. Next review: Sunday.
-            </CardDescription>
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <CardTitle>This week</CardTitle>
+                <CardDescription>
+                  {botStatus === "active" && "Bot operating normally. Next review: Sunday."}
+                  {botStatus === "paused" && "Bot paused — no new entries. Existing positions still managed to exit."}
+                  {botStatus === "off" && "Bot is OFF. No positions opened until started."}
+                  {botStatus === "halted" && "Bot halted. A fresh regime decision is required before resuming."}
+                  {botStatus === "error" && "Bot in error state. Check logs and reset from here."}
+                </CardDescription>
+              </div>
+              <BotStatusBadge status={botStatus} />
+            </div>
           </CardHeader>
-          <CardContent className="grid grid-cols-2 gap-4 md:grid-cols-4">
-            <Stat label="Bot status" value={data?.tenant.botStatus.toUpperCase() ?? "OFF"} />
-            <Stat label="Active regime" value={regimeLabel(data?.tenant.activeRegime)} />
-            <Stat label="Open positions" value={String(stats.openCount)} />
-            <Stat label="Weekly P&L" value={fmtMoney(stats.weeklyPnl)} />
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+              <Stat label="Bot status" value={botStatus.toUpperCase()} />
+              <Stat label="Active regime" value={regimeHuman} />
+              <Stat label="Open positions" value={String(stats.openCount)} />
+              <Stat label="Weekly P&L" value={fmtMoney(stats.weeklyPnl)} />
+            </div>
+            <div className="flex flex-wrap gap-2 border-t border-border/50 pt-4">
+              <Button
+                disabled={botStatus === "active" || setBotStatus.isPending}
+                onClick={() => setModal({ kind: "bot", status: "active" })}
+              >
+                Start bot
+              </Button>
+              <Button
+                variant="outline"
+                disabled={botStatus !== "active" || setBotStatus.isPending}
+                onClick={() => setModal({ kind: "bot", status: "paused" })}
+              >
+                Pause bot
+              </Button>
+              <Button
+                variant="outline"
+                disabled={botStatus === "off" || setBotStatus.isPending}
+                onClick={() => setModal({ kind: "bot", status: "off" })}
+              >
+                Stop bot
+              </Button>
+              <div className="ml-auto">
+                <Button
+                  variant="destructive"
+                  disabled={stats.openCount === 0 || emergencyExit.isPending}
+                  onClick={() => setModal({ kind: "emergency" })}
+                >
+                  Emergency exit · {stats.openCount} open
+                </Button>
+              </div>
+            </div>
           </CardContent>
         </Card>
 
@@ -156,14 +236,12 @@ export default function Dashboard() {
           <CardContent>
             <div className="grid gap-3 md:grid-cols-3 lg:grid-cols-4">
               {REGIMES.map((r) => {
-                const active = data?.tenant.activeRegime === r.key;
+                const active = currentRegime === r.key;
                 return (
                   <button
                     key={r.key}
                     disabled={setRegime.isPending || active}
-                    onClick={() => {
-                      if (confirm(`Change regime to ${r.label}?`)) setRegime.mutate(r.key);
-                    }}
+                    onClick={() => setModal({ kind: "regime", toRegime: r.key })}
                     className={cn(
                       "rounded-lg border border-border p-4 text-left transition-colors",
                       active
@@ -185,48 +263,162 @@ export default function Dashboard() {
           </CardContent>
         </Card>
 
-        {/* Risk + Emergency (PRD §5.3 + §7.2) */}
-        <div className="grid gap-6 md:grid-cols-2">
-          <Card>
-            <CardHeader>
-              <CardTitle>Risk parameters</CardTitle>
-              <CardDescription>Per-tenant, never shared.</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-2 text-sm">
-              <Row label="Risk % per trade" value={`${data?.config?.riskPercentPerTrade ?? "—"}%`} />
-              <Row label="Max concurrent positions" value={`${data?.config?.maxConcurrentPositions ?? "—"}`} />
-              <Row label="Daily drawdown limit" value={`${data?.config?.dailyDrawdownLimitPct ?? "—"}%`} />
-              <Row label="Weekly drawdown limit" value={`${data?.config?.weeklyDrawdownLimitPct ?? "—"}%`} />
-              <Row label="Min R:R" value={`${data?.config?.minRiskRewardRatio ?? "—"}`} />
-            </CardContent>
-          </Card>
-
-          <Card className="border-destructive/40">
-            <CardHeader>
-              <CardTitle className="text-destructive">Emergency market exit</CardTitle>
-              <CardDescription>
-                Closes all open positions at market price. Two-tap, always available.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Button
-                variant="destructive"
-                disabled={emergencyExit.isPending}
-                onClick={() => {
-                  if (confirm("Close all positions at market NOW?")) emergencyExit.mutate();
-                }}
-              >
-                Close all positions
-              </Button>
-            </CardContent>
-          </Card>
-        </div>
+        {/* Risk parameters (PRD §5.3) */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Risk parameters</CardTitle>
+            <CardDescription>Per-tenant, never shared. Edit in Settings.</CardDescription>
+          </CardHeader>
+          <CardContent className="grid grid-cols-2 gap-4 text-sm md:grid-cols-5">
+            <Stat label="Risk % per trade" value={`${data?.config?.riskPercentPerTrade ?? "—"}%`} />
+            <Stat label="Max positions" value={`${data?.config?.maxConcurrentPositions ?? "—"}`} />
+            <Stat label="Daily drawdown" value={`${data?.config?.dailyDrawdownLimitPct ?? "—"}%`} />
+            <Stat label="Weekly drawdown" value={`${data?.config?.weeklyDrawdownLimitPct ?? "—"}%`} />
+            <Stat label="Min R:R" value={`${data?.config?.minRiskRewardRatio ?? "—"}`} />
+          </CardContent>
+        </Card>
 
         <TradeLogPanel />
         <DecisionsPanel />
       </main>
+
+      {/* Modals ---------------------------------------------------------- */}
+      <ConfirmModal
+        open={modal.kind === "regime"}
+        title={modal.kind === "regime" ? `Switch regime to ${regimeLabel(modal.toRegime)}?` : ""}
+        description="Regime changes take effect on the next bot tick and determine which setup modes are permitted, the position size multiplier, and the minimum R:R required."
+        consequences={
+          modal.kind === "regime"
+            ? buildRegimeConsequences(modal.toRegime)
+            : []
+        }
+        confirmLabel={modal.kind === "regime" ? `Switch to ${regimeLabel(modal.toRegime)}` : ""}
+        pending={setRegime.isPending}
+        onCancel={() => setModal({ kind: "none" })}
+        onConfirm={() => modal.kind === "regime" && setRegime.mutate(modal.toRegime)}
+      />
+
+      <ConfirmModal
+        open={modal.kind === "bot"}
+        title={modal.kind === "bot" ? botModalTitle(modal.status) : ""}
+        description={modal.kind === "bot" ? botModalDescription(modal.status) : ""}
+        consequences={
+          modal.kind === "bot" ? botModalConsequences(modal.status, currentRegime, hasPair) : []
+        }
+        confirmLabel={modal.kind === "bot" ? botModalConfirmLabel(modal.status) : ""}
+        confirmVariant={modal.kind === "bot" && modal.status === "off" ? "destructive" : "default"}
+        pending={setBotStatus.isPending}
+        onCancel={() => setModal({ kind: "none" })}
+        onConfirm={() => modal.kind === "bot" && setBotStatus.mutate(modal.status)}
+      />
+
+      <ConfirmModal
+        open={modal.kind === "emergency"}
+        title="Close all positions at market NOW?"
+        description="This is the fire extinguisher — use it when something is genuinely wrong and the priority is to be flat immediately, not to get a good price."
+        consequences={[
+          `Immediately closes all ${stats.openCount} open position${stats.openCount === 1 ? "" : "s"} at the current market price.`,
+          "Bot is set to HALTED. No new entries until you explicitly restart with a fresh regime selection.",
+          "A critical risk event is logged and (when WhatsApp is wired) an urgent alert is sent.",
+        ]}
+        confirmLabel="Close all positions NOW"
+        confirmVariant="destructive"
+        pending={emergencyExit.isPending}
+        onCancel={() => setModal({ kind: "none" })}
+        onConfirm={() => emergencyExit.mutate()}
+      />
     </div>
   );
+}
+
+function BotStatusBadge({ status }: { status: string }) {
+  const map: Record<string, string> = {
+    active: "bg-primary/20 text-primary",
+    paused: "bg-amber-500/10 text-amber-300",
+    off: "bg-muted text-muted-foreground",
+    halted: "bg-destructive/20 text-destructive",
+    error: "bg-destructive/20 text-destructive",
+  };
+  return <Badge className={map[status] ?? map.off}>{status.toUpperCase()}</Badge>;
+}
+
+function botModalTitle(s: "active" | "paused" | "off") {
+  if (s === "active") return "Start the bot?";
+  if (s === "paused") return "Pause the bot?";
+  return "Stop the bot?";
+}
+
+function botModalDescription(s: "active" | "paused" | "off") {
+  if (s === "active")
+    return "The bot will begin evaluating the market on the next tick and can open paper positions when a valid setup is found.";
+  if (s === "paused")
+    return "The bot stops opening new positions immediately. Any existing positions are still managed to their natural stop/target exits.";
+  return "The bot stops opening new positions. Existing positions are NOT auto-closed — use Emergency exit for that.";
+}
+
+function botModalConsequences(
+  s: "active" | "paused" | "off",
+  regime: string,
+  hasPair: boolean
+): string[] {
+  const cons: string[] = [];
+  if (s === "active") {
+    if (regime === "no_trade") cons.push("⚠ You must first pick a regime other than NO TRADE. This action will fail.");
+    if (!hasPair) cons.push("⚠ No trading pair is selected. Go to Settings → Trading pair first.");
+    cons.push("Bot ticks every 60 seconds and runs the full pipeline (regime → temporal → candles → strategy → risk manager).");
+    cons.push("Paper trading is enforced — no real orders will be sent.");
+  } else if (s === "paused") {
+    cons.push("No new entries. Existing stops and targets still execute if price hits them.");
+    cons.push("You can resume by clicking Start again.");
+  } else {
+    cons.push("No new entries.");
+    cons.push("Existing positions are NOT closed automatically.");
+    cons.push("To close open positions immediately, use Emergency exit instead.");
+  }
+  return cons;
+}
+
+function botModalConfirmLabel(s: "active" | "paused" | "off") {
+  if (s === "active") return "Start bot";
+  if (s === "paused") return "Pause bot";
+  return "Stop bot";
+}
+
+function buildRegimeConsequences(toRegime: string): string[] {
+  const map: Record<string, string[]> = {
+    no_trade: [
+      "All entries will be suppressed.",
+      "Existing positions continue to be managed to their exits.",
+      "Bot will remain silent until you pick a tradeable regime.",
+    ],
+    ranging: [
+      "Both Mode A (survive the sweep) and Mode B (confirmation) are permitted.",
+      "Position sizing at 100% of base risk %.",
+      "Minimum R:R: 2.0.",
+    ],
+    trending: [
+      "Only Mode B (confirmation) setups permitted, in the trend direction.",
+      "Minimum R:R raised to 2.5.",
+      "Counter-trend setups are suppressed.",
+    ],
+    breakout: [
+      "Only Mode B permitted. Position size halved.",
+      "Minimum R:R raised to 3.0 — false signals are expected.",
+    ],
+    high_volatility: [
+      "All entries suppressed. Manipulation environment.",
+      "Existing positions get tighter emergency stops.",
+    ],
+    low_liquidity: [
+      "All entries suppressed.",
+      "Existing positions may be closed at session end.",
+    ],
+    accumulation_distribution: [
+      "Both modes permitted with 75% position sizing.",
+      "Minimum R:R raised to 2.5. Sweep failures expected to be higher.",
+    ],
+  };
+  return map[toRegime] ?? [];
 }
 
 function TradeLogPanel() {
@@ -354,15 +546,6 @@ function Stat({ label, value }: { label: string; value: string }) {
     <div>
       <div className="text-xs uppercase tracking-wide text-muted-foreground">{label}</div>
       <div className="mt-1 text-lg font-semibold">{value}</div>
-    </div>
-  );
-}
-
-function Row({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between border-b border-border/50 py-1.5 last:border-0">
-      <span className="text-muted-foreground">{label}</span>
-      <span className="font-mono">{value}</span>
     </div>
   );
 }
