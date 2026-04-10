@@ -229,13 +229,18 @@ export const storage = {
     status: "off" | "active" | "paused" | "halted" | "error",
     reason?: string
   ) {
+    const isHalt = status === "halted" || status === "error";
+    // PRD §3.2: "Switching back ON requires regime selection — the bot does
+    // not resume from a previous state, it requires a fresh deliberate
+    // decision." Resetting regime to NO TRADE on any halt forces the
+    // user to explicitly pick a regime before the next Start.
     await db
       .update(tenants)
       .set({
         botStatus: status,
-        lastHaltedAt:
-          status === "halted" || status === "error" ? new Date() : undefined,
+        lastHaltedAt: isHalt ? new Date() : undefined,
         lastHaltReason: reason,
+        ...(isHalt ? { activeRegime: "no_trade" as const } : {}),
       })
       .where(eq(tenants.id, tenantId));
   },

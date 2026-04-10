@@ -36,10 +36,37 @@ const REGIMES = [
   { key: "accumulation_distribution", label: "Accumulation / Distribution", colour: "bg-regime-ranging" },
 ];
 
+interface TradeRow {
+  id: string;
+  status: string;
+  realisedPnl: string | null;
+  closedAt: string | null;
+}
+
+function computeStats(trades: TradeRow[] | undefined) {
+  if (!trades) return { weeklyPnl: 0, openCount: 0 };
+  const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  let weeklyPnl = 0;
+  let openCount = 0;
+  for (const t of trades) {
+    if (t.status === "open") openCount++;
+    if (t.closedAt && new Date(t.closedAt).getTime() >= weekAgo && t.realisedPnl != null) {
+      weeklyPnl += Number(t.realisedPnl);
+    }
+  }
+  return { weeklyPnl, openCount };
+}
+
+function fmtMoney(n: number) {
+  return `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
 export default function Dashboard() {
   const { user } = useAuth();
   const qc = useQueryClient();
   const { data } = useQuery<TenantEnvelope>({ queryKey: ["/api/tenant"] });
+  const { data: tradesData } = useQuery<TradeRow[]>({ queryKey: ["/api/tenant/trades"] });
+  const stats = computeStats(tradesData);
 
   const setRegime = useMutation({
     mutationFn: async (toRegime: string) => {
@@ -113,8 +140,8 @@ export default function Dashboard() {
           <CardContent className="grid grid-cols-2 gap-4 md:grid-cols-4">
             <Stat label="Bot status" value={data?.tenant.botStatus.toUpperCase() ?? "OFF"} />
             <Stat label="Active regime" value={regimeLabel(data?.tenant.activeRegime)} />
-            <Stat label="Open positions" value="0" />
-            <Stat label="Weekly P&L" value="$0.00" />
+            <Stat label="Open positions" value={String(stats.openCount)} />
+            <Stat label="Weekly P&L" value={fmtMoney(stats.weeklyPnl)} />
           </CardContent>
         </Card>
 
@@ -241,7 +268,7 @@ function TradeLogPanel() {
                 <span className="text-right">{Number(t.plannedRR).toFixed(2)}</span>
                 <span>{t.status}</span>
                 <span className={`text-right ${Number(t.realisedPnl) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                  {t.realisedPnl != null ? Number(t.realisedPnl).toFixed(2) : "—"}
+                  {t.realisedPnl != null ? fmtMoney(Number(t.realisedPnl)) : "—"}
                 </span>
               </div>
             ))}

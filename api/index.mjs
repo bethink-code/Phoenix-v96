@@ -529,10 +529,12 @@ var storage = {
     return { fromRegime, toRegime };
   },
   async setBotStatus(tenantId, status, reason) {
+    const isHalt = status === "halted" || status === "error";
     await db.update(tenants).set({
       botStatus: status,
-      lastHaltedAt: status === "halted" || status === "error" ? /* @__PURE__ */ new Date() : void 0,
-      lastHaltReason: reason
+      lastHaltedAt: isHalt ? /* @__PURE__ */ new Date() : void 0,
+      lastHaltReason: reason,
+      ...isHalt ? { activeRegime: "no_trade" } : {}
     }).where(eq(tenants.id, tenantId));
   },
   async listRegimeChanges(tenantId, limit = 50) {

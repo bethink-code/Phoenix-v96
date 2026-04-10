@@ -147,7 +147,7 @@ async function tickTenant(tenant: Tenant) {
 
   // Resolve any open paper trades against new candles BEFORE evaluating a
   // new entry. If stop or target was hit, close the trade and log.
-  await resolveOpenTrades(tenant.id, candles);
+  await resolveOpenTrades(tenant.id, candles, symbol);
 
   // Level identification + sweep detection + proposal
   const levels = identifyLevels(candles);
@@ -256,8 +256,22 @@ async function tickTenant(tenant: Tenant) {
 // trade was opened, checks stop/target hits, and closes on first hit.
 // Pessimistic same-bar resolution: if a bar touches both stop and target,
 // assume stop was hit first (matches backtest engine).
-async function resolveOpenTrades(tenantId: string, candles: Candle[]) {
+//
+// As a second pass it also checks the live ticker price, so trades can be
+// resolved before the next candle closes. This is the intra-bar safety
+// net — without it, a 15m TF bot can stay past stop for up to 15 minutes.
+async function resolveOpenTrades(tenantId: string, candles: Candle[], symbol: string) {
   const open = await storage.listOpenTrades(tenantId);
+  if (open.length === 0) return;
+
+  // Fetch the live mark price once for the ticker check
+  let livePrice: number | null = null;
+  try {
+    livePrice = await getBinance().fetchPrice(symbol);
+  } catch (err) {
+    console.error("[bot] ticker fetch for exit check failed", err);
+  }
+
   for (const t of open) {
     const entry = Number(t.entryPrice);
     const stop = Number(t.stopPrice);
@@ -265,10 +279,8 @@ async function resolveOpenTrades(tenantId: string, candles: Candle[]) {
     const size = Number(t.size);
     const openedAt = new Date(t.openedAt).getTime();
 
-    // Look at bars since the trade opened (inclusive of the entry bar).
+    // Look at bars since the trade opened (exclusive of the entry bar).
     const window = candles.filter((c) => c.openTime >= openedAt);
-    if (window.length === 0) continue;
-
     let hit: { exitPrice: number; reason: "target" | "stop" } | null = null;
     for (const bar of window) {
       if (t.side === "long") {
@@ -289,6 +301,18 @@ async function resolveOpenTrades(tenantId: string, candles: Candle[]) {
           hit = { exitPrice: target, reason: "target" };
           break;
         }
+      }
+    }
+
+    // Intra-bar safety net: if no closed bar triggered an exit, check the
+    // current ticker price against stop / target. Stop wins ties.
+    if (!hit && livePrice != null) {
+      if (t.side === "long") {
+        if (livePrice <= stop) hit = { exitPrice: stop, reason: "stop" };
+        else if (livePrice >= target) hit = { exitPrice: target, reason: "target" };
+      } else {
+        if (livePrice >= stop) hit = { exitPrice: stop, reason: "stop" };
+        else if (livePrice <= target) hit = { exitPrice: target, reason: "target" };
       }
     }
 
