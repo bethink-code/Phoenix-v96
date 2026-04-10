@@ -10,6 +10,7 @@ import {
   type TenantConfig,
   type Trade,
 } from "../../shared/schema";
+import { storage } from "../storage";
 import { getRegimeProfile, entryPermitted } from "./regimeEngine";
 import {
   temporalFilterOpen,
@@ -22,6 +23,7 @@ import {
   identifyLevels,
   detectLatestSweep,
   generateProposal,
+  type Candle,
 } from "./strategy";
 
 // PRD §4 decision loop. Runs per tenant on an interval.
@@ -143,6 +145,10 @@ async function tickTenant(tenant: Tenant) {
     });
   }
 
+  // Resolve any open paper trades against new candles BEFORE evaluating a
+  // new entry. If stop or target was hit, close the trade and log.
+  await resolveOpenTrades(tenant.id, candles);
+
   // Level identification + sweep detection + proposal
   const levels = identifyLevels(candles);
   const sweep = detectLatestSweep(candles, levels);
@@ -232,6 +238,69 @@ async function tickTenant(tenant: Tenant) {
     decision,
     reasoning: proposal.reasoning,
   });
+}
+
+// Walks open trades forward through every candle that occurred since the
+// trade was opened, checks stop/target hits, and closes on first hit.
+// Pessimistic same-bar resolution: if a bar touches both stop and target,
+// assume stop was hit first (matches backtest engine).
+async function resolveOpenTrades(tenantId: string, candles: Candle[]) {
+  const open = await storage.listOpenTrades(tenantId);
+  for (const t of open) {
+    const entry = Number(t.entryPrice);
+    const stop = Number(t.stopPrice);
+    const target = Number(t.targetPrice);
+    const size = Number(t.size);
+    const openedAt = new Date(t.openedAt).getTime();
+
+    // Look at bars since the trade opened (inclusive of the entry bar).
+    const window = candles.filter((c) => c.openTime >= openedAt);
+    if (window.length === 0) continue;
+
+    let hit: { exitPrice: number; reason: "target" | "stop" } | null = null;
+    for (const bar of window) {
+      if (t.side === "long") {
+        if (bar.low <= stop) {
+          hit = { exitPrice: stop, reason: "stop" };
+          break;
+        }
+        if (bar.high >= target) {
+          hit = { exitPrice: target, reason: "target" };
+          break;
+        }
+      } else {
+        if (bar.high >= stop) {
+          hit = { exitPrice: stop, reason: "stop" };
+          break;
+        }
+        if (bar.low <= target) {
+          hit = { exitPrice: target, reason: "target" };
+          break;
+        }
+      }
+    }
+
+    if (!hit) continue;
+
+    const realisedPnl =
+      t.side === "long"
+        ? (hit.exitPrice - entry) * size
+        : (entry - hit.exitPrice) * size;
+
+    await storage.closeTrade({
+      tradeId: t.id,
+      exitPrice: hit.exitPrice,
+      realisedPnl,
+      reason: hit.reason,
+    });
+
+    await logDecision(tenantId, "exit", t.regimeAtEntry, {
+      tradeId: t.id,
+      reason: hit.reason,
+      exitPrice: hit.exitPrice,
+      realisedPnl,
+    });
+  }
 }
 
 async function logDecision(

@@ -287,6 +287,24 @@ export const storage = {
       .where(and(eq(trades.tenantId, tenantId), eq(trades.status, "open")));
   },
 
+  async closeTrade(input: {
+    tradeId: string;
+    exitPrice: number;
+    realisedPnl: number;
+    reason: "target" | "stop" | "emergency" | "timeout" | "manual";
+  }) {
+    await db
+      .update(trades)
+      .set({
+        status: "closed",
+        exitPrice: String(input.exitPrice),
+        realisedPnl: String(input.realisedPnl),
+        closedAt: new Date(),
+        closeReason: input.reason,
+      })
+      .where(eq(trades.id, input.tradeId));
+  },
+
   async recordRiskEvent(input: {
     tenantId: string;
     eventType: string;

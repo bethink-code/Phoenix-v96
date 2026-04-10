@@ -559,6 +559,15 @@ var storage = {
   async listOpenTrades(tenantId) {
     return db.select().from(trades).where(and(eq(trades.tenantId, tenantId), eq(trades.status, "open")));
   },
+  async closeTrade(input) {
+    await db.update(trades).set({
+      status: "closed",
+      exitPrice: String(input.exitPrice),
+      realisedPnl: String(input.realisedPnl),
+      closedAt: /* @__PURE__ */ new Date(),
+      closeReason: input.reason
+    }).where(eq(trades.id, input.tradeId));
+  },
   async recordRiskEvent(input) {
     await db.insert(riskEvents).values({
       tenantId: input.tenantId,

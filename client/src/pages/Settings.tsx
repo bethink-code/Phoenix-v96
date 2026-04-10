@@ -119,6 +119,9 @@ function PairSelectionCard() {
   const qc = useQueryClient();
   const { data: envelope } = useQuery<TenantEnvelope>({ queryKey: ["/api/tenant"] });
   const { data: pairs } = useQuery<any[]>({ queryKey: ["/api/markets"] });
+  const [pending, setPending] = useState<string | null>(null);
+  const [justSavedAt, setJustSavedAt] = useState<number | null>(null);
+
   const setPair = useMutation({
     mutationFn: async (pairId: string | null) => {
       await apiRequest("/api/tenant/pair", {
@@ -126,38 +129,71 @@ function PairSelectionCard() {
         body: JSON.stringify({ pairId }),
       });
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/tenant"] }),
+    onSuccess: () => {
+      setPending(null);
+      setJustSavedAt(Date.now());
+      qc.invalidateQueries({ queryKey: ["/api/tenant"] });
+      setTimeout(() => setJustSavedAt(null), 2500);
+    },
   });
 
   const active = envelope?.tenant.activePairId;
+  const selected = pending ?? active ?? null;
+  const dirty = pending !== null && pending !== active;
+
   return (
     <Card>
       <CardHeader>
         <CardTitle>Trading pair</CardTitle>
         <CardDescription>
-          Select the market this instance trades. Only admin-curated pairs are shown.
+          Select the market this instance trades, then click Save. Only admin-curated pairs are shown.
         </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-2">
-        {pairs?.length ? pairs.map((p) => (
-          <button
-            key={p.id}
-            onClick={() => setPair.mutate(p.id)}
-            className={`flex w-full items-center justify-between rounded-md border p-3 text-left transition-colors ${
-              active === p.id
-                ? "border-primary bg-primary/10"
-                : "border-border hover:bg-accent"
-            }`}
-          >
-            <div>
-              <div className="text-sm font-medium">{p.displayName}</div>
-              <div className="font-mono text-xs text-muted-foreground">
-                {p.baseAsset}/{p.quoteAsset} · liquidity: {p.liquidityRating}
+      <CardContent className="space-y-3">
+        {pairs?.length ? pairs.map((p) => {
+          const isActive = active === p.id;
+          const isSelected = selected === p.id;
+          return (
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => setPending(p.id)}
+              className={`flex w-full items-center justify-between rounded-md border p-3 text-left transition-colors ${
+                isSelected
+                  ? "border-primary bg-primary/10"
+                  : "border-border hover:bg-accent"
+              }`}
+            >
+              <div>
+                <div className="text-sm font-medium">{p.displayName}</div>
+                <div className="font-mono text-xs text-muted-foreground">
+                  {p.baseAsset}/{p.quoteAsset} · liquidity: {p.liquidityRating}
+                </div>
               </div>
-            </div>
-            {active === p.id && <Badge className="bg-primary/20 text-primary">Active</Badge>}
-          </button>
-        )) : <p className="text-sm text-muted-foreground">No pairs available. Ask admin to seed the registry.</p>}
+              <div className="flex items-center gap-2">
+                {isActive && <Badge className="bg-primary/20 text-primary">Active</Badge>}
+                {isSelected && !isActive && <Badge className="bg-amber-500/10 text-amber-300">Selected</Badge>}
+              </div>
+            </button>
+          );
+        }) : <p className="text-sm text-muted-foreground">No pairs available. Ask admin to seed the registry.</p>}
+
+        {(dirty || justSavedAt) && (
+          <div className="flex items-center gap-3 border-t border-border/50 pt-3">
+            <Button
+              disabled={!dirty || setPair.isPending}
+              onClick={() => pending && setPair.mutate(pending)}
+            >
+              {setPair.isPending ? "Saving…" : "Save pair"}
+            </Button>
+            {dirty && (
+              <Button variant="ghost" onClick={() => setPending(null)}>Cancel</Button>
+            )}
+            {justSavedAt && !dirty && (
+              <span className="text-sm text-primary">✓ Saved</span>
+            )}
+          </div>
+        )}
       </CardContent>
     </Card>
   );
