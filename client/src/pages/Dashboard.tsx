@@ -153,6 +153,7 @@ export default function Dashboard() {
   const currentRegime = data?.tenant.activeRegime ?? "no_trade";
   const regimeHuman = regimeLabel(currentRegime);
   const hasPair = Boolean(data?.tenant.activePairId);
+  const autopilotOn = data?.tenant.autopilotRegime ?? true;
 
   return (
     <div className="flex h-screen flex-col bg-background">
@@ -302,7 +303,9 @@ export default function Dashboard() {
         title={modal.kind === "bot" ? botModalTitle(modal.status) : ""}
         description={modal.kind === "bot" ? botModalDescription(modal.status) : ""}
         consequences={
-          modal.kind === "bot" ? botModalConsequences(modal.status, currentRegime, hasPair) : []
+          modal.kind === "bot"
+            ? botModalConsequences(modal.status, currentRegime, hasPair, autopilotOn)
+            : []
         }
         confirmLabel={modal.kind === "bot" ? botModalConfirmLabel(modal.status) : ""}
         confirmVariant={modal.kind === "bot" && modal.status === "off" ? "destructive" : "default"}
@@ -347,12 +350,18 @@ function botModalDescription(s: "active" | "paused" | "off") {
 function botModalConsequences(
   s: "active" | "paused" | "off",
   regime: string,
-  hasPair: boolean
+  hasPair: boolean,
+  autopilotOn: boolean
 ): string[] {
   const cons: string[] = [];
   if (s === "active") {
-    if (regime === "no_trade") cons.push("⚠ You must first pick a regime other than NO TRADE. This action will fail.");
     if (!hasPair) cons.push("⚠ No trading pair is selected. Go to Settings → Trading pair first.");
+    if (regime === "no_trade" && !autopilotOn) {
+      cons.push("⚠ You must first pick a regime other than NO TRADE. This action will fail.");
+    }
+    if (regime === "no_trade" && autopilotOn) {
+      cons.push("Autopilot is on — the bot will pick a regime itself on its first tick based on what it reads in the market.");
+    }
     cons.push("Bot ticks every 60 seconds and runs the full pipeline (regime → temporal → candles → strategy → risk manager).");
     cons.push("Paper trading is enforced — no real orders will be sent.");
   } else if (s === "paused") {
