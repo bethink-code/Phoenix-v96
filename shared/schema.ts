@@ -145,6 +145,8 @@ export const tenants = pgTable("tenants", {
   createdAt: timestamp("created_at").notNull().defaultNow(),
   lastHaltedAt: timestamp("last_halted_at"),
   lastHaltReason: text("last_halt_reason"),
+  lastTickAt: timestamp("last_tick_at"),
+  consecutiveExchangeFailures: integer("consecutive_exchange_failures").notNull().default(0),
 });
 
 // Per-tenant risk and strategy configuration. PRD §12.1 — per-tenant, never

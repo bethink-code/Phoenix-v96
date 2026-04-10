@@ -11,6 +11,7 @@ import {
   type Trade,
 } from "../../shared/schema";
 import { storage } from "../storage";
+import { sendUrgentAlert, pingHealthcheck } from "./alerts";
 import { getRegimeProfile, entryPermitted } from "./regimeEngine";
 import {
   temporalFilterOpen,
@@ -82,12 +83,20 @@ async function tickAllTenants() {
         console.error(`[bot] tick failed for tenant ${t.id}`, err);
       }
     }
+    // Ping external dead-man's-switch on every successful loop iteration.
+    // If this stops arriving, the watchdog alerts the operator.
+    await pingHealthcheck();
   } catch (err) {
     console.error("[bot] tickAllTenants failed", err);
   }
 }
 
 async function tickTenant(tenant: Tenant) {
+  // Every successful tick — whether it opens a trade or not — stamps the
+  // tenant row so the UI can show a live heartbeat and any external caller
+  // can tell the bot is still breathing.
+  await storage.touchTenantTick(tenant.id);
+
   // Regime gate first — NO TRADE suppresses everything.
   if (!entryPermitted(tenant.activeRegime)) {
     return logDecision(tenant.id, "skip", tenant.activeRegime, {
@@ -131,13 +140,56 @@ async function tickTenant(tenant: Tenant) {
     });
   }
 
-  // Fetch candles from exchange
+  // Fetch candles from exchange. Wrap in failure-counting — PRD §3.4:
+  // "Exchange API connectivity lost while positions are open" is an urgent
+  // alert trigger. Three consecutive failures halts the tenant.
   const binance = getBinance();
-  const candles = await binance.fetchCandles({
-    symbol,
-    timeframe: DEFAULT_TIMEFRAME,
-    limit: CANDLES_LOOKBACK,
-  });
+  let candles;
+  try {
+    candles = await binance.fetchCandles({
+      symbol,
+      timeframe: DEFAULT_TIMEFRAME,
+      limit: CANDLES_LOOKBACK,
+    });
+    // Success — reset failure counter if it was non-zero
+    if (tenant.consecutiveExchangeFailures > 0) {
+      await storage.resetExchangeFailures(tenant.id);
+    }
+  } catch (err) {
+    const message = (err as Error).message ?? "unknown";
+    const failures = await storage.incrementExchangeFailures(tenant.id);
+    console.error(`[bot] exchange fetch failed (${failures}): ${message}`);
+    await storage.recordRiskEvent({
+      tenantId: tenant.id,
+      eventType: "exchange_fetch_failed",
+      severity: failures >= 3 ? "critical" : "warn",
+      detail: { error: message, consecutiveFailures: failures, symbol },
+    });
+    if (failures >= 3) {
+      await storage.setBotStatus(
+        tenant.id,
+        "halted",
+        `exchange_connectivity_lost: ${message}`
+      );
+      sendUrgentAlert({
+        tenantId: tenant.id,
+        title: "Bot halted — exchange connectivity lost",
+        body: `Three consecutive failures fetching ${symbol} from Binance. Last error: ${message}. Bot is now halted.`,
+      }).catch(() => {});
+    } else {
+      sendUrgentAlert({
+        tenantId: tenant.id,
+        title: "Exchange fetch failed",
+        body: `Failure ${failures}/3 for ${symbol}. Last error: ${message}.`,
+      }).catch(() => {});
+    }
+    await logDecision(tenant.id, "skip", tenant.activeRegime, {
+      reason: "exchange_fetch_failed",
+      error: message,
+      consecutiveFailures: failures,
+    });
+    return;
+  }
   if (candles.length < 50) {
     return logDecision(tenant.id, "skip", tenant.activeRegime, {
       reason: "insufficient_candles",

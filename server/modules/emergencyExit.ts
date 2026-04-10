@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import { tenants, marketPairs } from "../../shared/schema";
 import { storage } from "../storage";
 import { getBinance } from "./exchange/binance";
-import { sendUrgentAlert } from "./whatsapp";
+import { sendUrgentAlert } from "./alerts";
 
 // PRD §7.2 Emergency Market Exit. The fire extinguisher.
 // Closes all open positions immediately at the current mark price, sets the

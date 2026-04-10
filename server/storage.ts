@@ -327,6 +327,31 @@ export const storage = {
     });
   },
 
+  async touchTenantTick(tenantId: string) {
+    await db
+      .update(tenants)
+      .set({ lastTickAt: new Date() })
+      .where(eq(tenants.id, tenantId));
+  },
+
+  async incrementExchangeFailures(tenantId: string): Promise<number> {
+    const [row] = await db
+      .update(tenants)
+      .set({
+        consecutiveExchangeFailures: sql`${tenants.consecutiveExchangeFailures} + 1`,
+      })
+      .where(eq(tenants.id, tenantId))
+      .returning({ n: tenants.consecutiveExchangeFailures });
+    return row.n;
+  },
+
+  async resetExchangeFailures(tenantId: string) {
+    await db
+      .update(tenants)
+      .set({ consecutiveExchangeFailures: 0 })
+      .where(eq(tenants.id, tenantId));
+  },
+
   async listBotDecisions(tenantId: string, limit = 50) {
     return db
       .select()
@@ -433,6 +458,14 @@ export const storage = {
       .orderBy(botDecisions.createdAt)
       .limit(1);
 
+    const [tenant] = await db
+      .select({
+        lastTickAt: tenants.lastTickAt,
+        failures: tenants.consecutiveExchangeFailures,
+      })
+      .from(tenants)
+      .where(eq(tenants.id, tenantId));
+
     return {
       ticksToday: today.n,
       ticksThisHour: hour.n,
@@ -440,6 +473,8 @@ export const storage = {
       llmCostMonth: llmMonth.cost,
       infraCostMonth: 0, // Vercel Hobby = free; wire observability API later
       firstSeenAt: firstDecision?.at ?? null,
+      lastTickAt: tenant?.lastTickAt ?? null,
+      consecutiveExchangeFailures: tenant?.failures ?? 0,
     };
   },
 

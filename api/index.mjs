@@ -170,7 +170,9 @@ var tenants = pgTable("tenants", {
   paperTradingMode: boolean("paper_trading_mode").notNull().default(true),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   lastHaltedAt: timestamp("last_halted_at"),
-  lastHaltReason: text("last_halt_reason")
+  lastHaltReason: text("last_halt_reason"),
+  lastTickAt: timestamp("last_tick_at"),
+  consecutiveExchangeFailures: integer("consecutive_exchange_failures").notNull().default(0)
 });
 var tenantConfigs = pgTable("tenant_configs", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -579,6 +581,18 @@ var storage = {
       triggeredByUserId: input.triggeredByUserId
     });
   },
+  async touchTenantTick(tenantId) {
+    await db.update(tenants).set({ lastTickAt: /* @__PURE__ */ new Date() }).where(eq(tenants.id, tenantId));
+  },
+  async incrementExchangeFailures(tenantId) {
+    const [row] = await db.update(tenants).set({
+      consecutiveExchangeFailures: sql2`${tenants.consecutiveExchangeFailures} + 1`
+    }).where(eq(tenants.id, tenantId)).returning({ n: tenants.consecutiveExchangeFailures });
+    return row.n;
+  },
+  async resetExchangeFailures(tenantId) {
+    await db.update(tenants).set({ consecutiveExchangeFailures: 0 }).where(eq(tenants.id, tenantId));
+  },
   async listBotDecisions(tenantId, limit = 50) {
     return db.select().from(botDecisions).where(eq(botDecisions.tenantId, tenantId)).orderBy(desc(botDecisions.createdAt)).limit(limit);
   },
@@ -640,6 +654,10 @@ var storage = {
       )
     );
     const [firstDecision] = await db.select({ at: botDecisions.createdAt }).from(botDecisions).where(eq(botDecisions.tenantId, tenantId)).orderBy(botDecisions.createdAt).limit(1);
+    const [tenant] = await db.select({
+      lastTickAt: tenants.lastTickAt,
+      failures: tenants.consecutiveExchangeFailures
+    }).from(tenants).where(eq(tenants.id, tenantId));
     return {
       ticksToday: today.n,
       ticksThisHour: hour.n,
@@ -648,7 +666,9 @@ var storage = {
       llmCostMonth: llmMonth.cost,
       infraCostMonth: 0,
       // Vercel Hobby = free; wire observability API later
-      firstSeenAt: firstDecision?.at ?? null
+      firstSeenAt: firstDecision?.at ?? null,
+      lastTickAt: tenant?.lastTickAt ?? null,
+      consecutiveExchangeFailures: tenant?.failures ?? 0
     };
   },
   async listExchangeKeyMetadata(tenantId) {
@@ -866,18 +886,47 @@ function getBinance() {
   return singleton;
 }
 
-// server/modules/whatsapp.ts
-var twilioConfigured = Boolean(
-  process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_WHATSAPP_FROM
+// server/modules/alerts.ts
+var telegramConfigured = Boolean(
+  process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID
 );
 async function sendUrgentAlert(alert) {
-  if (!twilioConfigured) {
+  return send({ ...alert, tier: "urgent" });
+}
+async function send(alert) {
+  if (!telegramConfigured) {
     console.log(
-      `[whatsapp:stub] urgent alert for tenant ${alert.tenantId}: ${alert.title} \u2014 ${alert.body}`
+      `[alerts:stub] ${alert.tier} ${alert.tenantId}: ${alert.title} \u2014 ${alert.body}`
     );
     return;
   }
-  console.log(`[whatsapp] TODO send urgent to tenant ${alert.tenantId}`);
+  const icon = alert.tier === "urgent" ? "\u{1F6A8}" : "\u{1F4DD}";
+  const text2 = `${icon} *${escape(alert.title)}*
+${escape(alert.body)}`;
+  try {
+    const res = await fetch(
+      `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: process.env.TELEGRAM_CHAT_ID,
+          text: text2,
+          parse_mode: "Markdown",
+          disable_notification: alert.tier === "digest"
+        })
+      }
+    );
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      console.error(`[alerts] telegram ${res.status}: ${body}`);
+    }
+  } catch (err) {
+    console.error("[alerts] telegram request failed", err);
+  }
+}
+function escape(s) {
+  return s.replace(/([_*`[\]])/g, "\\$1");
 }
 
 // server/modules/emergencyExit.ts

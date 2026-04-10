@@ -12,12 +12,14 @@ interface Costs {
   llmCostMonth: number;
   infraCostMonth: number;
   firstSeenAt: string | null;
+  lastTickAt: string | null;
+  consecutiveExchangeFailures: number;
 }
 
 export default function CostStrip() {
   const { data } = useQuery<Costs>({
     queryKey: ["/api/tenant/costs"],
-    refetchInterval: 30_000,
+    refetchInterval: 15_000,
   });
 
   const ticks = data?.ticksToday ?? 0;
@@ -26,24 +28,54 @@ export default function CostStrip() {
   const infra = data?.infraCostMonth ?? 0;
   const total = llm + infra;
 
-  // Pulse dot if the bot's been active in the last hour — "pinging its ass off"
-  const active = (data?.ticksThisHour ?? 0) > 0;
+  const heartbeat = computeHeartbeat(data?.lastTickAt ?? null);
 
   return (
     <div className="flex items-center gap-4 text-xs">
       <Pill
-        dot={active ? "bg-primary animate-pulse" : "bg-muted-foreground/40"}
-        label="ticks today"
-        value={ticks.toLocaleString()}
-        sub={data ? `${data.ticksThisHour}/hr` : undefined}
+        dot={heartbeat.dot}
+        label="heartbeat"
+        value={heartbeat.label}
+        tone={heartbeat.tone}
       />
+      <Pill label="ticks today" value={ticks.toLocaleString()} sub={data ? `${data.ticksThisHour}/hr` : undefined} />
       <Pill label="exchange calls" value={apis.toLocaleString()} />
       <Pill label="LLM" value={fmtMoney(llm)} tone={llm > 0 ? "warm" : "neutral"} />
       <Pill label="infra" value={fmtMoney(infra)} />
       <div className="h-6 w-px bg-border/60" />
       <Pill label="month-to-date" value={fmtMoney(total)} tone={total > 0 ? "warm" : "neutral"} strong />
+      {(data?.consecutiveExchangeFailures ?? 0) > 0 && (
+        <>
+          <div className="h-6 w-px bg-border/60" />
+          <Pill
+            label="exchange errors"
+            value={`${data!.consecutiveExchangeFailures}/3`}
+            tone="warm"
+          />
+        </>
+      )}
     </div>
   );
+}
+
+function computeHeartbeat(lastTickAt: string | null): {
+  label: string;
+  dot: string;
+  tone: "neutral" | "warm" | "bad";
+} {
+  if (!lastTickAt) {
+    return { label: "never", dot: "bg-muted-foreground/40", tone: "neutral" };
+  }
+  const ageMs = Date.now() - new Date(lastTickAt).getTime();
+  const seconds = Math.floor(ageMs / 1000);
+  const label = seconds < 60 ? `${seconds}s ago` : `${Math.floor(seconds / 60)}m ago`;
+  if (ageMs < 2 * 60_000) {
+    return { label, dot: "bg-emerald-500 animate-pulse", tone: "neutral" };
+  }
+  if (ageMs < 5 * 60_000) {
+    return { label, dot: "bg-amber-400", tone: "warm" };
+  }
+  return { label, dot: "bg-red-500", tone: "bad" };
 }
 
 function Pill({
@@ -58,7 +90,7 @@ function Pill({
   label: string;
   value: string;
   sub?: string;
-  tone?: "neutral" | "warm";
+  tone?: "neutral" | "warm" | "bad";
   strong?: boolean;
 }) {
   return (
@@ -70,7 +102,9 @@ function Pill({
           className={cn(
             "font-mono",
             strong ? "text-sm font-semibold" : "text-xs",
-            tone === "warm" ? "text-amber-300" : "text-foreground"
+            tone === "warm" ? "text-amber-300" :
+            tone === "bad" ? "text-red-400" :
+            "text-foreground"
           )}
         >
           {value}
