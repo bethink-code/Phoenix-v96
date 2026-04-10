@@ -5,6 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import ConfirmModal from "@/components/ConfirmModal";
 import AgentFeed from "@/components/AgentFeed";
+import CostStrip from "@/components/CostStrip";
 import { useAuth } from "@/hooks/useAuth";
 import { apiRequest } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
@@ -140,7 +141,7 @@ export default function Dashboard() {
     <div className="min-h-screen bg-background">
       {/* Header */}
       <header className="border-b border-border">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-6 py-4">
           <div>
             <h1 className="text-lg font-semibold">Phoenix v96</h1>
             <p className="text-xs text-muted-foreground">
@@ -164,6 +165,9 @@ export default function Dashboard() {
             )}
             <Button variant="ghost" size="sm" onClick={logout}>Sign out</Button>
           </div>
+        </div>
+        <div className="mx-auto max-w-6xl border-t border-border/40 px-6 py-3">
+          <CostStrip />
         </div>
       </header>
 

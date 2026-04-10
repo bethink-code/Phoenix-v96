@@ -383,7 +383,7 @@ var pool = new Pool({
 var db = drizzle(pool, { schema: schema_exports });
 
 // server/storage.ts
-import { eq, and, desc, sql as sql2 } from "drizzle-orm";
+import { eq, and, desc, gte, sql as sql2 } from "drizzle-orm";
 
 // server/cryptoUtil.ts
 import crypto from "crypto";
@@ -607,6 +607,49 @@ var storage = {
       apiSecretIv: secretBlob.iv,
       apiSecretAuthTag: secretBlob.authTag
     });
+  },
+  // "What is this thing costing me?" — activity + spend summary for the
+  // header strip. ticks come from bot_decisions (one row per tick), API
+  // calls are estimated at 2 per tick (klines + ticker), LLM spend comes
+  // from llm_usage for the current calendar month, infra spend is a
+  // placeholder until Vercel's observability API is wired.
+  async getTenantCosts(tenantId) {
+    const startOfDay = /* @__PURE__ */ new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const startOfHour = /* @__PURE__ */ new Date();
+    startOfHour.setMinutes(0, 0, 0);
+    const startOfMonth = /* @__PURE__ */ new Date();
+    startOfMonth.setDate(1);
+    startOfMonth.setHours(0, 0, 0, 0);
+    const [today] = await db.select({ n: sql2`count(*)::int` }).from(botDecisions).where(
+      and(
+        eq(botDecisions.tenantId, tenantId),
+        gte(botDecisions.createdAt, startOfDay)
+      )
+    );
+    const [hour] = await db.select({ n: sql2`count(*)::int` }).from(botDecisions).where(
+      and(
+        eq(botDecisions.tenantId, tenantId),
+        gte(botDecisions.createdAt, startOfHour)
+      )
+    );
+    const [llmMonth] = await db.select({ cost: sql2`coalesce(sum(cost_usd), 0)::float` }).from(llmUsage).where(
+      and(
+        eq(llmUsage.tenantId, tenantId),
+        gte(llmUsage.createdAt, startOfMonth)
+      )
+    );
+    const [firstDecision] = await db.select({ at: botDecisions.createdAt }).from(botDecisions).where(eq(botDecisions.tenantId, tenantId)).orderBy(botDecisions.createdAt).limit(1);
+    return {
+      ticksToday: today.n,
+      ticksThisHour: hour.n,
+      apiCallsToday: today.n * 2,
+      // 1 klines + 1 ticker per tick
+      llmCostMonth: llmMonth.cost,
+      infraCostMonth: 0,
+      // Vercel Hobby = free; wire observability API later
+      firstSeenAt: firstDecision?.at ?? null
+    };
   },
   async listExchangeKeyMetadata(tenantId) {
     return db.select({
@@ -1072,6 +1115,11 @@ function registerRoutes(app2) {
     const u = getUser(req);
     const tenant = await storage.getOrCreateTenantForUser(u.id);
     res.json(await storage.listBotDecisions(tenant.id));
+  });
+  app2.get("/api/tenant/costs", isAuthenticated, async (req, res) => {
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    res.json(await storage.getTenantCosts(tenant.id));
   });
   app2.patch("/api/tenant/config", isAuthenticated, async (req, res) => {
     const schema = z2.object({

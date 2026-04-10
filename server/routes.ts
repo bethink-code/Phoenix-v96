@@ -120,6 +120,12 @@ export function registerRoutes(app: Express) {
     res.json(await storage.listBotDecisions(tenant.id));
   });
 
+  app.get("/api/tenant/costs", isAuthenticated, async (req, res) => {
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    res.json(await storage.getTenantCosts(tenant.id));
+  });
+
   app.patch("/api/tenant/config", isAuthenticated, async (req, res) => {
     const schema = z.object({
       riskPercentPerTrade: z.string().optional(),
