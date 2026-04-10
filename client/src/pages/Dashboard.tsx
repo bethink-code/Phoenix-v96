@@ -4,7 +4,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import ConfirmModal from "@/components/ConfirmModal";
-import AgentFeed from "@/components/AgentFeed";
+import IdentityCard from "@/components/IdentityCard";
+import HeartbeatFeed from "@/components/HeartbeatFeed";
 import CostStrip from "@/components/CostStrip";
 import { useAuth } from "@/hooks/useAuth";
 import { apiRequest } from "@/lib/queryClient";
@@ -79,6 +80,7 @@ export default function Dashboard() {
   const { data: tradesData } = useQuery<TradeRow[]>({ queryKey: ["/api/tenant/trades"] });
   const stats = computeStats(tradesData);
   const [modal, setModal] = useState<ModalState>({ kind: "none" });
+  const [tab, setTab] = useState<"heartbeat" | "positions" | "regime" | "risk">("heartbeat");
 
   const invalidateAll = () => {
     qc.invalidateQueries({ queryKey: ["/api/tenant"] });
@@ -172,8 +174,8 @@ export default function Dashboard() {
       </header>
 
       <main className="mx-auto max-w-6xl space-y-6 p-6">
-        {/* Alter ego — voice + stats + actions, all in one card */}
-        <AgentFeed
+        {/* Identity — avatar + name + status, plus stats + actions */}
+        <IdentityCard
           botStatus={botStatus}
           activeRegime={currentRegime}
           stats={
@@ -219,60 +221,49 @@ export default function Dashboard() {
           }
         />
 
-        {/* Regime control (PRD §5.6 — most prominent interactive element) */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Regime</CardTitle>
-            <CardDescription>
-              The trader's market read is the edge. Set it deliberately — once per session.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="grid gap-3 md:grid-cols-3 lg:grid-cols-4">
-              {REGIMES.map((r) => {
-                const active = currentRegime === r.key;
-                return (
-                  <button
-                    key={r.key}
-                    disabled={setRegime.isPending || active}
-                    onClick={() => setModal({ kind: "regime", toRegime: r.key })}
-                    className={cn(
-                      "rounded-lg border border-border p-4 text-left transition-colors",
-                      active
-                        ? "border-primary bg-primary/10"
-                        : "hover:border-primary/50 hover:bg-accent"
-                    )}
-                  >
-                    <div className="flex items-center gap-2">
-                      <div className={cn("h-2 w-2 rounded-full", r.colour)} />
-                      <span className="text-sm font-medium">{r.label}</span>
-                    </div>
-                    {active && (
-                      <div className="mt-1 text-xs text-primary">Active</div>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          </CardContent>
+        {/* Tabs */}
+        <Card className="overflow-hidden">
+          <div className="flex gap-1 border-b border-border px-4">
+            {(
+              [
+                { key: "heartbeat", label: "Heartbeat", count: null as number | null },
+                { key: "positions", label: "Positions", count: stats.openCount },
+                { key: "regime", label: "Regime", count: null },
+                { key: "risk", label: "Risk", count: null },
+              ] as const
+            ).map((t) => (
+              <button
+                key={t.key}
+                onClick={() => setTab(t.key)}
+                className={cn(
+                  "-mb-px border-b-2 px-4 py-3 text-sm transition-colors",
+                  tab === t.key
+                    ? "border-primary text-primary"
+                    : "border-transparent text-muted-foreground hover:text-foreground"
+                )}
+              >
+                {t.label}
+                {t.count != null && t.count > 0 && (
+                  <span className="ml-2 rounded-full bg-primary/20 px-1.5 py-0.5 text-xs text-primary">
+                    {t.count}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+          <div>
+            {tab === "heartbeat" && <HeartbeatFeed />}
+            {tab === "positions" && <PositionsTab />}
+            {tab === "regime" && (
+              <RegimeTab
+                currentRegime={currentRegime}
+                pending={setRegime.isPending}
+                onSelect={(r) => setModal({ kind: "regime", toRegime: r })}
+              />
+            )}
+            {tab === "risk" && <RiskTab config={data?.config ?? null} />}
+          </div>
         </Card>
-
-        {/* Risk parameters (PRD §5.3) */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Risk parameters</CardTitle>
-            <CardDescription>Per-tenant, never shared. Edit in Settings.</CardDescription>
-          </CardHeader>
-          <CardContent className="grid grid-cols-2 gap-4 text-sm md:grid-cols-5">
-            <Stat label="Risk % per trade" value={`${data?.config?.riskPercentPerTrade ?? "—"}%`} />
-            <Stat label="Max positions" value={`${data?.config?.maxConcurrentPositions ?? "—"}`} />
-            <Stat label="Daily drawdown" value={`${data?.config?.dailyDrawdownLimitPct ?? "—"}%`} />
-            <Stat label="Weekly drawdown" value={`${data?.config?.weeklyDrawdownLimitPct ?? "—"}%`} />
-            <Stat label="Min R:R" value={`${data?.config?.minRiskRewardRatio ?? "—"}`} />
-          </CardContent>
-        </Card>
-
-        <TradeLogPanel />
       </main>
 
       {/* Modals ---------------------------------------------------------- */}
@@ -403,40 +394,106 @@ function buildRegimeConsequences(toRegime: string): string[] {
   return map[toRegime] ?? [];
 }
 
-function TradeLogPanel() {
+function PositionsTab() {
   const { data } = useQuery<any[]>({ queryKey: ["/api/tenant/trades"] });
   const open = (data ?? []).filter((t) => t.status === "open");
   const closed = (data ?? []).filter((t) => t.status !== "open");
 
   return (
-    <div className="space-y-6">
-      <Card>
-        <CardHeader>
-          <CardTitle>Open positions</CardTitle>
-          <CardDescription>
-            {open.length === 0 ? "No open positions. The bot is idle or waiting for a setup." : `${open.length} live position${open.length > 1 ? "s" : ""}.`}
-          </CardDescription>
-        </CardHeader>
+    <div className="space-y-6 p-6">
+      <div>
+        <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+          Open positions
+        </h3>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {open.length === 0
+            ? "No open positions. The bot is idle or waiting for a setup."
+            : `${open.length} live position${open.length > 1 ? "s" : ""}.`}
+        </p>
         {open.length > 0 && (
-          <CardContent>
+          <div className="mt-3">
             <TradeTable rows={open} showPnl={false} />
-          </CardContent>
+          </div>
         )}
-      </Card>
+      </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Trade history</CardTitle>
-          <CardDescription>Closed trades with realised P&amp;L and close reason (PRD §5.8).</CardDescription>
-        </CardHeader>
-        <CardContent>
+      <div className="border-t border-border/50 pt-6">
+        <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+          Trade history
+        </h3>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Closed trades with realised P&amp;L and close reason (PRD §5.8).
+        </p>
+        <div className="mt-3">
           {closed.length ? (
             <TradeTable rows={closed} showPnl={true} />
           ) : (
             <p className="text-sm text-muted-foreground">No closed trades yet.</p>
           )}
-        </CardContent>
-      </Card>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RegimeTab({
+  currentRegime,
+  pending,
+  onSelect,
+}: {
+  currentRegime: string;
+  pending: boolean;
+  onSelect: (regime: string) => void;
+}) {
+  return (
+    <div className="p-6">
+      <p className="text-sm text-muted-foreground">
+        The trader's market read is the edge. Set it deliberately — once per session.
+      </p>
+      <div className="mt-4 grid gap-3 md:grid-cols-3 lg:grid-cols-4">
+        {REGIMES.map((r) => {
+          const active = currentRegime === r.key;
+          return (
+            <button
+              key={r.key}
+              disabled={pending || active}
+              onClick={() => onSelect(r.key)}
+              className={cn(
+                "rounded-lg border border-border p-4 text-left transition-colors",
+                active
+                  ? "border-primary bg-primary/10"
+                  : "hover:border-primary/50 hover:bg-accent"
+              )}
+            >
+              <div className="flex items-center gap-2">
+                <div className={cn("h-2 w-2 rounded-full", r.colour)} />
+                <span className="text-sm font-medium">{r.label}</span>
+              </div>
+              {active && <div className="mt-1 text-xs text-primary">Active</div>}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function RiskTab({ config }: { config: TenantEnvelope["config"] }) {
+  if (!config) {
+    return <p className="p-6 text-sm text-muted-foreground">No config loaded yet.</p>;
+  }
+  return (
+    <div className="p-6">
+      <p className="text-sm text-muted-foreground">
+        Per-tenant, never shared. Edit in Settings.
+      </p>
+      <div className="mt-4 grid grid-cols-2 gap-4 md:grid-cols-5">
+        <Stat label="Risk % per trade" value={`${config.riskPercentPerTrade}%`} />
+        <Stat label="Max positions" value={`${config.maxConcurrentPositions}`} />
+        <Stat label="Daily drawdown" value={`${config.dailyDrawdownLimitPct}%`} />
+        <Stat label="Weekly drawdown" value={`${config.weeklyDrawdownLimitPct}%`} />
+        <Stat label="Min R:R" value={`${config.minRiskRewardRatio}`} />
+      </div>
     </div>
   );
 }
