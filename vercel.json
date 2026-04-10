@@ -4,6 +4,7 @@
   "outputDirectory": "dist",
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/index.mjs" },
-    { "source": "/auth/(.*)", "destination": "/api/index.mjs" }
+    { "source": "/auth/(.*)", "destination": "/api/index.mjs" },
+    { "source": "/(.*)", "destination": "/index.html" }
   ]
 }
