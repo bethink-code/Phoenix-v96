@@ -91,8 +91,14 @@ type ModalState =
 export default function Dashboard() {
   const { user } = useAuth();
   const qc = useQueryClient();
-  const { data } = useQuery<TenantEnvelope>({ queryKey: ["/api/tenant"] });
-  const { data: tradesData } = useQuery<TradeRow[]>({ queryKey: ["/api/tenant/trades"] });
+  const { data } = useQuery<TenantEnvelope>({
+    queryKey: ["/api/tenant"],
+    refetchInterval: 15_000,
+  });
+  const { data: tradesData } = useQuery<TradeRow[]>({
+    queryKey: ["/api/tenant/trades"],
+    refetchInterval: 15_000,
+  });
   const stats = computeStats(tradesData);
   const [modal, setModal] = useState<ModalState>({ kind: "none" });
   const [tab, setTab] = useState<"heartbeat" | "positions" | "regime" | "risk">("heartbeat");
