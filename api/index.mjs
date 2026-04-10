@@ -766,6 +766,61 @@ function isAdmin(req, res, next) {
 // server/routes.ts
 import { z as z2 } from "zod";
 
+// server/modules/emergencyExit.ts
+import { eq as eq2 } from "drizzle-orm";
+
+// server/modules/exchange/binance.ts
+var TIMEFRAME_MAP = {
+  "1m": "1m",
+  "5m": "5m",
+  "15m": "15m",
+  "1h": "1h",
+  "4h": "4h",
+  "1d": "1d"
+};
+var BinanceAdapter = class {
+  name = "binance";
+  baseUrl;
+  constructor(baseUrl = process.env.BINANCE_API_BASE_URL ?? "https://testnet.binance.vision") {
+    this.baseUrl = baseUrl.replace(/\/$/, "");
+  }
+  async fetchCandles(args) {
+    const params = new URLSearchParams({
+      symbol: args.symbol,
+      interval: TIMEFRAME_MAP[args.timeframe],
+      limit: String(Math.min(1e3, args.limit))
+    });
+    if (args.endTime) params.set("endTime", String(args.endTime));
+    const url = `${this.baseUrl}/api/v3/klines?${params}`;
+    const res = await fetch(url);
+    if (!res.ok) {
+      const text2 = await res.text().catch(() => "");
+      throw new Error(`binance klines ${res.status}: ${text2}`);
+    }
+    const rows = await res.json();
+    return rows.map((r) => ({
+      openTime: Number(r[0]),
+      open: Number(r[1]),
+      high: Number(r[2]),
+      low: Number(r[3]),
+      close: Number(r[4]),
+      volume: Number(r[5]),
+      closeTime: Number(r[6])
+    }));
+  }
+  async fetchPrice(symbol) {
+    const res = await fetch(`${this.baseUrl}/api/v3/ticker/price?symbol=${symbol}`);
+    if (!res.ok) throw new Error(`binance ticker ${res.status}`);
+    const body = await res.json();
+    return Number(body.price);
+  }
+};
+var singleton = null;
+function getBinance() {
+  if (!singleton) singleton = new BinanceAdapter();
+  return singleton;
+}
+
 // server/modules/whatsapp.ts
 var twilioConfigured = Boolean(
   process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_WHATSAPP_FROM
@@ -783,6 +838,33 @@ async function sendUrgentAlert(alert) {
 // server/modules/emergencyExit.ts
 async function emergencyMarketExit(tenantId, userId) {
   const openTrades = await storage.listOpenTrades(tenantId);
+  const [tenant] = await db.select().from(tenants).where(eq2(tenants.id, tenantId));
+  let markPrice = null;
+  if (tenant?.activePairId) {
+    const [pair] = await db.select().from(marketPairs).where(eq2(marketPairs.id, tenant.activePairId));
+    if (pair) {
+      const symbol = `${pair.baseAsset}${pair.quoteAsset}`;
+      try {
+        markPrice = await getBinance().fetchPrice(symbol);
+      } catch (err) {
+        console.error("[emergency-exit] failed to fetch mark price", err);
+      }
+    }
+  }
+  const results = [];
+  for (const t of openTrades) {
+    const entry = Number(t.entryPrice);
+    const size = Number(t.size);
+    const exitPrice = markPrice ?? entry;
+    const realisedPnl = t.side === "long" ? (exitPrice - entry) * size : (entry - exitPrice) * size;
+    await storage.closeTrade({
+      tradeId: t.id,
+      exitPrice,
+      realisedPnl,
+      reason: "emergency"
+    });
+    results.push({ tradeId: t.id, exitPrice, realisedPnl });
+  }
   await storage.setBotStatus(tenantId, "halted", "emergency_market_exit");
   await storage.recordRiskEvent({
     tenantId,
@@ -790,21 +872,23 @@ async function emergencyMarketExit(tenantId, userId) {
     severity: "critical",
     detail: {
       openTradeCount: openTrades.length,
-      tradeIds: openTrades.map((t) => t.id)
+      markPrice,
+      results
     },
     triggeredByUserId: userId
   });
   sendUrgentAlert({
     tenantId,
     title: "Emergency market exit executed",
-    body: `All open positions closed. ${openTrades.length} trade(s) affected. Bot is now OFF.`
+    body: `${openTrades.length} trade(s) closed at ${markPrice ?? "entry"}. Bot is now halted.`
   }).catch((err) => {
     console.error("[emergency-exit] alert dispatch failed", err);
   });
   return {
     ok: true,
     closedCount: openTrades.length,
-    tradeIds: openTrades.map((t) => t.id)
+    markPrice,
+    results
   };
 }
 
