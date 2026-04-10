@@ -49,7 +49,10 @@ export default function Dashboard() {
       });
       return r.json();
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/tenant"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/tenant"] });
+      qc.invalidateQueries({ queryKey: ["/api/tenant/decisions"] });
+    },
   });
 
   const emergencyExit = useMutation({
@@ -57,7 +60,11 @@ export default function Dashboard() {
       const r = await apiRequest("/api/tenant/emergency-exit", { method: "POST" });
       return r.json();
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/tenant"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/tenant"] });
+      qc.invalidateQueries({ queryKey: ["/api/tenant/trades"] });
+      qc.invalidateQueries({ queryKey: ["/api/tenant/decisions"] });
+    },
   });
 
   const logout = () =>
