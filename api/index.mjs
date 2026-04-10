@@ -384,6 +384,33 @@ var db = drizzle(pool, { schema: schema_exports });
 
 // server/storage.ts
 import { eq, and, desc, sql as sql2 } from "drizzle-orm";
+
+// server/cryptoUtil.ts
+import crypto from "crypto";
+var ALGO = "aes-256-gcm";
+function getKey() {
+  const hex = process.env.EXCHANGE_KEY_ENCRYPTION_KEY;
+  if (!hex) throw new Error("EXCHANGE_KEY_ENCRYPTION_KEY not set");
+  const buf = Buffer.from(hex, "hex");
+  if (buf.length !== 32) {
+    throw new Error(
+      `EXCHANGE_KEY_ENCRYPTION_KEY must be 32 bytes hex (got ${buf.length})`
+    );
+  }
+  return buf;
+}
+function encryptSecret(plaintext) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv(ALGO, getKey(), iv);
+  const ct = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+  return {
+    ciphertext: ct.toString("base64"),
+    iv: iv.toString("base64"),
+    authTag: cipher.getAuthTag().toString("base64")
+  };
+}
+
+// server/storage.ts
 var storage = {
   // ---------- Users ----------
   async getUserById(id) {
@@ -540,6 +567,43 @@ var storage = {
       detail: input.detail,
       triggeredByUserId: input.triggeredByUserId
     });
+  },
+  async listBotDecisions(tenantId, limit = 50) {
+    return db.select().from(botDecisions).where(eq(botDecisions.tenantId, tenantId)).orderBy(desc(botDecisions.createdAt)).limit(limit);
+  },
+  async updateTenantConfig(tenantId, patch) {
+    await db.update(tenantConfigs).set({ ...patch, updatedAt: /* @__PURE__ */ new Date() }).where(eq(tenantConfigs.tenantId, tenantId));
+  },
+  async setActivePair(tenantId, pairId) {
+    await db.update(tenants).set({ activePairId: pairId }).where(eq(tenants.id, tenantId));
+  },
+  async saveExchangeKey(input) {
+    const keyBlob = encryptSecret(input.apiKey);
+    const secretBlob = encryptSecret(input.apiSecret);
+    await db.delete(exchangeKeys).where(
+      and(
+        eq(exchangeKeys.tenantId, input.tenantId),
+        eq(exchangeKeys.exchange, input.exchange)
+      )
+    );
+    await db.insert(exchangeKeys).values({
+      tenantId: input.tenantId,
+      exchange: input.exchange,
+      apiKeyCiphertext: keyBlob.ciphertext,
+      apiKeyIv: keyBlob.iv,
+      apiKeyAuthTag: keyBlob.authTag,
+      apiSecretCiphertext: secretBlob.ciphertext,
+      apiSecretIv: secretBlob.iv,
+      apiSecretAuthTag: secretBlob.authTag
+    });
+  },
+  async listExchangeKeyMetadata(tenantId) {
+    return db.select({
+      id: exchangeKeys.id,
+      exchange: exchangeKeys.exchange,
+      permissionsValidatedAt: exchangeKeys.permissionsValidatedAt,
+      createdAt: exchangeKeys.createdAt
+    }).from(exchangeKeys).where(eq(exchangeKeys.tenantId, tenantId));
   }
 };
 
@@ -824,7 +888,14 @@ function getUser(req) {
   return req.user;
 }
 function getIp(req) {
-  return req.headers["x-forwarded-for"] || req.ip || "unknown";
+  const xff = req.headers["x-forwarded-for"];
+  if (typeof xff === "string") return xff.split(",")[0].trim();
+  if (Array.isArray(xff) && xff.length) return xff[0];
+  return req.ip || "unknown";
+}
+function pid(req, key) {
+  const v = req.params[key];
+  return Array.isArray(v) ? v[0] : v;
 }
 function registerRoutes(app2) {
   app2.get("/api/auth/user", isAuthenticated, async (req, res) => {
@@ -902,6 +973,95 @@ function registerRoutes(app2) {
     const profile = getRegimeProfile(toRegime);
     res.json({ ok: true, fromRegime, toRegime, profile });
   });
+  app2.get("/api/tenant/decisions", isAuthenticated, async (req, res) => {
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    res.json(await storage.listBotDecisions(tenant.id));
+  });
+  app2.patch("/api/tenant/config", isAuthenticated, async (req, res) => {
+    const schema = z2.object({
+      riskPercentPerTrade: z2.string().optional(),
+      maxConcurrentPositions: z2.number().int().min(1).max(10).optional(),
+      dailyDrawdownLimitPct: z2.string().optional(),
+      weeklyDrawdownLimitPct: z2.string().optional(),
+      minRiskRewardRatio: z2.string().optional(),
+      minLevelRank: z2.number().int().min(1).max(5).optional()
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: "invalid" });
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    await storage.updateTenantConfig(tenant.id, parsed.data);
+    audit({
+      userId: u.id,
+      tenantId: tenant.id,
+      action: "update_tenant_config",
+      outcome: "success",
+      detail: parsed.data,
+      ipAddress: getIp(req)
+    });
+    res.json({ ok: true });
+  });
+  app2.patch("/api/tenant/pair", isAuthenticated, async (req, res) => {
+    const { pairId } = z2.object({ pairId: z2.string().uuid().nullable() }).parse(req.body);
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    await storage.setActivePair(tenant.id, pairId);
+    audit({
+      userId: u.id,
+      tenantId: tenant.id,
+      action: "set_active_pair",
+      outcome: "success",
+      detail: { pairId },
+      ipAddress: getIp(req)
+    });
+    res.json({ ok: true });
+  });
+  app2.patch("/api/tenant/bot-status", isAuthenticated, async (req, res) => {
+    const { status } = z2.object({ status: z2.enum(["off", "active", "paused"]) }).parse(req.body);
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    if (status === "active" && tenant.activeRegime === "no_trade") {
+      return res.status(400).json({ error: "regime_required" });
+    }
+    await storage.setBotStatus(tenant.id, status);
+    audit({
+      userId: u.id,
+      tenantId: tenant.id,
+      action: "set_bot_status",
+      outcome: "success",
+      detail: { status },
+      ipAddress: getIp(req)
+    });
+    res.json({ ok: true });
+  });
+  app2.get("/api/tenant/exchange-keys", isAuthenticated, async (req, res) => {
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    res.json(await storage.listExchangeKeyMetadata(tenant.id));
+  });
+  app2.post("/api/tenant/exchange-keys", isAuthenticated, async (req, res) => {
+    const schema = z2.object({
+      exchange: z2.enum(["binance", "bybit"]),
+      apiKey: z2.string().min(10).max(256),
+      apiSecret: z2.string().min(10).max(256)
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: "invalid" });
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    await storage.saveExchangeKey({ ...parsed.data, tenantId: tenant.id });
+    audit({
+      userId: u.id,
+      tenantId: tenant.id,
+      action: "save_exchange_key",
+      resourceType: "exchange_key",
+      outcome: "success",
+      detail: { exchange: parsed.data.exchange },
+      ipAddress: getIp(req)
+    });
+    res.json({ ok: true });
+  });
   app2.post("/api/tenant/emergency-exit", isAuthenticated, async (req, res) => {
     const u = getUser(req);
     const tenant = await storage.getOrCreateTenantForUser(u.id);
@@ -928,12 +1088,12 @@ function registerRoutes(app2) {
     isAdmin,
     async (req, res) => {
       const { isAdmin: flag } = z2.object({ isAdmin: z2.boolean() }).parse(req.body);
-      await storage.setAdmin(req.params.id, flag);
+      await storage.setAdmin(pid(req, "id"), flag);
       audit({
         userId: getUser(req).id,
         action: "set_admin",
         resourceType: "user",
-        resourceId: req.params.id,
+        resourceId: pid(req, "id"),
         outcome: "success",
         detail: { isAdmin: flag },
         ipAddress: getIp(req)
@@ -947,12 +1107,12 @@ function registerRoutes(app2) {
     isAdmin,
     async (req, res) => {
       const { isSuspended } = z2.object({ isSuspended: z2.boolean() }).parse(req.body);
-      await storage.setSuspended(req.params.id, isSuspended);
+      await storage.setSuspended(pid(req, "id"), isSuspended);
       audit({
         userId: getUser(req).id,
         action: "set_suspended",
         resourceType: "user",
-        resourceId: req.params.id,
+        resourceId: pid(req, "id"),
         outcome: "success",
         detail: { isSuspended },
         ipAddress: getIp(req)
@@ -983,12 +1143,12 @@ function registerRoutes(app2) {
     isAuthenticated,
     isAdmin,
     async (req, res) => {
-      await storage.removeInvite(req.params.id);
+      await storage.removeInvite(pid(req, "id"));
       audit({
         userId: getUser(req).id,
         action: "remove_invite",
         resourceType: "invite",
-        resourceId: req.params.id,
+        resourceId: pid(req, "id"),
         outcome: "success",
         ipAddress: getIp(req)
       });
@@ -1009,12 +1169,12 @@ function registerRoutes(app2) {
     isAdmin,
     async (req, res) => {
       const { status } = z2.object({ status: z2.enum(["approved", "declined"]) }).parse(req.body);
-      await storage.decideAccessRequest(req.params.id, status, getUser(req).id);
+      await storage.decideAccessRequest(pid(req, "id"), status, getUser(req).id);
       audit({
         userId: getUser(req).id,
         action: "decide_access_request",
         resourceType: "access_request",
-        resourceId: req.params.id,
+        resourceId: pid(req, "id"),
         outcome: "success",
         detail: { status },
         ipAddress: getIp(req)
@@ -1060,12 +1220,12 @@ function registerRoutes(app2) {
     res.json(row);
   });
   app2.patch("/api/admin/pairs/:id", isAuthenticated, isAdmin, async (req, res) => {
-    await storage.updatePair(req.params.id, req.body);
+    await storage.updatePair(pid(req, "id"), req.body);
     audit({
       userId: getUser(req).id,
       action: "update_pair",
       resourceType: "market_pair",
-      resourceId: req.params.id,
+      resourceId: pid(req, "id"),
       outcome: "success",
       ipAddress: getIp(req)
     });

@@ -4,6 +4,7 @@ import cors from "cors";
 import rateLimit from "express-rate-limit";
 import { setupAuth } from "./auth";
 import { registerRoutes } from "./routes";
+import { startBotRunner } from "./modules/botRunner";
 
 const app = express();
 const PORT = Number(process.env.PORT || 5000);
@@ -81,4 +82,5 @@ app.listen(PORT, () => {
   console.log(
     `[phoenix-v96] paper-trading=${process.env.PAPER_TRADING_MODE} env=${process.env.NODE_ENV}`
   );
+  startBotRunner();
 });

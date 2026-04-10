@@ -81,6 +81,9 @@ export default function Dashboard() {
                 PAPER TRADING
               </Badge>
             )}
+            <Link href="/settings">
+              <Button variant="outline" size="sm">Settings</Button>
+            </Link>
             {user?.isAdmin && (
               <Link href="/admin">
                 <Button variant="outline" size="sm">Admin</Button>
@@ -184,8 +187,94 @@ export default function Dashboard() {
             </CardContent>
           </Card>
         </div>
+
+        <TradeLogPanel />
+        <DecisionsPanel />
       </main>
     </div>
+  );
+}
+
+function TradeLogPanel() {
+  const { data } = useQuery<any[]>({ queryKey: ["/api/tenant/trades"] });
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Trade log</CardTitle>
+        <CardDescription>Every entry, exit, and stop-out with full reasoning (PRD §5.8).</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {data?.length ? (
+          <div className="space-y-1 font-mono text-xs">
+            <div className="grid grid-cols-12 gap-2 border-b border-border pb-1 text-muted-foreground">
+              <span className="col-span-2">Opened</span>
+              <span>Side</span>
+              <span>Mode</span>
+              <span>Regime</span>
+              <span className="text-right">Entry</span>
+              <span className="text-right">Stop</span>
+              <span className="text-right">Target</span>
+              <span className="text-right">Size</span>
+              <span className="text-right">R:R</span>
+              <span>Status</span>
+              <span className="text-right">P&amp;L</span>
+            </div>
+            {data.map((t) => (
+              <div key={t.id} className="grid grid-cols-12 gap-2 border-b border-border/30 py-1">
+                <span className="col-span-2 text-muted-foreground">
+                  {new Date(t.openedAt).toLocaleString()}
+                </span>
+                <span className={t.side === "long" ? "text-emerald-400" : "text-red-400"}>{t.side}</span>
+                <span>{t.setupMode}</span>
+                <span>{t.regimeAtEntry}</span>
+                <span className="text-right">{Number(t.entryPrice).toFixed(2)}</span>
+                <span className="text-right">{Number(t.stopPrice).toFixed(2)}</span>
+                <span className="text-right">{Number(t.targetPrice).toFixed(2)}</span>
+                <span className="text-right">{Number(t.size).toFixed(4)}</span>
+                <span className="text-right">{Number(t.plannedRR).toFixed(2)}</span>
+                <span>{t.status}</span>
+                <span className={`text-right ${Number(t.realisedPnl) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                  {t.realisedPnl != null ? Number(t.realisedPnl).toFixed(2) : "—"}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground">No trades yet. The bot logs every entry here with its full reasoning.</p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function DecisionsPanel() {
+  const { data } = useQuery<any[]>({ queryKey: ["/api/tenant/decisions"] });
+  if (!data?.length) return null;
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Recent bot decisions</CardTitle>
+        <CardDescription>
+          Every tick the bot evaluates the market. Skips are recorded with reasoning so you can see why nothing fired.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-1 font-mono text-xs">
+          {data.slice(0, 30).map((d) => (
+            <div key={d.id} className="flex gap-3 border-b border-border/30 py-1">
+              <span className="text-muted-foreground">{new Date(d.createdAt).toLocaleTimeString()}</span>
+              <span className={
+                d.decisionType === "entry" ? "text-primary" :
+                d.decisionType === "halt" ? "text-destructive" :
+                "text-muted-foreground"
+              }>{d.decisionType}</span>
+              <span>{d.regime}</span>
+              <span className="truncate">{d.reasoning}</span>
+            </div>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 

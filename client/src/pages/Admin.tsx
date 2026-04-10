@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { apiRequest } from "@/lib/queryClient";
 
-type Tab = "users" | "invites" | "requests" | "audit" | "security";
+type Tab = "users" | "invites" | "requests" | "pairs" | "audit" | "security";
 
 export default function Admin() {
   const [tab, setTab] = useState<Tab>("users");
@@ -22,7 +22,7 @@ export default function Admin() {
           <Link href="/"><Button variant="outline" size="sm">← Dashboard</Button></Link>
         </div>
         <div className="mx-auto flex max-w-6xl gap-1 px-6">
-          {(["users", "invites", "requests", "audit", "security"] as Tab[]).map((t) => (
+          {(["users", "invites", "requests", "pairs", "audit", "security"] as Tab[]).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -41,6 +41,7 @@ export default function Admin() {
         {tab === "users" && <UsersTab />}
         {tab === "invites" && <InvitesTab />}
         {tab === "requests" && <RequestsTab />}
+        {tab === "pairs" && <PairsTab />}
         {tab === "audit" && <AuditTab />}
         {tab === "security" && <SecurityTab />}
       </main>
@@ -233,6 +234,98 @@ function Stat({ label, value }: { label: string; value: number | string }) {
     <div>
       <div className="text-xs uppercase tracking-wide text-muted-foreground">{label}</div>
       <div className="mt-1 text-2xl font-semibold">{value}</div>
+    </div>
+  );
+}
+
+function PairsTab() {
+  const qc = useQueryClient();
+  const { data } = useQuery<any[]>({ queryKey: ["/api/admin/pairs"] });
+  const [form, setForm] = useState({
+    baseAsset: "BTC",
+    quoteAsset: "USDT",
+    displayName: "Bitcoin / Tether",
+    exchange: "binance",
+    minOrderSize: "0.0001",
+    liquidityRating: "high",
+  });
+
+  const create = useMutation({
+    mutationFn: async () => {
+      await apiRequest("/api/admin/pairs", {
+        method: "POST",
+        body: JSON.stringify({
+          baseAsset: form.baseAsset,
+          quoteAsset: form.quoteAsset,
+          displayName: form.displayName,
+          supportedExchanges: [form.exchange],
+          minOrderSize: form.minOrderSize,
+          liquidityRating: form.liquidityRating,
+        }),
+      });
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/admin/pairs"] }),
+  });
+
+  const toggle = useMutation({
+    mutationFn: async ({ id, enabled }: { id: string; enabled: boolean }) => {
+      await apiRequest(`/api/admin/pairs/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ enabled }),
+      });
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/admin/pairs"] }),
+  });
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader>
+          <CardTitle>Add market pair</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <form
+            onSubmit={(e) => { e.preventDefault(); create.mutate(); }}
+            className="grid gap-3 md:grid-cols-6"
+          >
+            <Input placeholder="Base (BTC)" value={form.baseAsset}
+              onChange={(e) => setForm({ ...form, baseAsset: e.target.value.toUpperCase() })} />
+            <Input placeholder="Quote (USDT)" value={form.quoteAsset}
+              onChange={(e) => setForm({ ...form, quoteAsset: e.target.value.toUpperCase() })} />
+            <Input placeholder="Display name" value={form.displayName}
+              onChange={(e) => setForm({ ...form, displayName: e.target.value })} className="md:col-span-2" />
+            <Input placeholder="Min order size" value={form.minOrderSize}
+              onChange={(e) => setForm({ ...form, minOrderSize: e.target.value })} />
+            <Button type="submit" disabled={create.isPending}>Add</Button>
+          </form>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle>Registry</CardTitle></CardHeader>
+        <CardContent className="space-y-2">
+          {data?.length ? data.map((p) => (
+            <div key={p.id} className="flex items-center justify-between border-b border-border/50 py-2">
+              <div>
+                <div className="text-sm font-medium">
+                  {p.displayName}{" "}
+                  <Badge className={p.enabled ? "bg-primary/20 text-primary" : "bg-muted text-muted-foreground"}>
+                    {p.enabled ? "enabled" : "disabled"}
+                  </Badge>
+                  <Badge className="ml-1">{p.liquidityRating}</Badge>
+                </div>
+                <div className="font-mono text-xs text-muted-foreground">
+                  {p.baseAsset}/{p.quoteAsset} · {(p.supportedExchanges as string[]).join(", ")} · min {p.minOrderSize}
+                </div>
+              </div>
+              <Button size="sm" variant="outline"
+                onClick={() => toggle.mutate({ id: p.id, enabled: !p.enabled })}>
+                {p.enabled ? "Disable" : "Enable"}
+              </Button>
+            </div>
+          )) : <p className="text-sm text-muted-foreground">No pairs yet. Add BTC/USDT above to get started.</p>}
+        </CardContent>
+      </Card>
     </div>
   );
 }

@@ -9,6 +9,8 @@ import {
   auditLogs,
   marketPairs,
   trades,
+  botDecisions,
+  exchangeKeys,
   regimeChanges,
   riskEvents,
   type User,
@@ -16,6 +18,7 @@ import {
   type Tenant,
   type Regime,
 } from "../shared/schema";
+import { encryptSecret } from "./cryptoUtil";
 
 // Database query layer. All queries go through here — no inline SQL or Drizzle
 // calls scattered across routes.ts.
@@ -298,5 +301,74 @@ export const storage = {
       detail: input.detail as object,
       triggeredByUserId: input.triggeredByUserId,
     });
+  },
+
+  async listBotDecisions(tenantId: string, limit = 50) {
+    return db
+      .select()
+      .from(botDecisions)
+      .where(eq(botDecisions.tenantId, tenantId))
+      .orderBy(desc(botDecisions.createdAt))
+      .limit(limit);
+  },
+
+  async updateTenantConfig(
+    tenantId: string,
+    patch: Partial<typeof tenantConfigs.$inferInsert>
+  ) {
+    await db
+      .update(tenantConfigs)
+      .set({ ...patch, updatedAt: new Date() })
+      .where(eq(tenantConfigs.tenantId, tenantId));
+  },
+
+  async setActivePair(tenantId: string, pairId: string | null) {
+    await db
+      .update(tenants)
+      .set({ activePairId: pairId })
+      .where(eq(tenants.id, tenantId));
+  },
+
+  async saveExchangeKey(input: {
+    tenantId: string;
+    exchange: string;
+    apiKey: string;
+    apiSecret: string;
+  }) {
+    const keyBlob = encryptSecret(input.apiKey);
+    const secretBlob = encryptSecret(input.apiSecret);
+    // One key per tenant+exchange — replace if exists.
+    await db
+      .delete(exchangeKeys)
+      .where(
+        and(
+          eq(exchangeKeys.tenantId, input.tenantId),
+          eq(exchangeKeys.exchange, input.exchange)
+        )
+      );
+    await db.insert(exchangeKeys).values({
+      tenantId: input.tenantId,
+      exchange: input.exchange,
+      apiKeyCiphertext: keyBlob.ciphertext,
+      apiKeyIv: keyBlob.iv,
+      apiKeyAuthTag: keyBlob.authTag,
+      apiSecretCiphertext: secretBlob.ciphertext,
+      apiSecretIv: secretBlob.iv,
+      apiSecretAuthTag: secretBlob.authTag,
+    });
+  },
+
+  async listExchangeKeyMetadata(tenantId: string) {
+    // Return only metadata — NEVER decrypt for listing purposes.
+    // PRD §12.3 — keys are never visible after entry.
+    return db
+      .select({
+        id: exchangeKeys.id,
+        exchange: exchangeKeys.exchange,
+        permissionsValidatedAt: exchangeKeys.permissionsValidatedAt,
+        createdAt: exchangeKeys.createdAt,
+      })
+      .from(exchangeKeys)
+      .where(eq(exchangeKeys.tenantId, tenantId));
   },
 };

@@ -17,7 +17,15 @@ function getUser(req: Request) {
 }
 
 function getIp(req: Request): string {
-  return (req.headers["x-forwarded-for"] as string) || req.ip || "unknown";
+  const xff = req.headers["x-forwarded-for"];
+  if (typeof xff === "string") return xff.split(",")[0].trim();
+  if (Array.isArray(xff) && xff.length) return xff[0];
+  return req.ip || "unknown";
+}
+
+function pid(req: Request, key: string): string {
+  const v = (req.params as Record<string, string | string[]>)[key];
+  return Array.isArray(v) ? v[0] : v;
 }
 
 export function registerRoutes(app: Express) {
@@ -106,6 +114,104 @@ export function registerRoutes(app: Express) {
     res.json({ ok: true, fromRegime, toRegime, profile });
   });
 
+  app.get("/api/tenant/decisions", isAuthenticated, async (req, res) => {
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    res.json(await storage.listBotDecisions(tenant.id));
+  });
+
+  app.patch("/api/tenant/config", isAuthenticated, async (req, res) => {
+    const schema = z.object({
+      riskPercentPerTrade: z.string().optional(),
+      maxConcurrentPositions: z.number().int().min(1).max(10).optional(),
+      dailyDrawdownLimitPct: z.string().optional(),
+      weeklyDrawdownLimitPct: z.string().optional(),
+      minRiskRewardRatio: z.string().optional(),
+      minLevelRank: z.number().int().min(1).max(5).optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: "invalid" });
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    await storage.updateTenantConfig(tenant.id, parsed.data);
+    audit({
+      userId: u.id,
+      tenantId: tenant.id,
+      action: "update_tenant_config",
+      outcome: "success",
+      detail: parsed.data,
+      ipAddress: getIp(req),
+    });
+    res.json({ ok: true });
+  });
+
+  app.patch("/api/tenant/pair", isAuthenticated, async (req, res) => {
+    const { pairId } = z.object({ pairId: z.string().uuid().nullable() }).parse(req.body);
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    await storage.setActivePair(tenant.id, pairId);
+    audit({
+      userId: u.id,
+      tenantId: tenant.id,
+      action: "set_active_pair",
+      outcome: "success",
+      detail: { pairId },
+      ipAddress: getIp(req),
+    });
+    res.json({ ok: true });
+  });
+
+  app.patch("/api/tenant/bot-status", isAuthenticated, async (req, res) => {
+    const { status } = z
+      .object({ status: z.enum(["off", "active", "paused"]) })
+      .parse(req.body);
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    // Switching ON requires an active regime other than NO TRADE per PRD §3.2
+    if (status === "active" && tenant.activeRegime === "no_trade") {
+      return res.status(400).json({ error: "regime_required" });
+    }
+    await storage.setBotStatus(tenant.id, status);
+    audit({
+      userId: u.id,
+      tenantId: tenant.id,
+      action: "set_bot_status",
+      outcome: "success",
+      detail: { status },
+      ipAddress: getIp(req),
+    });
+    res.json({ ok: true });
+  });
+
+  app.get("/api/tenant/exchange-keys", isAuthenticated, async (req, res) => {
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    res.json(await storage.listExchangeKeyMetadata(tenant.id));
+  });
+
+  app.post("/api/tenant/exchange-keys", isAuthenticated, async (req, res) => {
+    const schema = z.object({
+      exchange: z.enum(["binance", "bybit"]),
+      apiKey: z.string().min(10).max(256),
+      apiSecret: z.string().min(10).max(256),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: "invalid" });
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    await storage.saveExchangeKey({ ...parsed.data, tenantId: tenant.id });
+    audit({
+      userId: u.id,
+      tenantId: tenant.id,
+      action: "save_exchange_key",
+      resourceType: "exchange_key",
+      outcome: "success",
+      detail: { exchange: parsed.data.exchange },
+      ipAddress: getIp(req),
+    });
+    res.json({ ok: true });
+  });
+
   app.post("/api/tenant/emergency-exit", isAuthenticated, async (req, res) => {
     const u = getUser(req);
     const tenant = await storage.getOrCreateTenantForUser(u.id);
@@ -139,12 +245,12 @@ export function registerRoutes(app: Express) {
       const { isAdmin: flag } = z
         .object({ isAdmin: z.boolean() })
         .parse(req.body);
-      await storage.setAdmin(req.params.id, flag);
+      await storage.setAdmin(pid(req, "id"), flag);
       audit({
         userId: getUser(req).id,
         action: "set_admin",
         resourceType: "user",
-        resourceId: req.params.id,
+        resourceId: pid(req, "id"),
         outcome: "success",
         detail: { isAdmin: flag },
         ipAddress: getIp(req),
@@ -161,12 +267,12 @@ export function registerRoutes(app: Express) {
       const { isSuspended } = z
         .object({ isSuspended: z.boolean() })
         .parse(req.body);
-      await storage.setSuspended(req.params.id, isSuspended);
+      await storage.setSuspended(pid(req, "id"), isSuspended);
       audit({
         userId: getUser(req).id,
         action: "set_suspended",
         resourceType: "user",
-        resourceId: req.params.id,
+        resourceId: pid(req, "id"),
         outcome: "success",
         detail: { isSuspended },
         ipAddress: getIp(req),
@@ -201,12 +307,12 @@ export function registerRoutes(app: Express) {
     isAuthenticated,
     isAdmin,
     async (req, res) => {
-      await storage.removeInvite(req.params.id);
+      await storage.removeInvite(pid(req, "id"));
       audit({
         userId: getUser(req).id,
         action: "remove_invite",
         resourceType: "invite",
-        resourceId: req.params.id,
+        resourceId: pid(req, "id"),
         outcome: "success",
         ipAddress: getIp(req),
       });
@@ -232,12 +338,12 @@ export function registerRoutes(app: Express) {
       const { status } = z
         .object({ status: z.enum(["approved", "declined"]) })
         .parse(req.body);
-      await storage.decideAccessRequest(req.params.id, status, getUser(req).id);
+      await storage.decideAccessRequest(pid(req, "id"), status, getUser(req).id);
       audit({
         userId: getUser(req).id,
         action: "decide_access_request",
         resourceType: "access_request",
-        resourceId: req.params.id,
+        resourceId: pid(req, "id"),
         outcome: "success",
         detail: { status },
         ipAddress: getIp(req),
@@ -290,12 +396,12 @@ export function registerRoutes(app: Express) {
   });
 
   app.patch("/api/admin/pairs/:id", isAuthenticated, isAdmin, async (req, res) => {
-    await storage.updatePair(req.params.id, req.body);
+    await storage.updatePair(pid(req, "id"), req.body);
     audit({
       userId: getUser(req).id,
       action: "update_pair",
       resourceType: "market_pair",
-      resourceId: req.params.id,
+      resourceId: pid(req, "id"),
       outcome: "success",
       ipAddress: getIp(req),
     });
