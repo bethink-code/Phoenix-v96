@@ -128,13 +128,14 @@ export function detectRegime(candles: Candle[]): RegimeSuggestion {
   }
 
   // Rule 4: Breakout — price pinned at top or bottom of 20-bar range
-  if (rangePosition != null && (rangePosition > 0.95 || rangePosition < 0.05)) {
+  if (rangePosition != null && (rangePosition > 0.9 || rangePosition < 0.1)) {
+    const edge = rangePosition > 0.9 ? "top" : "bottom";
     return {
       regime: "breakout",
-      confidence: 0.65,
+      confidence: clamp(0.55 + Math.abs(rangePosition - 0.5) * 0.4, 0.55, 0.85),
       signals,
       rationale: [
-        `Price is at the ${rangePosition > 0.95 ? "top" : "bottom"} of its 20-bar range (${(rangePosition * 100).toFixed(0)}%).`,
+        `Price is at the ${edge} of its 20-bar range (${(rangePosition * 100).toFixed(0)}%).`,
         `ADX is ${signals.adx?.toFixed(1) ?? "?"} — not trending hard yet, but pressing on the edge.`,
         "Treating this as breakout risk: confirmation entries only, tighter R:R.",
       ],
@@ -228,16 +229,40 @@ function computeADX(candles: Candle[], period: number): number[] {
   return wilderSmoothing(dx, period);
 }
 
+// Wilder smoothing that handles nested computation correctly: skips
+// leading NaN values (produced by an earlier smoothing pass), finds the
+// first window of `period` consecutive finite values, seeds from there,
+// and continues forward. Without this, computeADX poisons its own second
+// smoothing pass because the first (period-1) DX values are NaN.
 function wilderSmoothing(values: number[], period: number): number[] {
-  const out: number[] = [];
-  if (values.length < period) return values.map(() => NaN);
-  let sum = 0;
-  for (let i = 0; i < period; i++) sum += values[i];
-  out[period - 1] = sum / period;
-  for (let i = period; i < values.length; i++) {
-    out[i] = (out[i - 1] * (period - 1) + values[i]) / period;
+  const out: number[] = values.map(() => NaN);
+  let start = -1;
+  for (let i = 0; i + period <= values.length; i++) {
+    let allFinite = true;
+    for (let j = i; j < i + period; j++) {
+      if (!Number.isFinite(values[j])) {
+        allFinite = false;
+        break;
+      }
+    }
+    if (allFinite) {
+      start = i;
+      break;
+    }
   }
-  for (let i = 0; i < period - 1; i++) out[i] = NaN;
+  if (start < 0) return out;
+
+  let sum = 0;
+  for (let i = start; i < start + period; i++) sum += values[i];
+  out[start + period - 1] = sum / period;
+
+  for (let i = start + period; i < values.length; i++) {
+    const prev = out[i - 1];
+    const cur = values[i];
+    if (Number.isFinite(prev) && Number.isFinite(cur)) {
+      out[i] = (prev * (period - 1) + cur) / period;
+    }
+  }
   return out;
 }
 
