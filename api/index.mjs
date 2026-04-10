@@ -847,6 +847,12 @@ function setupAuth(app2) {
     req.logout((err) => {
       if (err) return next(err);
       req.session.destroy(() => {
+        res.clearCookie("connect.sid", {
+          path: "/",
+          httpOnly: true,
+          secure: isProd2,
+          sameSite: "lax"
+        });
         audit({ userId: uid, action: "logout", outcome: "success" });
         res.json({ ok: true });
       });
@@ -1495,11 +1501,13 @@ function registerRoutes(app2) {
 // server/api.ts
 var app = express();
 var isProd = process.env.NODE_ENV === "production";
+var appUrl = process.env.APP_URL ?? "";
 var allowedOrigins = [
   "http://localhost:5000",
   "http://localhost:5173",
-  process.env.APP_URL
-].filter(Boolean);
+  appUrl,
+  appUrl.includes("://www.") ? appUrl.replace("://www.", "://") : appUrl.replace("://", "://www.")
+].filter((s) => s && s.length > 0);
 app.use(
   helmet({
     contentSecurityPolicy: isProd ? void 0 : false,

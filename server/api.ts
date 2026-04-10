@@ -10,11 +10,16 @@ import { registerRoutes } from "./routes";
 const app = express();
 const isProd = process.env.NODE_ENV === "production";
 
+// Accept the APP_URL both with and without the www prefix. Browsers send
+// an Origin header on POST even for same-origin requests, and if we only
+// whitelist one variant, requests from the other get rejected as CORS.
+const appUrl = process.env.APP_URL ?? "";
 const allowedOrigins = [
   "http://localhost:5000",
   "http://localhost:5173",
-  process.env.APP_URL,
-].filter(Boolean) as string[];
+  appUrl,
+  appUrl.includes("://www.") ? appUrl.replace("://www.", "://") : appUrl.replace("://", "://www."),
+].filter((s) => s && s.length > 0) as string[];
 
 app.use(
   helmet({

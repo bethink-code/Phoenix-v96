@@ -10,11 +10,14 @@ const app = express();
 const PORT = Number(process.env.PORT || 5000);
 const isProd = process.env.NODE_ENV === "production";
 
+// Accept APP_URL with or without www so CORS doesn't reject one variant.
+const appUrl = process.env.APP_URL ?? "";
 const allowedOrigins = [
   "http://localhost:5000",
   "http://localhost:5173",
-  process.env.APP_URL,
-].filter(Boolean) as string[];
+  appUrl,
+  appUrl.includes("://www.") ? appUrl.replace("://www.", "://") : appUrl.replace("://", "://www."),
+].filter((s) => s && s.length > 0) as string[];
 
 app.use(
   helmet({
