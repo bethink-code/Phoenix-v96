@@ -64,6 +64,50 @@ export class BinanceAdapter implements ExchangeAdapter {
     const body = (await res.json()) as { price: string };
     return Number(body.price);
   }
+
+  // Tradable pair listing for the admin registry. Cached for an hour so
+  // the admin UI can hit /api/admin/.../symbols freely without hammering
+  // the exchange.
+  private symbolsCache: SymbolInfo[] | null = null;
+  private symbolsCacheAt = 0;
+
+  async fetchSymbols(): Promise<SymbolInfo[]> {
+    const now = Date.now();
+    if (this.symbolsCache && now - this.symbolsCacheAt < 60 * 60 * 1000) {
+      return this.symbolsCache;
+    }
+    const res = await fetch(`${this.baseUrl}/api/v3/exchangeInfo`);
+    if (!res.ok) throw new Error(`binance exchangeInfo ${res.status}`);
+    const body = (await res.json()) as {
+      symbols: Array<{
+        symbol: string;
+        status: string;
+        baseAsset: string;
+        quoteAsset: string;
+        filters: Array<{ filterType: string; minQty?: string }>;
+      }>;
+    };
+    const out: SymbolInfo[] = body.symbols
+      .filter((s) => s.status === "TRADING")
+      .map((s) => ({
+        symbol: s.symbol,
+        baseAsset: s.baseAsset,
+        quoteAsset: s.quoteAsset,
+        minQty:
+          s.filters.find((f) => f.filterType === "LOT_SIZE")?.minQty ??
+          "0.00000001",
+      }));
+    this.symbolsCache = out;
+    this.symbolsCacheAt = now;
+    return out;
+  }
+}
+
+export interface SymbolInfo {
+  symbol: string;
+  baseAsset: string;
+  quoteAsset: string;
+  minQty: string;
 }
 
 // Singleton — the adapter is stateless so one instance per process is fine.

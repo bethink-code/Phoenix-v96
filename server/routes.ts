@@ -11,6 +11,7 @@ import {
 } from "../shared/schema";
 import { emergencyMarketExit } from "./modules/emergencyExit";
 import { getRegimeProfile } from "./modules/regimeEngine";
+import { getBinance } from "./modules/exchange/binance";
 
 function getUser(req: Request) {
   return req.user as { id: string; email: string; isAdmin: boolean };
@@ -436,6 +437,20 @@ export function registerRoutes(app: Express) {
     });
     res.json({ ok: true });
   });
+
+  app.get(
+    "/api/admin/exchanges/binance/symbols",
+    isAuthenticated,
+    isAdmin,
+    async (_req, res) => {
+      try {
+        const symbols = await getBinance().fetchSymbols();
+        res.json(symbols);
+      } catch (err) {
+        res.status(502).json({ error: (err as Error).message });
+      }
+    }
+  );
 
   app.delete("/api/admin/pairs/:id", isAuthenticated, isAdmin, async (req, res) => {
     const id = pid(req, "id");

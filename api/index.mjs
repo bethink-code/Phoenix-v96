@@ -920,6 +920,29 @@ var BinanceAdapter = class {
     const body = await res.json();
     return Number(body.price);
   }
+  // Tradable pair listing for the admin registry. Cached for an hour so
+  // the admin UI can hit /api/admin/.../symbols freely without hammering
+  // the exchange.
+  symbolsCache = null;
+  symbolsCacheAt = 0;
+  async fetchSymbols() {
+    const now = Date.now();
+    if (this.symbolsCache && now - this.symbolsCacheAt < 60 * 60 * 1e3) {
+      return this.symbolsCache;
+    }
+    const res = await fetch(`${this.baseUrl}/api/v3/exchangeInfo`);
+    if (!res.ok) throw new Error(`binance exchangeInfo ${res.status}`);
+    const body = await res.json();
+    const out = body.symbols.filter((s) => s.status === "TRADING").map((s) => ({
+      symbol: s.symbol,
+      baseAsset: s.baseAsset,
+      quoteAsset: s.quoteAsset,
+      minQty: s.filters.find((f) => f.filterType === "LOT_SIZE")?.minQty ?? "0.00000001"
+    }));
+    this.symbolsCache = out;
+    this.symbolsCacheAt = now;
+    return out;
+  }
 };
 var singleton = null;
 function getBinance() {
@@ -1480,6 +1503,19 @@ function registerRoutes(app2) {
     });
     res.json({ ok: true });
   });
+  app2.get(
+    "/api/admin/exchanges/binance/symbols",
+    isAuthenticated,
+    isAdmin,
+    async (_req, res) => {
+      try {
+        const symbols = await getBinance().fetchSymbols();
+        res.json(symbols);
+      } catch (err) {
+        res.status(502).json({ error: err.message });
+      }
+    }
+  );
   app2.delete("/api/admin/pairs/:id", isAuthenticated, isAdmin, async (req, res) => {
     const id = pid(req, "id");
     const result = await storage.deletePair(id);

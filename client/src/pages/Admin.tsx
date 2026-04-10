@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { apiRequest } from "@/lib/queryClient";
@@ -238,36 +238,69 @@ function Stat({ label, value }: { label: string; value: number | string }) {
   );
 }
 
-const EMPTY_PAIR_FORM = {
-  baseAsset: "",
-  quoteAsset: "USDT",
-  displayName: "",
-  exchange: "binance",
-  minOrderSize: "0.0001",
-  liquidityRating: "high",
+interface BinanceSymbol {
+  symbol: string;
+  baseAsset: string;
+  quoteAsset: string;
+  minQty: string;
+}
+
+const ASSET_NAMES: Record<string, string> = {
+  BTC: "Bitcoin",
+  ETH: "Ethereum",
+  SOL: "Solana",
+  XRP: "XRP",
+  ADA: "Cardano",
+  DOGE: "Dogecoin",
+  LINK: "Chainlink",
+  AVAX: "Avalanche",
+  MATIC: "Polygon",
+  DOT: "Polkadot",
+  USDT: "Tether",
+  USDC: "USD Coin",
+  BNB: "BNB",
+  LTC: "Litecoin",
+  TRX: "Tron",
 };
+const niceAsset = (a: string) => ASSET_NAMES[a] ?? a;
 
 function PairsTab() {
   const qc = useQueryClient();
-  const { data } = useQuery<any[]>({ queryKey: ["/api/admin/pairs"] });
-  const [form, setForm] = useState(EMPTY_PAIR_FORM);
+  const { data: pairs } = useQuery<any[]>({ queryKey: ["/api/admin/pairs"] });
+  const { data: symbols, isLoading: symbolsLoading } = useQuery<BinanceSymbol[]>({
+    queryKey: ["/api/admin/exchanges/binance/symbols"],
+  });
+  const [search, setSearch] = useState("");
+  const [quoteFilter, setQuoteFilter] = useState("USDT");
+
+  const existingSymbols = new Set(
+    (pairs ?? []).map((p) => `${p.baseAsset}${p.quoteAsset}`)
+  );
+
+  const filtered = (symbols ?? [])
+    .filter((s) => s.quoteAsset === quoteFilter)
+    .filter((s) =>
+      search ? s.baseAsset.toUpperCase().includes(search.toUpperCase()) : true
+    )
+    .filter((s) => !existingSymbols.has(s.symbol))
+    .slice(0, 30);
 
   const create = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (sym: BinanceSymbol) => {
       await apiRequest("/api/admin/pairs", {
         method: "POST",
         body: JSON.stringify({
-          baseAsset: form.baseAsset,
-          quoteAsset: form.quoteAsset,
-          displayName: form.displayName,
-          supportedExchanges: [form.exchange],
-          minOrderSize: form.minOrderSize,
-          liquidityRating: form.liquidityRating,
+          baseAsset: sym.baseAsset,
+          quoteAsset: sym.quoteAsset,
+          displayName: `${niceAsset(sym.baseAsset)} / ${niceAsset(sym.quoteAsset)}`,
+          supportedExchanges: ["binance"],
+          minOrderSize: sym.minQty,
+          liquidityRating: ["BTC", "ETH", "SOL"].includes(sym.baseAsset) ? "high" : "medium",
         }),
       });
     },
     onSuccess: () => {
-      setForm(EMPTY_PAIR_FORM);
+      setSearch("");
       qc.invalidateQueries({ queryKey: ["/api/admin/pairs"] });
     },
   });
@@ -302,29 +335,65 @@ function PairsTab() {
       <Card>
         <CardHeader>
           <CardTitle>Add market pair</CardTitle>
+          <CardDescription>
+            Pick from Binance's live pair list. Pair metadata (base, quote, min order size) is fetched directly from the exchange so there's no manual typing.
+          </CardDescription>
         </CardHeader>
-        <CardContent>
-          <form
-            onSubmit={(e) => { e.preventDefault(); create.mutate(); }}
-            className="grid gap-3 md:grid-cols-6"
-          >
-            <Input placeholder="Base (BTC)" value={form.baseAsset}
-              onChange={(e) => setForm({ ...form, baseAsset: e.target.value.toUpperCase() })} />
-            <Input placeholder="Quote (USDT)" value={form.quoteAsset}
-              onChange={(e) => setForm({ ...form, quoteAsset: e.target.value.toUpperCase() })} />
-            <Input placeholder="Display name" value={form.displayName}
-              onChange={(e) => setForm({ ...form, displayName: e.target.value })} className="md:col-span-2" />
-            <Input placeholder="Min order size" value={form.minOrderSize}
-              onChange={(e) => setForm({ ...form, minOrderSize: e.target.value })} />
-            <Button type="submit" disabled={create.isPending}>Add</Button>
-          </form>
+        <CardContent className="space-y-3">
+          <div className="flex gap-2">
+            <Input
+              placeholder="Search base asset (e.g. BTC, SOL)"
+              value={search}
+              onChange={(e) => setSearch(e.target.value.toUpperCase())}
+              className="flex-1"
+            />
+            <select
+              className="h-10 rounded-md border border-border bg-input px-3 text-sm"
+              value={quoteFilter}
+              onChange={(e) => setQuoteFilter(e.target.value)}
+            >
+              <option value="USDT">USDT</option>
+              <option value="USDC">USDC</option>
+              <option value="BTC">BTC</option>
+              <option value="ETH">ETH</option>
+            </select>
+          </div>
+          {symbolsLoading ? (
+            <p className="text-sm text-muted-foreground">Loading Binance pair list…</p>
+          ) : filtered.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No new pairs match. Try a different search or quote currency.
+            </p>
+          ) : (
+            <div className="grid gap-2 md:grid-cols-2">
+              {filtered.map((s) => (
+                <button
+                  key={s.symbol}
+                  type="button"
+                  disabled={create.isPending}
+                  onClick={() => create.mutate(s)}
+                  className="flex items-center justify-between rounded-md border border-border p-3 text-left transition-colors hover:border-primary/50 hover:bg-accent"
+                >
+                  <div>
+                    <div className="text-sm font-medium">
+                      {niceAsset(s.baseAsset)} / {niceAsset(s.quoteAsset)}
+                    </div>
+                    <div className="font-mono text-xs text-muted-foreground">
+                      {s.symbol} · min {Number(s.minQty).toFixed(8)}
+                    </div>
+                  </div>
+                  <span className="text-xs text-primary">+ Add</span>
+                </button>
+              ))}
+            </div>
+          )}
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader><CardTitle>Registry</CardTitle></CardHeader>
         <CardContent className="space-y-2">
-          {data?.length ? data.map((p) => (
+          {pairs?.length ? pairs.map((p) => (
             <div key={p.id} className="flex items-center justify-between border-b border-border/50 py-2">
               <div>
                 <div className="text-sm font-medium">
