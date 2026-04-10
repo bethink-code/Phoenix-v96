@@ -137,6 +137,15 @@ export function setupAuth(app: Express) {
     req.logout((err) => {
       if (err) return next(err);
       req.session.destroy(() => {
+        // express-session destroys the row but the cookie sticks around in
+        // the browser pointing at a dead session. Clear it explicitly so
+        // the next request starts with no session at all.
+        res.clearCookie("connect.sid", {
+          path: "/",
+          httpOnly: true,
+          secure: isProd,
+          sameSite: "lax",
+        });
         audit({ userId: uid, action: "logout", outcome: "success" });
         res.json({ ok: true });
       });

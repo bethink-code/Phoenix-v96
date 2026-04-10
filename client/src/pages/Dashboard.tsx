@@ -146,8 +146,14 @@ export default function Dashboard() {
     },
   });
 
-  const logout = () =>
-    apiRequest("/auth/logout", { method: "POST" }).then(() => location.reload());
+  const logout = async () => {
+    try {
+      await apiRequest("/auth/logout", { method: "POST" });
+    } catch {
+      /* still force navigation even if the call fails */
+    }
+    window.location.href = "/";
+  };
 
   const botStatus = data?.tenant.botStatus ?? "off";
   const currentRegime = data?.tenant.activeRegime ?? "no_trade";
