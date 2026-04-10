@@ -231,53 +231,90 @@ export default function Dashboard() {
 
 function TradeLogPanel() {
   const { data } = useQuery<any[]>({ queryKey: ["/api/tenant/trades"] });
+  const open = (data ?? []).filter((t) => t.status === "open");
+  const closed = (data ?? []).filter((t) => t.status !== "open");
+
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Trade log</CardTitle>
-        <CardDescription>Every entry, exit, and stop-out with full reasoning (PRD §5.8).</CardDescription>
-      </CardHeader>
-      <CardContent>
-        {data?.length ? (
-          <div className="space-y-1 font-mono text-xs">
-            <div className="grid grid-cols-12 gap-2 border-b border-border pb-1 text-muted-foreground">
-              <span className="col-span-2">Opened</span>
-              <span>Side</span>
-              <span>Mode</span>
-              <span>Regime</span>
-              <span className="text-right">Entry</span>
-              <span className="text-right">Stop</span>
-              <span className="text-right">Target</span>
-              <span className="text-right">Size</span>
-              <span className="text-right">R:R</span>
-              <span>Status</span>
-              <span className="text-right">P&amp;L</span>
-            </div>
-            {data.map((t) => (
-              <div key={t.id} className="grid grid-cols-12 gap-2 border-b border-border/30 py-1">
-                <span className="col-span-2 text-muted-foreground">
-                  {new Date(t.openedAt).toLocaleString()}
-                </span>
-                <span className={t.side === "long" ? "text-emerald-400" : "text-red-400"}>{t.side}</span>
-                <span>{t.setupMode}</span>
-                <span>{t.regimeAtEntry}</span>
-                <span className="text-right">{Number(t.entryPrice).toFixed(2)}</span>
-                <span className="text-right">{Number(t.stopPrice).toFixed(2)}</span>
-                <span className="text-right">{Number(t.targetPrice).toFixed(2)}</span>
-                <span className="text-right">{Number(t.size).toFixed(4)}</span>
-                <span className="text-right">{Number(t.plannedRR).toFixed(2)}</span>
-                <span>{t.status}</span>
-                <span className={`text-right ${Number(t.realisedPnl) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                  {t.realisedPnl != null ? fmtMoney(Number(t.realisedPnl)) : "—"}
-                </span>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p className="text-sm text-muted-foreground">No trades yet. The bot logs every entry here with its full reasoning.</p>
+    <div className="space-y-6">
+      <Card>
+        <CardHeader>
+          <CardTitle>Open positions</CardTitle>
+          <CardDescription>
+            {open.length === 0 ? "No open positions. The bot is idle or waiting for a setup." : `${open.length} live position${open.length > 1 ? "s" : ""}.`}
+          </CardDescription>
+        </CardHeader>
+        {open.length > 0 && (
+          <CardContent>
+            <TradeTable rows={open} showPnl={false} />
+          </CardContent>
         )}
-      </CardContent>
-    </Card>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Trade history</CardTitle>
+          <CardDescription>Closed trades with realised P&amp;L and close reason (PRD §5.8).</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {closed.length ? (
+            <TradeTable rows={closed} showPnl={true} />
+          ) : (
+            <p className="text-sm text-muted-foreground">No closed trades yet.</p>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function TradeTable({ rows, showPnl }: { rows: any[]; showPnl: boolean }) {
+  return (
+    <div className="space-y-1 font-mono text-xs">
+      <div className="grid grid-cols-12 gap-2 border-b border-border pb-1 text-muted-foreground">
+        <span className="col-span-2">{showPnl ? "Closed" : "Opened"}</span>
+        <span>Side</span>
+        <span>Mode</span>
+        <span>Regime</span>
+        <span className="text-right">Entry</span>
+        <span className="text-right">Stop</span>
+        <span className="text-right">Target</span>
+        <span className="text-right">{showPnl ? "Exit" : "Size"}</span>
+        <span className="text-right">R:R</span>
+        <span>{showPnl ? "Reason" : "Status"}</span>
+        <span className="text-right">{showPnl ? "P&L" : ""}</span>
+      </div>
+      {rows.map((t) => {
+        const pnl = t.realisedPnl != null ? Number(t.realisedPnl) : null;
+        return (
+          <div
+            key={t.id}
+            className={`grid grid-cols-12 gap-2 border-b border-border/30 py-1 ${
+              showPnl ? "opacity-70" : ""
+            }`}
+          >
+            <span className="col-span-2 text-muted-foreground">
+              {new Date(showPnl && t.closedAt ? t.closedAt : t.openedAt).toLocaleString()}
+            </span>
+            <span className={t.side === "long" ? "text-emerald-400" : "text-red-400"}>{t.side}</span>
+            <span>{t.setupMode}</span>
+            <span>{t.regimeAtEntry}</span>
+            <span className="text-right">{Number(t.entryPrice).toFixed(2)}</span>
+            <span className="text-right">{Number(t.stopPrice).toFixed(2)}</span>
+            <span className="text-right">{Number(t.targetPrice).toFixed(2)}</span>
+            <span className="text-right">
+              {showPnl
+                ? t.exitPrice != null ? Number(t.exitPrice).toFixed(2) : "—"
+                : Number(t.size).toFixed(4)}
+            </span>
+            <span className="text-right">{Number(t.plannedRR).toFixed(2)}</span>
+            <span>{showPnl ? t.closeReason : t.status}</span>
+            <span className={`text-right ${pnl != null && pnl >= 0 ? "text-emerald-400" : pnl != null ? "text-red-400" : ""}`}>
+              {pnl != null ? fmtMoney(pnl) : ""}
+            </span>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
