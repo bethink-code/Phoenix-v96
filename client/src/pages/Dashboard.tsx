@@ -520,24 +520,26 @@ function RegimeTab({
             )}
           </div>
           <div className="shrink-0 text-right">
-            <label className="flex cursor-pointer items-center gap-2">
+            <div className="flex items-center gap-3">
               <span className="text-xs uppercase tracking-wider text-muted-foreground">Autopilot</span>
               <button
                 type="button"
+                role="switch"
+                aria-checked={autopilot}
                 onClick={() => setAutopilot.mutate(!autopilot)}
                 className={cn(
-                  "relative h-6 w-11 rounded-full transition-colors",
+                  "relative inline-flex h-7 w-12 items-center rounded-full border border-border transition-colors",
                   autopilot ? "bg-primary" : "bg-muted"
                 )}
               >
                 <span
                   className={cn(
-                    "absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform",
-                    autopilot ? "translate-x-5" : "translate-x-0.5"
+                    "inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform",
+                    autopilot ? "translate-x-6" : "translate-x-1"
                   )}
                 />
               </button>
-            </label>
+            </div>
             <div className="mt-1 text-[10px] text-muted-foreground">
               {autopilot ? "bot drives" : "you drive"}
             </div>
