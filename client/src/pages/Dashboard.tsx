@@ -523,18 +523,42 @@ function DecisionsPanel() {
       </CardHeader>
       <CardContent>
         <div className="space-y-1 font-mono text-xs">
-          {data.slice(0, 30).map((d) => (
-            <div key={d.id} className="flex gap-3 border-b border-border/30 py-1">
-              <span className="text-muted-foreground">{new Date(d.createdAt).toLocaleTimeString()}</span>
-              <span className={
-                d.decisionType === "entry" ? "text-primary" :
-                d.decisionType === "halt" ? "text-destructive" :
-                "text-muted-foreground"
-              }>{d.decisionType}</span>
-              <span>{d.regime}</span>
-              <span className="truncate">{d.reasoning}</span>
-            </div>
-          ))}
+          {data.slice(0, 40).map((d) => {
+            const out = d.outputs as Record<string, any> | null;
+            const innerReason =
+              typeof out?.detail === "string" ? out.detail :
+              typeof out?.reason === "string" ? out.reason :
+              d.reasoning;
+            const proposal = out?.proposal;
+            const decision = out?.decision;
+            return (
+              <div key={d.id} className="border-b border-border/30 py-1">
+                <div className="flex gap-3">
+                  <span className="text-muted-foreground">{new Date(d.createdAt).toLocaleTimeString()}</span>
+                  <span className={
+                    d.decisionType === "entry" ? "text-primary" :
+                    d.decisionType === "halt" ? "text-destructive" :
+                    d.decisionType === "exit" ? "text-emerald-400" :
+                    "text-muted-foreground"
+                  }>{d.decisionType}</span>
+                  <span>{d.regime}</span>
+                  <span className="text-amber-300">{innerReason}</span>
+                  {proposal && (
+                    <span className="text-muted-foreground">
+                      {proposal.side} {proposal.setupMode} @ {Number(proposal.entryPrice).toFixed(2)}
+                      → stop {Number(proposal.stopPrice).toFixed(2)}
+                      → target {Number(proposal.targetPrice).toFixed(2)}
+                    </span>
+                  )}
+                  {decision?.plannedRR != null && (
+                    <span className="text-muted-foreground">
+                      (planned R:R {Number(decision.plannedRR).toFixed(2)})
+                    </span>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
       </CardContent>
     </Card>
