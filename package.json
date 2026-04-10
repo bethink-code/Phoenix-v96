@@ -11,6 +11,8 @@
     "dev": "doppler run -- concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "build": "vite build",
     "build:api": "esbuild server/api.ts --platform=node --packages=external --bundle --format=esm --outfile=api/index.mjs",
+    "build:server": "esbuild server/index.ts --platform=node --packages=external --bundle --format=esm --outfile=dist-server/index.mjs",
+    "start": "node dist-server/index.mjs",
     "db:push": "doppler run -- drizzle-kit push",
     "db:studio": "doppler run -- drizzle-kit studio",
     "typecheck": "tsc --noEmit"
