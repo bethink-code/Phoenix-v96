@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import ConfirmModal from "@/components/ConfirmModal";
+import AgentFeed from "@/components/AgentFeed";
 import { useAuth } from "@/hooks/useAuth";
 import { apiRequest } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
@@ -167,6 +168,9 @@ export default function Dashboard() {
       </header>
 
       <main className="mx-auto max-w-6xl space-y-6 p-6">
+        {/* Alter ego — first-person voice of the bot, the dashboard's centrepiece */}
+        <AgentFeed botStatus={botStatus} activeRegime={currentRegime} />
+
         {/* Bot control + weekly narrative (PRD §3.1 + §3.2) */}
         <Card>
           <CardHeader>
@@ -279,7 +283,6 @@ export default function Dashboard() {
         </Card>
 
         <TradeLogPanel />
-        <DecisionsPanel />
       </main>
 
       {/* Modals ---------------------------------------------------------- */}
@@ -507,61 +510,6 @@ function TradeTable({ rows, showPnl }: { rows: any[]; showPnl: boolean }) {
         );
       })}
     </div>
-  );
-}
-
-function DecisionsPanel() {
-  const { data } = useQuery<any[]>({ queryKey: ["/api/tenant/decisions"] });
-  if (!data?.length) return null;
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Recent bot decisions</CardTitle>
-        <CardDescription>
-          Every tick the bot evaluates the market. Skips are recorded with reasoning so you can see why nothing fired.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <div className="space-y-1 font-mono text-xs">
-          {data.slice(0, 40).map((d) => {
-            const out = d.outputs as Record<string, any> | null;
-            const innerReason =
-              typeof out?.detail === "string" ? out.detail :
-              typeof out?.reason === "string" ? out.reason :
-              d.reasoning;
-            const proposal = out?.proposal;
-            const decision = out?.decision;
-            return (
-              <div key={d.id} className="border-b border-border/30 py-1">
-                <div className="flex gap-3">
-                  <span className="text-muted-foreground">{new Date(d.createdAt).toLocaleTimeString()}</span>
-                  <span className={
-                    d.decisionType === "entry" ? "text-primary" :
-                    d.decisionType === "halt" ? "text-destructive" :
-                    d.decisionType === "exit" ? "text-emerald-400" :
-                    "text-muted-foreground"
-                  }>{d.decisionType}</span>
-                  <span>{d.regime}</span>
-                  <span className="text-amber-300">{innerReason}</span>
-                  {proposal && (
-                    <span className="text-muted-foreground">
-                      {proposal.side} {proposal.setupMode} @ {Number(proposal.entryPrice).toFixed(2)}
-                      → stop {Number(proposal.stopPrice).toFixed(2)}
-                      → target {Number(proposal.targetPrice).toFixed(2)}
-                    </span>
-                  )}
-                  {decision?.plannedRR != null && (
-                    <span className="text-muted-foreground">
-                      (planned R:R {Number(decision.plannedRR).toFixed(2)})
-                    </span>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </CardContent>
-    </Card>
   );
 }
 
