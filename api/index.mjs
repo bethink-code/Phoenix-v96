@@ -1264,7 +1264,7 @@ function registerRoutes(app2) {
     const { status } = z2.object({ status: z2.enum(["off", "active", "paused"]) }).parse(req.body);
     const u = getUser(req);
     const tenant = await storage.getOrCreateTenantForUser(u.id);
-    if (status === "active" && tenant.activeRegime === "no_trade") {
+    if (status === "active" && tenant.activeRegime === "no_trade" && !tenant.autopilotRegime) {
       return res.status(400).json({ error: "regime_required" });
     }
     await storage.setBotStatus(tenant.id, status);

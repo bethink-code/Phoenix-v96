@@ -190,8 +190,14 @@ export function registerRoutes(app: Express) {
       .parse(req.body);
     const u = getUser(req);
     const tenant = await storage.getOrCreateTenantForUser(u.id);
-    // Switching ON requires an active regime other than NO TRADE per PRD §3.2
-    if (status === "active" && tenant.activeRegime === "no_trade") {
+    // PRD §3.2 — switching ON requires a conscious regime decision. If the
+    // user has autopilot on, the bot will pick one on its first tick, so
+    // we let it start from NO TRADE. If autopilot is off, they must pick.
+    if (
+      status === "active" &&
+      tenant.activeRegime === "no_trade" &&
+      !tenant.autopilotRegime
+    ) {
       return res.status(400).json({ error: "regime_required" });
     }
     await storage.setBotStatus(tenant.id, status);

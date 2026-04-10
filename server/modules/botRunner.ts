@@ -98,13 +98,6 @@ async function tickTenant(tenant: Tenant) {
   // can tell the bot is still breathing.
   await storage.touchTenantTick(tenant.id);
 
-  // Regime gate first — NO TRADE suppresses everything.
-  if (!entryPermitted(tenant.activeRegime)) {
-    return logDecision(tenant.id, "skip", tenant.activeRegime, {
-      reason: "regime_suppressed",
-    });
-  }
-
   // Fetch tenant config
   const [config] = await db
     .select()
@@ -199,8 +192,9 @@ async function tickTenant(tenant: Tenant) {
   }
 
   // Detect the market regime from candles and store the suggestion. This
-  // runs every tick regardless of autopilot state so the UI can always show
-  // the bot's current read.
+  // runs every tick regardless of current regime or autopilot state so the
+  // UI can always show the bot's current read — even when the tenant is
+  // sitting in NO TRADE waiting for the bot to pick something else.
   const suggestion = detectRegime(candles);
   await storage.writeRegimeSuggestion({
     tenantId: tenant.id,
@@ -216,7 +210,8 @@ async function tickTenant(tenant: Tenant) {
 
   // Autopilot: if the tenant lets the bot drive regime, and confidence is
   // high enough, and there are no open positions (don't swap regimes
-  // mid-trade), apply the suggestion.
+  // mid-trade), apply the suggestion. This runs BEFORE the regime gate so
+  // that a tenant stuck in NO TRADE can be promoted out of it by autopilot.
   if (
     tenant.autopilotRegime &&
     suggestion.confidence >= 0.6 &&
@@ -238,11 +233,17 @@ async function tickTenant(tenant: Tenant) {
           confidence: suggestion.confidence,
           rationale: suggestion.rationale,
         });
-        // The tenant object we have in memory is stale now — mutate so the
-        // rest of this tick uses the new regime for entry evaluation.
         tenant.activeRegime = suggestion.regime;
       }
     }
+  }
+
+  // Regime gate — NO TRADE suppresses entries. After autopilot has had a
+  // chance to promote out of NO TRADE above.
+  if (!entryPermitted(tenant.activeRegime)) {
+    return logDecision(tenant.id, "skip", tenant.activeRegime, {
+      reason: "regime_suppressed",
+    });
   }
 
   // Level identification + sweep detection + proposal
