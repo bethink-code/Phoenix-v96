@@ -167,6 +167,18 @@ async function tickTenant(tenant: Tenant) {
     .from(trades)
     .where(eq(trades.tenantId, tenant.id));
   const openTrades = allTrades.filter((t: Trade) => t.status === "open");
+
+  // Dedupe: don't open a new trade against a level that already has an
+  // open trade. Same sweep shouldn't produce multiple entries.
+  const alreadyOnLevel = openTrades.some(
+    (t) => (t.levelContext as { levelId?: string } | null)?.levelId === proposal.levelId
+  );
+  if (alreadyOnLevel) {
+    return logDecision(tenant.id, "skip", tenant.activeRegime, {
+      reason: "duplicate_level",
+      levelId: proposal.levelId,
+    });
+  }
   const closedStats = allTrades.map((t: Trade) => ({
     realisedPnl: t.realisedPnl != null ? Number(t.realisedPnl) : null,
     closedAt: t.closedAt,
