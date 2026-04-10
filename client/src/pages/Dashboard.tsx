@@ -140,9 +140,9 @@ export default function Dashboard() {
   const hasPair = Boolean(data?.tenant.activePairId);
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="flex h-screen flex-col bg-background">
       {/* Header */}
-      <header className="border-b border-border">
+      <header className="shrink-0 border-b border-border">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-6 py-4">
           <div>
             <h1 className="text-lg font-semibold">Phoenix v96</h1>
@@ -173,7 +173,7 @@ export default function Dashboard() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-6xl space-y-6 p-6">
+      <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 overflow-hidden p-6">
         {/* Identity — avatar + name + status, plus stats + actions */}
         <IdentityCard
           botStatus={botStatus}
@@ -222,8 +222,8 @@ export default function Dashboard() {
         />
 
         {/* Tabs */}
-        <Card className="overflow-hidden">
-          <div className="flex gap-1 border-b border-border px-4">
+        <Card className="flex flex-1 flex-col overflow-hidden">
+          <div className="flex shrink-0 gap-1 border-b border-border px-4">
             {(
               [
                 { key: "heartbeat", label: "Heartbeat", count: null as number | null },
@@ -251,7 +251,7 @@ export default function Dashboard() {
               </button>
             ))}
           </div>
-          <div>
+          <div className="flex-1 overflow-hidden">
             {tab === "heartbeat" && <HeartbeatFeed />}
             {tab === "positions" && <PositionsTab />}
             {tab === "regime" && (
@@ -400,7 +400,7 @@ function PositionsTab() {
   const closed = (data ?? []).filter((t) => t.status !== "open");
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="h-full space-y-6 overflow-y-auto p-6">
       <div>
         <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
           Open positions
@@ -446,7 +446,7 @@ function RegimeTab({
   onSelect: (regime: string) => void;
 }) {
   return (
-    <div className="p-6">
+    <div className="h-full overflow-y-auto p-6">
       <p className="text-sm text-muted-foreground">
         The trader's market read is the edge. Set it deliberately — once per session.
       </p>
@@ -483,7 +483,7 @@ function RiskTab({ config }: { config: TenantEnvelope["config"] }) {
     return <p className="p-6 text-sm text-muted-foreground">No config loaded yet.</p>;
   }
   return (
-    <div className="p-6">
+    <div className="h-full overflow-y-auto p-6">
       <p className="text-sm text-muted-foreground">
         Per-tenant, never shared. Edit in Settings.
       </p>

@@ -72,7 +72,7 @@ export default function HeartbeatFeed() {
   }
 
   return (
-    <div className="max-h-[520px] space-y-3 overflow-y-auto p-6">
+    <div className="h-full space-y-3 overflow-y-auto p-6">
       {entries.map((e) => (
         <div
           key={e.key}
