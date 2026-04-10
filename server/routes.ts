@@ -442,10 +442,25 @@ export function registerRoutes(app: Express) {
     "/api/admin/exchanges/binance/symbols",
     isAuthenticated,
     isAdmin,
-    async (_req, res) => {
+    async (req, res) => {
+      // Read from the Postgres cache populated by the Railway worker.
+      // Falls back to a live fetch if the cache is empty (first boot).
+      // Optional ?quote=USDT filter to keep payload small.
+      const quote = typeof req.query.quote === "string" ? req.query.quote.toUpperCase() : null;
+      const filter = (rows: Array<{ quoteAsset: string }>) =>
+        quote ? rows.filter((s) => s.quoteAsset === quote) : rows;
+
+      const cached = await storage.getCachedSymbols("binance");
+      if (cached) {
+        return res.json({
+          symbols: filter(cached.symbols as any),
+          refreshedAt: cached.refreshedAt,
+        });
+      }
       try {
         const symbols = await getBinance().fetchSymbols();
-        res.json(symbols);
+        await storage.writeCachedSymbols("binance", symbols);
+        res.json({ symbols: filter(symbols), refreshedAt: new Date() });
       } catch (err) {
         res.status(502).json({ error: (err as Error).message });
       }

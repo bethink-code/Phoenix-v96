@@ -28,6 +28,7 @@ __export(schema_exports, {
   auditLogs: () => auditLogs,
   botDecisions: () => botDecisions,
   botStatusEnum: () => botStatusEnum,
+  cachedSymbols: () => cachedSymbols,
   exchangeKeys: () => exchangeKeys,
   experimentRuns: () => experimentRuns,
   insertAccessRequestSchema: () => insertAccessRequestSchema,
@@ -312,6 +313,12 @@ var experimentRuns = pgTable("experiment_runs", {
   reviewedAt: timestamp("reviewed_at"),
   appliedAt: timestamp("applied_at"),
   createdAt: timestamp("created_at").notNull().defaultNow()
+});
+var cachedSymbols = pgTable("cached_symbols", {
+  exchange: varchar("exchange", { length: 32 }).primaryKey(),
+  symbols: jsonb("symbols").notNull(),
+  // SymbolInfo[]
+  refreshedAt: timestamp("refreshed_at").notNull().defaultNow()
 });
 var llmUsage = pgTable(
   "llm_usage",
@@ -705,6 +712,16 @@ var storage = {
       lastTickAt: tenant?.lastTickAt ?? null,
       consecutiveExchangeFailures: tenant?.failures ?? 0
     };
+  },
+  async getCachedSymbols(exchange) {
+    const [row] = await db.select().from(cachedSymbols).where(eq(cachedSymbols.exchange, exchange));
+    return row;
+  },
+  async writeCachedSymbols(exchange, symbols) {
+    await db.insert(cachedSymbols).values({ exchange, symbols, refreshedAt: /* @__PURE__ */ new Date() }).onConflictDoUpdate({
+      target: cachedSymbols.exchange,
+      set: { symbols, refreshedAt: /* @__PURE__ */ new Date() }
+    });
   },
   async listExchangeKeyMetadata(tenantId) {
     return db.select({
@@ -1507,10 +1524,20 @@ function registerRoutes(app2) {
     "/api/admin/exchanges/binance/symbols",
     isAuthenticated,
     isAdmin,
-    async (_req, res) => {
+    async (req, res) => {
+      const quote = typeof req.query.quote === "string" ? req.query.quote.toUpperCase() : null;
+      const filter = (rows) => quote ? rows.filter((s) => s.quoteAsset === quote) : rows;
+      const cached = await storage.getCachedSymbols("binance");
+      if (cached) {
+        return res.json({
+          symbols: filter(cached.symbols),
+          refreshedAt: cached.refreshedAt
+        });
+      }
       try {
         const symbols = await getBinance().fetchSymbols();
-        res.json(symbols);
+        await storage.writeCachedSymbols("binance", symbols);
+        res.json({ symbols: filter(symbols), refreshedAt: /* @__PURE__ */ new Date() });
       } catch (err) {
         res.status(502).json({ error: err.message });
       }

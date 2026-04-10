@@ -71,8 +71,24 @@ export function stopBotRunner() {
   console.log("[bot] runner stopped");
 }
 
+let lastSymbolRefreshAt = 0;
+
 async function tickAllTenants() {
   try {
+    // Refresh the cached Binance symbols list at most once an hour. Done
+    // here on Railway because Vercel serverless can't reliably fetch
+    // exchangeInfo (1MB+ response, 10s function timeout).
+    if (Date.now() - lastSymbolRefreshAt > 60 * 60 * 1000) {
+      try {
+        const symbols = await getBinance().fetchSymbols();
+        await storage.writeCachedSymbols("binance", symbols);
+        lastSymbolRefreshAt = Date.now();
+        console.log(`[bot] cached ${symbols.length} binance symbols`);
+      } catch (err) {
+        console.error("[bot] symbol refresh failed", err);
+      }
+    }
+
     const rows = await db
       .select()
       .from(tenants)

@@ -330,6 +330,15 @@ export const experimentRuns = pgTable("experiment_runs", {
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
+// Cached symbol list per exchange. Railway worker refreshes hourly so the
+// admin UI on Vercel can read instantly without making a slow + memory-heavy
+// fetch from a serverless function (which times out).
+export const cachedSymbols = pgTable("cached_symbols", {
+  exchange: varchar("exchange", { length: 32 }).primaryKey(),
+  symbols: jsonb("symbols").notNull(), // SymbolInfo[]
+  refreshedAt: timestamp("refreshed_at").notNull().defaultNow(),
+});
+
 export const llmUsage = pgTable(
   "llm_usage",
   {

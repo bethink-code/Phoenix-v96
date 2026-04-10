@@ -11,6 +11,7 @@ import {
   trades,
   botDecisions,
   exchangeKeys,
+  cachedSymbols,
   llmUsage,
   regimeChanges,
   riskEvents,
@@ -524,6 +525,24 @@ export const storage = {
       lastTickAt: tenant?.lastTickAt ?? null,
       consecutiveExchangeFailures: tenant?.failures ?? 0,
     };
+  },
+
+  async getCachedSymbols(exchange: string) {
+    const [row] = await db
+      .select()
+      .from(cachedSymbols)
+      .where(eq(cachedSymbols.exchange, exchange));
+    return row;
+  },
+
+  async writeCachedSymbols(exchange: string, symbols: unknown) {
+    await db
+      .insert(cachedSymbols)
+      .values({ exchange, symbols: symbols as object, refreshedAt: new Date() })
+      .onConflictDoUpdate({
+        target: cachedSymbols.exchange,
+        set: { symbols: symbols as object, refreshedAt: new Date() },
+      });
   },
 
   async listExchangeKeyMetadata(tenantId: string) {

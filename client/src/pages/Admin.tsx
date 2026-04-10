@@ -267,19 +267,23 @@ const niceAsset = (a: string) => ASSET_NAMES[a] ?? a;
 function PairsTab() {
   const qc = useQueryClient();
   const { data: pairs } = useQuery<any[]>({ queryKey: ["/api/admin/pairs"] });
-  const { data: symbols, isLoading: symbolsLoading, error: symbolsError } = useQuery<BinanceSymbol[]>({
-    queryKey: ["/api/admin/exchanges/binance/symbols"],
+  const [quoteFilter, setQuoteFilter] = useState("USDT");
+  const { data: symbolsResponse, isLoading: symbolsLoading, error: symbolsError } = useQuery<{
+    symbols: BinanceSymbol[];
+    refreshedAt: string;
+  }>({
+    queryKey: [`/api/admin/exchanges/binance/symbols?quote=${quoteFilter}`],
     retry: false,
   });
+  const symbols = symbolsResponse?.symbols;
   const [search, setSearch] = useState("");
-  const [quoteFilter, setQuoteFilter] = useState("USDT");
 
   const existingSymbols = new Set(
     (pairs ?? []).map((p) => `${p.baseAsset}${p.quoteAsset}`)
   );
 
+  // Server already filtered by quote currency
   const filtered = (symbols ?? [])
-    .filter((s) => s.quoteAsset === quoteFilter)
     .filter((s) =>
       search ? s.baseAsset.toUpperCase().includes(search.toUpperCase()) : true
     )
