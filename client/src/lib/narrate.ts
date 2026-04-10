@@ -116,6 +116,19 @@ export function narrate(row: DecisionRow): Narration {
       | undefined;
     const decision = out.decision as { plannedRR?: number } | undefined;
 
+    if (topReason === "regime_autopilot_change") {
+      const to = String(out.toRegime ?? "");
+      const from = String(out.fromRegime ?? "");
+      const conf = typeof out.confidence === "number" ? out.confidence : 0;
+      return {
+        text: `Switched regime on my own — ${prettyRegime(from)} → ${prettyRegime(to)}. Confidence ${Math.round(conf * 100)}%.`,
+        mood: "regime",
+        subtext: Array.isArray(out.rationale) && out.rationale.length > 0
+          ? String(out.rationale[0])
+          : undefined,
+      };
+    }
+
     if (topReason === "no_sweep") {
       return {
         text: pick(seed, [
@@ -242,6 +255,19 @@ function capitalise(s: string): string {
 // same sentence, but variants are distributed across rows.
 function pick<T>(seed: number, options: T[]): T {
   return options[seed % options.length];
+}
+
+function prettyRegime(r: string): string {
+  const map: Record<string, string> = {
+    no_trade: "NO TRADE",
+    ranging: "Ranging",
+    trending: "Trending",
+    breakout: "Breakout",
+    high_volatility: "High Volatility",
+    low_liquidity: "Low Liquidity",
+    accumulation_distribution: "Accumulation/Distribution",
+  };
+  return map[r] ?? r;
 }
 
 function hashSeed(id: string): number {

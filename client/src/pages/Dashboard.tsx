@@ -17,8 +17,23 @@ interface Tenant {
   name: string;
   botStatus: "off" | "active" | "paused" | "halted" | "error";
   activeRegime: string;
+  activeRegimeSource: "manual" | "autopilot";
   activePairId: string | null;
   paperTradingMode: boolean;
+  autopilotRegime: boolean;
+  suggestedRegime: string | null;
+  suggestedRegimeConfidence: string | null;
+  suggestedRegimeAt: string | null;
+  suggestedRegimeRationale: string[] | null;
+  suggestedRegimeSignals: {
+    adx: number | null;
+    atrRatio: number | null;
+    rangePosition: number | null;
+    dayOfWeekUtc: number;
+    recentHigh: number;
+    recentLow: number;
+    lastClose: number;
+  } | null;
 }
 
 interface TenantEnvelope {
@@ -256,7 +271,7 @@ export default function Dashboard() {
             {tab === "positions" && <PositionsTab />}
             {tab === "regime" && (
               <RegimeTab
-                currentRegime={currentRegime}
+                tenant={data?.tenant ?? null}
                 pending={setRegime.isPending}
                 onSelect={(r) => setModal({ kind: "regime", toRegime: r })}
               />
@@ -437,45 +452,193 @@ function PositionsTab() {
 }
 
 function RegimeTab({
-  currentRegime,
+  tenant,
   pending,
   onSelect,
 }: {
-  currentRegime: string;
+  tenant: Tenant | null | undefined;
   pending: boolean;
   onSelect: (regime: string) => void;
 }) {
+  const qc = useQueryClient();
+  const setAutopilot = useMutation({
+    mutationFn: async (autopilot: boolean) => {
+      await apiRequest("/api/tenant/autopilot", {
+        method: "PATCH",
+        body: JSON.stringify({ autopilot }),
+      });
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/tenant"] }),
+  });
+
+  if (!tenant) {
+    return <p className="p-6 text-sm text-muted-foreground">Loading…</p>;
+  }
+
+  const autopilot = tenant.autopilotRegime;
+  const suggestion = tenant.suggestedRegime;
+  const confidence = Number(tenant.suggestedRegimeConfidence ?? 0);
+  const rationale = tenant.suggestedRegimeRationale ?? [];
+  const signals = tenant.suggestedRegimeSignals;
+  const suggestionMatches = suggestion === tenant.activeRegime;
+
   return (
-    <div className="h-full overflow-y-auto p-6">
-      <p className="text-sm text-muted-foreground">
-        The trader's market read is the edge. Set it deliberately — once per session.
-      </p>
-      <div className="mt-4 grid gap-3 md:grid-cols-3 lg:grid-cols-4">
-        {REGIMES.map((r) => {
-          const active = currentRegime === r.key;
-          return (
-            <button
-              key={r.key}
-              disabled={pending || active}
-              onClick={() => onSelect(r.key)}
-              className={cn(
-                "rounded-lg border border-border p-4 text-left transition-colors",
-                active
-                  ? "border-primary bg-primary/10"
-                  : "hover:border-primary/50 hover:bg-accent"
+    <div className="h-full space-y-6 overflow-y-auto p-6">
+      {/* Bot's current read — the whole point of surfacing the logic */}
+      <div className="rounded-lg border border-primary/30 bg-primary/5 p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex-1">
+            <div className="text-xs uppercase tracking-wider text-muted-foreground">
+              Bot's read
+            </div>
+            <div className="mt-1 flex items-baseline gap-3">
+              <span className="text-2xl font-semibold">
+                {suggestion ? regimeLabel(suggestion) : "Waiting for data…"}
+              </span>
+              {suggestion && (
+                <span
+                  className={cn(
+                    "font-mono text-sm",
+                    confidence >= 0.7 ? "text-primary" :
+                    confidence >= 0.5 ? "text-amber-300" :
+                    "text-muted-foreground"
+                  )}
+                >
+                  {Math.round(confidence * 100)}% confidence
+                </span>
               )}
-            >
-              <div className="flex items-center gap-2">
-                <div className={cn("h-2 w-2 rounded-full", r.colour)} />
-                <span className="text-sm font-medium">{r.label}</span>
-              </div>
-              {active && <div className="mt-1 text-xs text-primary">Active</div>}
-            </button>
-          );
-        })}
+            </div>
+            {rationale.length > 0 && (
+              <ul className="mt-3 space-y-1 text-sm text-foreground/90">
+                {rationale.map((r, i) => (
+                  <li key={i} className="flex gap-2">
+                    <span className="text-muted-foreground">›</span>
+                    <span>{r}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <div className="shrink-0 text-right">
+            <label className="flex cursor-pointer items-center gap-2">
+              <span className="text-xs uppercase tracking-wider text-muted-foreground">Autopilot</span>
+              <button
+                type="button"
+                onClick={() => setAutopilot.mutate(!autopilot)}
+                className={cn(
+                  "relative h-6 w-11 rounded-full transition-colors",
+                  autopilot ? "bg-primary" : "bg-muted"
+                )}
+              >
+                <span
+                  className={cn(
+                    "absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform",
+                    autopilot ? "translate-x-5" : "translate-x-0.5"
+                  )}
+                />
+              </button>
+            </label>
+            <div className="mt-1 text-[10px] text-muted-foreground">
+              {autopilot ? "bot drives" : "you drive"}
+            </div>
+          </div>
+        </div>
+
+        {signals && (
+          <div className="mt-4 grid grid-cols-2 gap-3 border-t border-border/40 pt-3 font-mono text-xs text-muted-foreground md:grid-cols-4">
+            <SignalReadout label="ADX" value={signals.adx} format="number" />
+            <SignalReadout label="ATR ratio" value={signals.atrRatio} format="ratio" />
+            <SignalReadout label="Range position" value={signals.rangePosition} format="pct" />
+            <SignalReadout label="Day of week" value={dayLabel(signals.dayOfWeekUtc)} format="raw" />
+          </div>
+        )}
+      </div>
+
+      {/* Manual grid */}
+      <div>
+        <div className="mb-3 flex items-baseline justify-between">
+          <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+            {autopilot ? "Override" : "Pick a regime"}
+          </h3>
+          <span className="text-xs text-muted-foreground">
+            Active: {regimeLabel(tenant.activeRegime)}{" "}
+            <span className={cn(
+              "ml-1 rounded px-1.5 py-0.5 text-[10px] uppercase",
+              tenant.activeRegimeSource === "autopilot"
+                ? "bg-primary/20 text-primary"
+                : "bg-muted text-muted-foreground"
+            )}>
+              {tenant.activeRegimeSource}
+            </span>
+          </span>
+        </div>
+        <div className="grid gap-3 md:grid-cols-3 lg:grid-cols-4">
+          {REGIMES.map((r) => {
+            const active = tenant.activeRegime === r.key;
+            const isBotSuggestion = suggestion === r.key;
+            return (
+              <button
+                key={r.key}
+                disabled={pending || active}
+                onClick={() => onSelect(r.key)}
+                className={cn(
+                  "rounded-lg border p-4 text-left transition-colors",
+                  active
+                    ? "border-primary bg-primary/10"
+                    : isBotSuggestion
+                    ? "border-primary/40 hover:bg-accent"
+                    : "border-border hover:border-primary/50 hover:bg-accent"
+                )}
+              >
+                <div className="flex items-center gap-2">
+                  <div className={cn("h-2 w-2 rounded-full", r.colour)} />
+                  <span className="text-sm font-medium">{r.label}</span>
+                </div>
+                {active && <div className="mt-1 text-xs text-primary">Active</div>}
+                {!active && isBotSuggestion && (
+                  <div className="mt-1 text-[10px] text-primary/80">Bot's pick</div>
+                )}
+              </button>
+            );
+          })}
+        </div>
+        {autopilot && !suggestionMatches && suggestion && (
+          <p className="mt-3 text-xs text-muted-foreground">
+            You can override the bot's pick by clicking a different regime — but on the next tick,
+            if autopilot is still on, the bot will re-evaluate and may switch it back.
+          </p>
+        )}
       </div>
     </div>
   );
+}
+
+function SignalReadout({
+  label,
+  value,
+  format,
+}: {
+  label: string;
+  value: number | string | null;
+  format: "number" | "ratio" | "pct" | "raw";
+}) {
+  let display = "—";
+  if (value != null) {
+    if (format === "number") display = typeof value === "number" ? value.toFixed(1) : String(value);
+    else if (format === "ratio") display = typeof value === "number" ? `${value.toFixed(2)}×` : String(value);
+    else if (format === "pct") display = typeof value === "number" ? `${Math.round(value * 100)}%` : String(value);
+    else display = String(value);
+  }
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider">{label}</div>
+      <div className="text-sm text-foreground">{display}</div>
+    </div>
+  );
+}
+
+function dayLabel(dow: number): string {
+  return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][dow] ?? "?";
 }
 
 function RiskTab({ config }: { config: TenantEnvelope["config"] }) {

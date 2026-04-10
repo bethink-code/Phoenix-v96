@@ -205,16 +205,24 @@ export const storage = {
     return row;
   },
 
-  async setTenantRegime(tenantId: string, toRegime: Regime, userId: string) {
+  async setTenantRegime(
+    tenantId: string,
+    toRegime: Regime,
+    userId: string,
+    source: "manual" | "autopilot" = "manual"
+  ) {
     const [tenant] = await db
       .select()
       .from(tenants)
       .where(eq(tenants.id, tenantId));
     if (!tenant) throw new Error("tenant not found");
     const fromRegime = tenant.activeRegime;
+    if (fromRegime === toRegime && tenant.activeRegimeSource === source) {
+      return { fromRegime, toRegime, noop: true };
+    }
     await db
       .update(tenants)
-      .set({ activeRegime: toRegime })
+      .set({ activeRegime: toRegime, activeRegimeSource: source })
       .where(eq(tenants.id, tenantId));
     await db.insert(regimeChanges).values({
       tenantId,
@@ -222,7 +230,33 @@ export const storage = {
       toRegime,
       changedByUserId: userId,
     });
-    return { fromRegime, toRegime };
+    return { fromRegime, toRegime, noop: false };
+  },
+
+  async setAutopilot(tenantId: string, autopilot: boolean) {
+    await db
+      .update(tenants)
+      .set({ autopilotRegime: autopilot })
+      .where(eq(tenants.id, tenantId));
+  },
+
+  async writeRegimeSuggestion(input: {
+    tenantId: string;
+    regime: Regime;
+    confidence: number;
+    rationale: string[];
+    signals: unknown;
+  }) {
+    await db
+      .update(tenants)
+      .set({
+        suggestedRegime: input.regime,
+        suggestedRegimeConfidence: String(input.confidence),
+        suggestedRegimeAt: new Date(),
+        suggestedRegimeRationale: input.rationale,
+        suggestedRegimeSignals: input.signals as object,
+      })
+      .where(eq(tenants.id, input.tenantId));
   },
 
   async setBotStatus(

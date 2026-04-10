@@ -140,8 +140,18 @@ export const tenants = pgTable("tenants", {
   name: varchar("name", { length: 200 }).notNull(),
   botStatus: botStatusEnum("bot_status").notNull().default("off"),
   activeRegime: regimeEnum("active_regime").notNull().default("no_trade"),
+  activeRegimeSource: varchar("active_regime_source", { length: 16 }).notNull().default("manual"), // 'manual' | 'autopilot'
   activePairId: uuid("active_pair_id"),
   paperTradingMode: boolean("paper_trading_mode").notNull().default(true),
+  // Autopilot: when true, the bot writes its own regime suggestion into
+  // active_regime on every tick (when confidence is high enough and no
+  // open positions). Manual clicks still win for that tick.
+  autopilotRegime: boolean("autopilot_regime").notNull().default(true),
+  suggestedRegime: regimeEnum("suggested_regime"),
+  suggestedRegimeConfidence: numeric("suggested_regime_confidence", { precision: 4, scale: 3 }),
+  suggestedRegimeAt: timestamp("suggested_regime_at"),
+  suggestedRegimeRationale: jsonb("suggested_regime_rationale"),
+  suggestedRegimeSignals: jsonb("suggested_regime_signals"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   lastHaltedAt: timestamp("last_halted_at"),
   lastHaltReason: text("last_halt_reason"),

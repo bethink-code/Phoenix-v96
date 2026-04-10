@@ -24,6 +24,7 @@ import {
   identifyLevels,
   detectLatestSweep,
   generateProposal,
+  detectRegime,
   type Candle,
 } from "./strategy";
 
@@ -197,9 +198,52 @@ async function tickTenant(tenant: Tenant) {
     });
   }
 
+  // Detect the market regime from candles and store the suggestion. This
+  // runs every tick regardless of autopilot state so the UI can always show
+  // the bot's current read.
+  const suggestion = detectRegime(candles);
+  await storage.writeRegimeSuggestion({
+    tenantId: tenant.id,
+    regime: suggestion.regime,
+    confidence: suggestion.confidence,
+    rationale: suggestion.rationale,
+    signals: suggestion.signals,
+  });
+
   // Resolve any open paper trades against new candles BEFORE evaluating a
   // new entry. If stop or target was hit, close the trade and log.
   await resolveOpenTrades(tenant.id, candles, symbol);
+
+  // Autopilot: if the tenant lets the bot drive regime, and confidence is
+  // high enough, and there are no open positions (don't swap regimes
+  // mid-trade), apply the suggestion.
+  if (
+    tenant.autopilotRegime &&
+    suggestion.confidence >= 0.6 &&
+    suggestion.regime !== tenant.activeRegime
+  ) {
+    const openCount = (await storage.listOpenTrades(tenant.id)).length;
+    if (openCount === 0) {
+      const change = await storage.setTenantRegime(
+        tenant.id,
+        suggestion.regime,
+        tenant.userId,
+        "autopilot"
+      );
+      if (!change.noop) {
+        await logDecision(tenant.id, "skip", suggestion.regime, {
+          reason: "regime_autopilot_change",
+          fromRegime: change.fromRegime,
+          toRegime: suggestion.regime,
+          confidence: suggestion.confidence,
+          rationale: suggestion.rationale,
+        });
+        // The tenant object we have in memory is stale now — mutate so the
+        // rest of this tick uses the new regime for entry evaluation.
+        tenant.activeRegime = suggestion.regime;
+      }
+    }
+  }
 
   // Level identification + sweep detection + proposal
   const levels = identifyLevels(candles);

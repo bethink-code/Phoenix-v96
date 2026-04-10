@@ -167,6 +167,22 @@ export function registerRoutes(app: Express) {
     res.json({ ok: true });
   });
 
+  app.patch("/api/tenant/autopilot", isAuthenticated, async (req, res) => {
+    const { autopilot } = z.object({ autopilot: z.boolean() }).parse(req.body);
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    await storage.setAutopilot(tenant.id, autopilot);
+    audit({
+      userId: u.id,
+      tenantId: tenant.id,
+      action: "set_autopilot_regime",
+      outcome: "success",
+      detail: { autopilot },
+      ipAddress: getIp(req),
+    });
+    res.json({ ok: true });
+  });
+
   app.patch("/api/tenant/bot-status", isAuthenticated, async (req, res) => {
     const { status } = z
       .object({ status: z.enum(["off", "active", "paused"]) })

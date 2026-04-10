@@ -166,8 +166,19 @@ var tenants = pgTable("tenants", {
   name: varchar("name", { length: 200 }).notNull(),
   botStatus: botStatusEnum("bot_status").notNull().default("off"),
   activeRegime: regimeEnum("active_regime").notNull().default("no_trade"),
+  activeRegimeSource: varchar("active_regime_source", { length: 16 }).notNull().default("manual"),
+  // 'manual' | 'autopilot'
   activePairId: uuid("active_pair_id"),
   paperTradingMode: boolean("paper_trading_mode").notNull().default(true),
+  // Autopilot: when true, the bot writes its own regime suggestion into
+  // active_regime on every tick (when confidence is high enough and no
+  // open positions). Manual clicks still win for that tick.
+  autopilotRegime: boolean("autopilot_regime").notNull().default(true),
+  suggestedRegime: regimeEnum("suggested_regime"),
+  suggestedRegimeConfidence: numeric("suggested_regime_confidence", { precision: 4, scale: 3 }),
+  suggestedRegimeAt: timestamp("suggested_regime_at"),
+  suggestedRegimeRationale: jsonb("suggested_regime_rationale"),
+  suggestedRegimeSignals: jsonb("suggested_regime_signals"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   lastHaltedAt: timestamp("last_halted_at"),
   lastHaltReason: text("last_halt_reason"),
@@ -517,18 +528,33 @@ var storage = {
     const [row] = await db.select().from(tenantConfigs).where(eq(tenantConfigs.tenantId, tenantId));
     return row;
   },
-  async setTenantRegime(tenantId, toRegime, userId) {
+  async setTenantRegime(tenantId, toRegime, userId, source = "manual") {
     const [tenant] = await db.select().from(tenants).where(eq(tenants.id, tenantId));
     if (!tenant) throw new Error("tenant not found");
     const fromRegime = tenant.activeRegime;
-    await db.update(tenants).set({ activeRegime: toRegime }).where(eq(tenants.id, tenantId));
+    if (fromRegime === toRegime && tenant.activeRegimeSource === source) {
+      return { fromRegime, toRegime, noop: true };
+    }
+    await db.update(tenants).set({ activeRegime: toRegime, activeRegimeSource: source }).where(eq(tenants.id, tenantId));
     await db.insert(regimeChanges).values({
       tenantId,
       fromRegime,
       toRegime,
       changedByUserId: userId
     });
-    return { fromRegime, toRegime };
+    return { fromRegime, toRegime, noop: false };
+  },
+  async setAutopilot(tenantId, autopilot) {
+    await db.update(tenants).set({ autopilotRegime: autopilot }).where(eq(tenants.id, tenantId));
+  },
+  async writeRegimeSuggestion(input) {
+    await db.update(tenants).set({
+      suggestedRegime: input.regime,
+      suggestedRegimeConfidence: String(input.confidence),
+      suggestedRegimeAt: /* @__PURE__ */ new Date(),
+      suggestedRegimeRationale: input.rationale,
+      suggestedRegimeSignals: input.signals
+    }).where(eq(tenants.id, input.tenantId));
   },
   async setBotStatus(tenantId, status, reason) {
     const isHalt = status === "halted" || status === "error";
@@ -1205,6 +1231,21 @@ function registerRoutes(app2) {
       action: "set_active_pair",
       outcome: "success",
       detail: { pairId },
+      ipAddress: getIp(req)
+    });
+    res.json({ ok: true });
+  });
+  app2.patch("/api/tenant/autopilot", isAuthenticated, async (req, res) => {
+    const { autopilot } = z2.object({ autopilot: z2.boolean() }).parse(req.body);
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    await storage.setAutopilot(tenant.id, autopilot);
+    audit({
+      userId: u.id,
+      tenantId: tenant.id,
+      action: "set_autopilot_regime",
+      outcome: "success",
+      detail: { autopilot },
       ipAddress: getIp(req)
     });
     res.json({ ok: true });

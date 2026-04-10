@@ -5,3 +5,4 @@ export * from "./types";
 export * from "./levels";
 export * from "./sweeps";
 export * from "./entries";
+export * from "./regimeDetector";
