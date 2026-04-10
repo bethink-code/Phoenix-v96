@@ -128,6 +128,7 @@ export function registerRoutes(app: Express) {
 
   app.patch("/api/tenant/config", isAuthenticated, async (req, res) => {
     const schema = z.object({
+      paperStartingCapital: z.string().optional(),
       riskPercentPerTrade: z.string().optional(),
       maxConcurrentPositions: z.number().int().min(1).max(10).optional(),
       dailyDrawdownLimitPct: z.string().optional(),
@@ -424,6 +425,23 @@ export function registerRoutes(app: Express) {
       action: "update_pair",
       resourceType: "market_pair",
       resourceId: pid(req, "id"),
+      outcome: "success",
+      ipAddress: getIp(req),
+    });
+    res.json({ ok: true });
+  });
+
+  app.delete("/api/admin/pairs/:id", isAuthenticated, isAdmin, async (req, res) => {
+    const id = pid(req, "id");
+    const result = await storage.deletePair(id);
+    if (!result.deleted) {
+      return res.status(409).json({ error: result.reason ?? "cannot_delete" });
+    }
+    audit({
+      userId: getUser(req).id,
+      action: "delete_pair",
+      resourceType: "market_pair",
+      resourceId: id,
       outcome: "success",
       ipAddress: getIp(req),
     });

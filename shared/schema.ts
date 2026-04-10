@@ -168,6 +168,9 @@ export const tenantConfigs = pgTable("tenant_configs", {
     .notNull()
     .unique()
     .references(() => tenants.id, { onDelete: "cascade" }),
+  paperStartingCapital: numeric("paper_starting_capital", { precision: 20, scale: 2 })
+    .notNull()
+    .default("10000.00"),
   riskPercentPerTrade: numeric("risk_percent_per_trade", { precision: 5, scale: 3 })
     .notNull()
     .default("1.000"),

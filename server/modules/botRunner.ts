@@ -281,11 +281,9 @@ async function tickTenant(tenant: Tenant) {
     isPaper: t.isPaper,
   }));
 
-  // Capital assumption for Phase 1 — the PRD says this is per-tenant and
-  // comes from the exchange balance. Until the exchange signed endpoints
-  // are wired, use a fixed notional for paper trading. $10k is a stand-in
-  // for "small starting allocation" per PRD Rule 2.
-  const capital = 10_000;
+  // Capital for paper trading is configurable per tenant. Live trading
+  // (Phase 2) will pull this from the exchange balance instead.
+  const capital = Number(config.paperStartingCapital ?? 10_000);
 
   const decision = assessTrade({
     capital,

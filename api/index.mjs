@@ -188,6 +188,7 @@ var tenants = pgTable("tenants", {
 var tenantConfigs = pgTable("tenant_configs", {
   id: uuid("id").primaryKey().defaultRandom(),
   tenantId: uuid("tenant_id").notNull().unique().references(() => tenants.id, { onDelete: "cascade" }),
+  paperStartingCapital: numeric("paper_starting_capital", { precision: 20, scale: 2 }).notNull().default("10000.00"),
   riskPercentPerTrade: numeric("risk_percent_per_trade", { precision: 5, scale: 3 }).notNull().default("1.000"),
   maxConcurrentPositions: integer("max_concurrent_positions").notNull().default(2),
   dailyDrawdownLimitPct: numeric("daily_drawdown_limit_pct", { precision: 5, scale: 2 }).notNull().default("3.00"),
@@ -581,6 +582,14 @@ var storage = {
   },
   async updatePair(id, patch) {
     await db.update(marketPairs).set({ ...patch, updatedAt: /* @__PURE__ */ new Date() }).where(eq(marketPairs.id, id));
+  },
+  async deletePair(id) {
+    const [inUse] = await db.select({ id: tenants.id }).from(tenants).where(eq(tenants.activePairId, id)).limit(1);
+    if (inUse) {
+      return { deleted: false, reason: "in_use_by_tenant" };
+    }
+    await db.delete(marketPairs).where(eq(marketPairs.id, id));
+    return { deleted: true };
   },
   // ---------- Trades ----------
   async listTrades(tenantId, limit = 100) {
@@ -1198,6 +1207,7 @@ function registerRoutes(app2) {
   });
   app2.patch("/api/tenant/config", isAuthenticated, async (req, res) => {
     const schema = z2.object({
+      paperStartingCapital: z2.string().optional(),
       riskPercentPerTrade: z2.string().optional(),
       maxConcurrentPositions: z2.number().int().min(1).max(10).optional(),
       dailyDrawdownLimitPct: z2.string().optional(),
@@ -1459,6 +1469,22 @@ function registerRoutes(app2) {
       action: "update_pair",
       resourceType: "market_pair",
       resourceId: pid(req, "id"),
+      outcome: "success",
+      ipAddress: getIp(req)
+    });
+    res.json({ ok: true });
+  });
+  app2.delete("/api/admin/pairs/:id", isAuthenticated, isAdmin, async (req, res) => {
+    const id = pid(req, "id");
+    const result = await storage.deletePair(id);
+    if (!result.deleted) {
+      return res.status(409).json({ error: result.reason ?? "cannot_delete" });
+    }
+    audit({
+      userId: getUser(req).id,
+      action: "delete_pair",
+      resourceType: "market_pair",
+      resourceId: id,
       outcome: "success",
       ipAddress: getIp(req)
     });

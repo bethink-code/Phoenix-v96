@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { apiRequest } from "@/lib/queryClient";
 
 interface TenantConfig {
+  paperStartingCapital: string;
   riskPercentPerTrade: string;
   maxConcurrentPositions: number;
   dailyDrawdownLimitPct: string;
@@ -214,6 +215,7 @@ function RiskConfigCard() {
       await apiRequest("/api/tenant/config", {
         method: "PATCH",
         body: JSON.stringify({
+          paperStartingCapital: form.paperStartingCapital,
           riskPercentPerTrade: form.riskPercentPerTrade,
           maxConcurrentPositions: Number(form.maxConcurrentPositions),
           dailyDrawdownLimitPct: form.dailyDrawdownLimitPct,
@@ -242,6 +244,8 @@ function RiskConfigCard() {
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-3 md:grid-cols-2">
+        <Field label="Paper starting capital (USDT)" value={effective.paperStartingCapital}
+          onChange={(v) => update("paperStartingCapital", v)} />
         <Field label="Risk % per trade" value={effective.riskPercentPerTrade} onChange={(v) => update("riskPercentPerTrade", v)} />
         <Field label="Max concurrent positions" type="number" value={String(effective.maxConcurrentPositions)}
           onChange={(v) => update("maxConcurrentPositions", Number(v) as any)} />

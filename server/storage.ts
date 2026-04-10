@@ -310,6 +310,20 @@ export const storage = {
       .where(eq(marketPairs.id, id));
   },
 
+  async deletePair(id: string): Promise<{ deleted: boolean; reason?: string }> {
+    // PRD §13.1 — can't delete a pair that any tenant has active.
+    const [inUse] = await db
+      .select({ id: tenants.id })
+      .from(tenants)
+      .where(eq(tenants.activePairId, id))
+      .limit(1);
+    if (inUse) {
+      return { deleted: false, reason: "in_use_by_tenant" };
+    }
+    await db.delete(marketPairs).where(eq(marketPairs.id, id));
+    return { deleted: true };
+  },
+
   // ---------- Trades ----------
   async listTrades(tenantId: string, limit = 100) {
     return db

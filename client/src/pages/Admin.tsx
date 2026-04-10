@@ -238,17 +238,19 @@ function Stat({ label, value }: { label: string; value: number | string }) {
   );
 }
 
+const EMPTY_PAIR_FORM = {
+  baseAsset: "",
+  quoteAsset: "USDT",
+  displayName: "",
+  exchange: "binance",
+  minOrderSize: "0.0001",
+  liquidityRating: "high",
+};
+
 function PairsTab() {
   const qc = useQueryClient();
   const { data } = useQuery<any[]>({ queryKey: ["/api/admin/pairs"] });
-  const [form, setForm] = useState({
-    baseAsset: "BTC",
-    quoteAsset: "USDT",
-    displayName: "Bitcoin / Tether",
-    exchange: "binance",
-    minOrderSize: "0.0001",
-    liquidityRating: "high",
-  });
+  const [form, setForm] = useState(EMPTY_PAIR_FORM);
 
   const create = useMutation({
     mutationFn: async () => {
@@ -264,7 +266,10 @@ function PairsTab() {
         }),
       });
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/admin/pairs"] }),
+    onSuccess: () => {
+      setForm(EMPTY_PAIR_FORM);
+      qc.invalidateQueries({ queryKey: ["/api/admin/pairs"] });
+    },
   });
 
   const toggle = useMutation({
@@ -275,6 +280,21 @@ function PairsTab() {
       });
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/admin/pairs"] }),
+  });
+
+  const remove = useMutation({
+    mutationFn: async (id: string) => {
+      const res = await fetch(`/api/admin/pairs/${id}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? `${res.status}`);
+      }
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["/api/admin/pairs"] }),
+    onError: (e) => alert(`Cannot delete: ${(e as Error).message}`),
   });
 
   return (
@@ -318,10 +338,20 @@ function PairsTab() {
                   {p.baseAsset}/{p.quoteAsset} · {(p.supportedExchanges as string[]).join(", ")} · min {p.minOrderSize}
                 </div>
               </div>
-              <Button size="sm" variant="outline"
-                onClick={() => toggle.mutate({ id: p.id, enabled: !p.enabled })}>
-                {p.enabled ? "Disable" : "Enable"}
-              </Button>
+              <div className="flex gap-2">
+                <Button size="sm" variant="outline"
+                  onClick={() => toggle.mutate({ id: p.id, enabled: !p.enabled })}>
+                  {p.enabled ? "Disable" : "Enable"}
+                </Button>
+                <Button size="sm" variant="destructive"
+                  onClick={() => {
+                    if (confirm(`Delete ${p.displayName}? This can't be undone.`)) {
+                      remove.mutate(p.id);
+                    }
+                  }}>
+                  Delete
+                </Button>
+              </div>
             </div>
           )) : <p className="text-sm text-muted-foreground">No pairs yet. Add BTC/USDT above to get started.</p>}
         </CardContent>
