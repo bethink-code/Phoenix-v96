@@ -420,6 +420,21 @@ export const storage = {
       .where(eq(tenantConfigs.tenantId, tenantId));
   },
 
+  async applyPortfolioTier(
+    tenantId: string,
+    tier: string,
+    defaults: Partial<typeof tenantConfigs.$inferInsert>
+  ) {
+    await db
+      .update(tenantConfigs)
+      .set({
+        ...defaults,
+        portfolioTier: tier,
+        updatedAt: new Date(),
+      })
+      .where(eq(tenantConfigs.tenantId, tenantId));
+  },
+
   async setActivePair(tenantId: string, pairId: string | null) {
     await db
       .update(tenants)

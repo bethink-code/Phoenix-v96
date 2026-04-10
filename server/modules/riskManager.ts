@@ -21,6 +21,7 @@ export interface RiskInputs {
   weeklyDrawdownLimitPct: number;
   minLevelRank: number;
   candidateLevelRank: number;
+  pairMinOrderSize: number; // exchange's minimum tradable lot
 }
 
 export type RiskDecision =
@@ -76,6 +77,33 @@ export function assessTrade(i: RiskInputs): RiskDecision {
     return { approved: false, reason: "regime_size_multiplier_zero" };
   }
   const positionSize = riskAmount / riskPerUnit;
+
+  // Below the exchange's minimum tradable lot. The math is fine but the
+  // order would be rejected. This is the floor that bites small portfolios:
+  // if your $1 risk produces 0.05 CRV but the minimum is 0.10, you can't
+  // trade this pair at this scale.
+  if (positionSize < i.pairMinOrderSize) {
+    return {
+      approved: false,
+      reason: "below_min_order_size",
+      detail: {
+        positionSize,
+        minOrderSize: i.pairMinOrderSize,
+        capital: i.capital,
+      },
+    };
+  }
+
+  // Position notional exceeds the entire account — that's leverage and we
+  // don't allow it (PRD §1.3 NO LEVERAGE hard constraint, §7.1).
+  const positionNotional = positionSize * i.entryPrice;
+  if (positionNotional > i.capital) {
+    return {
+      approved: false,
+      reason: "position_exceeds_capital",
+      detail: { positionNotional, capital: i.capital },
+    };
+  }
 
   return { approved: true, positionSize, riskAmount, plannedRR };
 }

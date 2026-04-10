@@ -171,6 +171,10 @@ export const tenantConfigs = pgTable("tenant_configs", {
   paperStartingCapital: numeric("paper_starting_capital", { precision: 20, scale: 2 })
     .notNull()
     .default("10000.00"),
+  // Portfolio-aware risk preset. 'auto' lets the engine pick a tier based
+  // on capital and reapply on capital changes. 'manual' means the user has
+  // hand-tuned the parameters and the engine should leave them alone.
+  portfolioTier: varchar("portfolio_tier", { length: 16 }).notNull().default("auto"),
   riskPercentPerTrade: numeric("risk_percent_per_trade", { precision: 5, scale: 3 })
     .notNull()
     .default("1.000"),

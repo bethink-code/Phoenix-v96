@@ -121,6 +121,7 @@ export function runBacktest(input: BacktestInput): BacktestResult {
       weeklyDrawdownLimitPct: input.config.weeklyDrawdownLimitPct,
       minLevelRank: getRegimeProfile(input.regime).entrySuppressed ? 99 : 1,
       candidateLevelRank: sweep!.level.rank,
+      pairMinOrderSize: 0, // backtests assume any size is fillable
     });
     if (!decision.approved) continue;
 

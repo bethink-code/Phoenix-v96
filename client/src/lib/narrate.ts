@@ -200,6 +200,19 @@ export function narrate(row: DecisionRow): Narration {
       if (innerReason === "max_concurrent_positions_reached") {
         return { text: "Already full on positions. Not adding more.", mood: "watching" };
       }
+      if (innerReason === "below_min_order_size") {
+        return {
+          text: "Setup looked good but the position is too small for this pair. Your portfolio can't trade this market at this scale.",
+          mood: "interested",
+          subtext: proposal ? `${proposal.side} @ ${price(proposal.entryPrice)}` : undefined,
+        };
+      }
+      if (innerReason === "position_exceeds_capital") {
+        return {
+          text: "Stop is too tight — the calculated position is bigger than my whole account. Skipping.",
+          mood: "interested",
+        };
+      }
       if (innerReason === "daily_drawdown_breached") {
         return {
           text: "Down for the day — bot's halting itself. Come back tomorrow.",

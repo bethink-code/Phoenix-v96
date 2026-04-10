@@ -318,6 +318,7 @@ async function tickTenant(tenant: Tenant) {
     weeklyDrawdownLimitPct: Number(config.weeklyDrawdownLimitPct),
     minLevelRank: config.minLevelRank,
     candidateLevelRank: sweep!.level.rank,
+    pairMinOrderSize: Number(pair.minOrderSize),
   });
 
   if (!decision.approved) {

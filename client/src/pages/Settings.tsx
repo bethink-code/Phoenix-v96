@@ -10,12 +10,29 @@ import { apiRequest } from "@/lib/queryClient";
 
 interface TenantConfig {
   paperStartingCapital: string;
+  portfolioTier: string;
   riskPercentPerTrade: string;
   maxConcurrentPositions: number;
   dailyDrawdownLimitPct: string;
   weeklyDrawdownLimitPct: string;
   minRiskRewardRatio: string;
   minLevelRank: number;
+}
+
+const TIER_INFO: Record<string, { label: string; capitalRange: string; risk: string }> = {
+  tiny: { label: "Tiny", capitalRange: "< $500", risk: "2% per trade · 1 position · 5%/10% drawdown" },
+  small: { label: "Small", capitalRange: "$500–$5k", risk: "1.5% per trade · 2 positions · 4%/8% drawdown" },
+  medium: { label: "Medium", capitalRange: "$5k–$50k", risk: "1% per trade · 2 positions · 3%/6% drawdown" },
+  large: { label: "Large", capitalRange: "$50k+", risk: "0.5% per trade · 3 positions · 2%/4% drawdown" },
+  auto: { label: "Auto", capitalRange: "follows capital", risk: "engine picks the tier and reapplies on capital changes" },
+  manual: { label: "Manual", capitalRange: "you tuned it", risk: "the engine won't touch your settings" },
+};
+
+function tierFor(capital: number): string {
+  if (capital < 500) return "tiny";
+  if (capital < 5000) return "small";
+  if (capital < 50000) return "medium";
+  return "large";
 }
 
 interface TenantEnvelope {
@@ -206,6 +223,7 @@ function RiskConfigCard() {
   const qc = useQueryClient();
   const { data } = useQuery<TenantEnvelope>({ queryKey: ["/api/tenant"] });
   const [form, setForm] = useState<TenantConfig | null>(null);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   const effective = form ?? data?.config ?? null;
 
@@ -231,44 +249,115 @@ function RiskConfigCard() {
     },
   });
 
+  const applyTier = useMutation({
+    mutationFn: async (tier: string) => {
+      await apiRequest("/api/tenant/portfolio-tier", {
+        method: "PATCH",
+        body: JSON.stringify({ tier }),
+      });
+    },
+    onSuccess: () => {
+      setForm(null);
+      qc.invalidateQueries({ queryKey: ["/api/tenant"] });
+    },
+  });
+
   if (!effective) return null;
   const update = <K extends keyof TenantConfig>(k: K, v: TenantConfig[K]) =>
     setForm({ ...(form ?? data!.config!), [k]: v });
+
+  const currentTier = effective.portfolioTier ?? "auto";
+  const computedTier = tierFor(Number(effective.paperStartingCapital ?? 0));
+  const displayTier = currentTier === "auto" ? computedTier : currentTier;
+  const tierMeta = TIER_INFO[displayTier] ?? TIER_INFO.medium;
 
   return (
     <Card>
       <CardHeader>
         <CardTitle>Risk parameters</CardTitle>
         <CardDescription>
-          Changes take effect on the next bot tick. Risk limits are immutable at runtime — only changeable here.
+          Tell me how much you've got and I'll set up the rest. You can override individual fields later.
         </CardDescription>
       </CardHeader>
-      <CardContent className="grid gap-3 md:grid-cols-2">
-        <Field label="Paper starting capital (USDT)" value={effective.paperStartingCapital}
-          onChange={(v) => update("paperStartingCapital", v)} />
-        <Field label="Risk % per trade" value={effective.riskPercentPerTrade} onChange={(v) => update("riskPercentPerTrade", v)} />
-        <Field label="Max concurrent positions" type="number" value={String(effective.maxConcurrentPositions)}
-          onChange={(v) => update("maxConcurrentPositions", Number(v) as any)} />
-        <Field label="Daily drawdown limit %" value={effective.dailyDrawdownLimitPct}
-          onChange={(v) => update("dailyDrawdownLimitPct", v)} />
-        <Field label="Weekly drawdown limit %" value={effective.weeklyDrawdownLimitPct}
-          onChange={(v) => update("weeklyDrawdownLimitPct", v)} />
-        <Field label="Min R:R ratio" value={effective.minRiskRewardRatio}
-          onChange={(v) => update("minRiskRewardRatio", v)} />
-        <Field label="Min level rank (1-5)" type="number" value={String(effective.minLevelRank)}
-          onChange={(v) => update("minLevelRank", Number(v) as any)} />
-        <div className="md:col-span-2">
-          <Button
-            disabled={!form || save.isPending}
-            onClick={() => {
-              if (confirm("Save risk parameter changes? They take effect on the next tick.")) {
-                save.mutate();
-              }
-            }}
-          >
-            {save.isPending ? "Saving…" : "Save changes"}
-          </Button>
+      <CardContent className="space-y-4">
+        {/* The simple-mode controls */}
+        <div className="grid gap-3 md:grid-cols-2">
+          <Field
+            label="Paper starting capital (USDT)"
+            value={effective.paperStartingCapital}
+            onChange={(v) => update("paperStartingCapital", v)}
+          />
+          <div>
+            <Label>Tier</Label>
+            <div className="mt-1 flex items-center gap-2">
+              <Badge className="bg-primary/20 text-primary">{tierMeta.label}</Badge>
+              <span className="text-xs text-muted-foreground">{tierMeta.capitalRange}</span>
+              {currentTier === "manual" && (
+                <Badge className="bg-amber-500/10 text-amber-300">manual override</Badge>
+              )}
+            </div>
+            <p className="mt-1 text-[11px] text-muted-foreground">{tierMeta.risk}</p>
+          </div>
         </div>
+
+        {/* Tier action buttons */}
+        <div className="flex flex-wrap gap-2 border-t border-border/40 pt-4">
+          <Button
+            size="sm"
+            variant={currentTier === "auto" ? "default" : "outline"}
+            disabled={applyTier.isPending}
+            onClick={() => applyTier.mutate("auto")}
+          >
+            Auto (follow capital)
+          </Button>
+          {(["tiny", "small", "medium", "large"] as const).map((t) => (
+            <Button
+              key={t}
+              size="sm"
+              variant="outline"
+              disabled={applyTier.isPending}
+              onClick={() => applyTier.mutate(t)}
+            >
+              Use {TIER_INFO[t].label}
+            </Button>
+          ))}
+        </div>
+
+        {/* Advanced toggle */}
+        <button
+          type="button"
+          onClick={() => setShowAdvanced((v) => !v)}
+          className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+        >
+          {showAdvanced ? "▾ Hide" : "▸ Show"} advanced parameters (will switch to manual)
+        </button>
+
+        {showAdvanced && (
+          <div className="grid gap-3 border-t border-border/40 pt-4 md:grid-cols-2">
+            <Field label="Risk % per trade" value={effective.riskPercentPerTrade} onChange={(v) => update("riskPercentPerTrade", v)} />
+            <Field label="Max concurrent positions" type="number" value={String(effective.maxConcurrentPositions)}
+              onChange={(v) => update("maxConcurrentPositions", Number(v) as any)} />
+            <Field label="Daily drawdown limit %" value={effective.dailyDrawdownLimitPct}
+              onChange={(v) => update("dailyDrawdownLimitPct", v)} />
+            <Field label="Weekly drawdown limit %" value={effective.weeklyDrawdownLimitPct}
+              onChange={(v) => update("weeklyDrawdownLimitPct", v)} />
+            <Field label="Min R:R ratio" value={effective.minRiskRewardRatio}
+              onChange={(v) => update("minRiskRewardRatio", v)} />
+            <Field label="Min level rank (1-5)" type="number" value={String(effective.minLevelRank)}
+              onChange={(v) => update("minLevelRank", Number(v) as any)} />
+          </div>
+        )}
+
+        {form && (
+          <div className="border-t border-border/40 pt-4">
+            <Button
+              disabled={save.isPending}
+              onClick={() => save.mutate()}
+            >
+              {save.isPending ? "Saving…" : "Save changes"}
+            </Button>
+          </div>
+        )}
       </CardContent>
     </Card>
   );

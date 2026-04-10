@@ -12,6 +12,7 @@ import {
 import { emergencyMarketExit } from "./modules/emergencyExit";
 import { getRegimeProfile } from "./modules/regimeEngine";
 import { getBinance } from "./modules/exchange/binance";
+import { tierFor, tierDefaults } from "./modules/portfolioTier";
 
 function getUser(req: Request) {
   return req.user as { id: string; email: string; isAdmin: boolean };
@@ -141,16 +142,68 @@ export function registerRoutes(app: Express) {
     if (!parsed.success) return res.status(400).json({ error: "invalid" });
     const u = getUser(req);
     const tenant = await storage.getOrCreateTenantForUser(u.id);
-    await storage.updateTenantConfig(tenant.id, parsed.data);
+    const config = await storage.getTenantConfig(tenant.id);
+
+    // If the user is on the auto tier and just changed capital, reapply
+    // tier defaults so the rest of the parameters track the new size.
+    let patch = parsed.data as Record<string, unknown>;
+    if (
+      parsed.data.paperStartingCapital &&
+      config?.portfolioTier === "auto"
+    ) {
+      const newCapital = Number(parsed.data.paperStartingCapital);
+      const newTier = tierFor(newCapital);
+      patch = { ...patch, ...tierDefaults(newTier) };
+    } else if (
+      parsed.data.riskPercentPerTrade ||
+      parsed.data.maxConcurrentPositions ||
+      parsed.data.minRiskRewardRatio ||
+      parsed.data.minLevelRank ||
+      parsed.data.dailyDrawdownLimitPct ||
+      parsed.data.weeklyDrawdownLimitPct
+    ) {
+      // User edited a tuned field directly — flip them to manual so we
+      // don't overwrite their changes on the next capital tweak.
+      patch = { ...patch, portfolioTier: "manual" };
+    }
+
+    await storage.updateTenantConfig(tenant.id, patch);
     audit({
       userId: u.id,
       tenantId: tenant.id,
       action: "update_tenant_config",
       outcome: "success",
-      detail: parsed.data,
+      detail: patch,
       ipAddress: getIp(req),
     });
     res.json({ ok: true });
+  });
+
+  app.patch("/api/tenant/portfolio-tier", isAuthenticated, async (req, res) => {
+    const { tier } = z
+      .object({ tier: z.enum(["auto", "tiny", "small", "medium", "large"]) })
+      .parse(req.body);
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    const config = await storage.getTenantConfig(tenant.id);
+    if (!config) return res.status(404).json({ error: "no_config" });
+    const capital = Number(config.paperStartingCapital);
+    const resolvedTier = tier === "auto" ? tierFor(capital) : tier;
+    const defaults = tierDefaults(resolvedTier);
+    await storage.applyPortfolioTier(
+      tenant.id,
+      tier === "auto" ? "auto" : resolvedTier,
+      defaults
+    );
+    audit({
+      userId: u.id,
+      tenantId: tenant.id,
+      action: "apply_portfolio_tier",
+      outcome: "success",
+      detail: { requestedTier: tier, resolvedTier, capital },
+      ipAddress: getIp(req),
+    });
+    res.json({ ok: true, resolvedTier, defaults });
   });
 
   app.patch("/api/tenant/pair", isAuthenticated, async (req, res) => {

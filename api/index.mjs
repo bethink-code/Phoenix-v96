@@ -190,6 +190,10 @@ var tenantConfigs = pgTable("tenant_configs", {
   id: uuid("id").primaryKey().defaultRandom(),
   tenantId: uuid("tenant_id").notNull().unique().references(() => tenants.id, { onDelete: "cascade" }),
   paperStartingCapital: numeric("paper_starting_capital", { precision: 20, scale: 2 }).notNull().default("10000.00"),
+  // Portfolio-aware risk preset. 'auto' lets the engine pick a tier based
+  // on capital and reapply on capital changes. 'manual' means the user has
+  // hand-tuned the parameters and the engine should leave them alone.
+  portfolioTier: varchar("portfolio_tier", { length: 16 }).notNull().default("auto"),
   riskPercentPerTrade: numeric("risk_percent_per_trade", { precision: 5, scale: 3 }).notNull().default("1.000"),
   maxConcurrentPositions: integer("max_concurrent_positions").notNull().default(2),
   dailyDrawdownLimitPct: numeric("daily_drawdown_limit_pct", { precision: 5, scale: 2 }).notNull().default("3.00"),
@@ -640,6 +644,13 @@ var storage = {
   },
   async updateTenantConfig(tenantId, patch) {
     await db.update(tenantConfigs).set({ ...patch, updatedAt: /* @__PURE__ */ new Date() }).where(eq(tenantConfigs.tenantId, tenantId));
+  },
+  async applyPortfolioTier(tenantId, tier, defaults) {
+    await db.update(tenantConfigs).set({
+      ...defaults,
+      portfolioTier: tier,
+      updatedAt: /* @__PURE__ */ new Date()
+    }).where(eq(tenantConfigs.tenantId, tenantId));
   },
   async setActivePair(tenantId, pairId) {
     await db.update(tenants).set({ activePairId: pairId }).where(eq(tenants.id, tenantId));
@@ -1151,6 +1162,54 @@ function getRegimeProfile(regime) {
   return REGIME_PROFILES[regime];
 }
 
+// server/modules/portfolioTier.ts
+function tierFor(capital) {
+  if (capital < 500) return "tiny";
+  if (capital < 5e3) return "small";
+  if (capital < 5e4) return "medium";
+  return "large";
+}
+function tierDefaults(tier) {
+  switch (tier) {
+    case "tiny":
+      return {
+        riskPercentPerTrade: "2.000",
+        maxConcurrentPositions: 1,
+        minRiskRewardRatio: "1.50",
+        minLevelRank: 1,
+        dailyDrawdownLimitPct: "5.00",
+        weeklyDrawdownLimitPct: "10.00"
+      };
+    case "small":
+      return {
+        riskPercentPerTrade: "1.500",
+        maxConcurrentPositions: 2,
+        minRiskRewardRatio: "2.00",
+        minLevelRank: 2,
+        dailyDrawdownLimitPct: "4.00",
+        weeklyDrawdownLimitPct: "8.00"
+      };
+    case "medium":
+      return {
+        riskPercentPerTrade: "1.000",
+        maxConcurrentPositions: 2,
+        minRiskRewardRatio: "2.00",
+        minLevelRank: 2,
+        dailyDrawdownLimitPct: "3.00",
+        weeklyDrawdownLimitPct: "6.00"
+      };
+    case "large":
+      return {
+        riskPercentPerTrade: "0.500",
+        maxConcurrentPositions: 3,
+        minRiskRewardRatio: "2.50",
+        minLevelRank: 3,
+        dailyDrawdownLimitPct: "2.00",
+        weeklyDrawdownLimitPct: "4.00"
+      };
+  }
+}
+
 // server/routes.ts
 function getUser(req) {
   return req.user;
@@ -1265,16 +1324,49 @@ function registerRoutes(app2) {
     if (!parsed.success) return res.status(400).json({ error: "invalid" });
     const u = getUser(req);
     const tenant = await storage.getOrCreateTenantForUser(u.id);
-    await storage.updateTenantConfig(tenant.id, parsed.data);
+    const config = await storage.getTenantConfig(tenant.id);
+    let patch = parsed.data;
+    if (parsed.data.paperStartingCapital && config?.portfolioTier === "auto") {
+      const newCapital = Number(parsed.data.paperStartingCapital);
+      const newTier = tierFor(newCapital);
+      patch = { ...patch, ...tierDefaults(newTier) };
+    } else if (parsed.data.riskPercentPerTrade || parsed.data.maxConcurrentPositions || parsed.data.minRiskRewardRatio || parsed.data.minLevelRank || parsed.data.dailyDrawdownLimitPct || parsed.data.weeklyDrawdownLimitPct) {
+      patch = { ...patch, portfolioTier: "manual" };
+    }
+    await storage.updateTenantConfig(tenant.id, patch);
     audit({
       userId: u.id,
       tenantId: tenant.id,
       action: "update_tenant_config",
       outcome: "success",
-      detail: parsed.data,
+      detail: patch,
       ipAddress: getIp(req)
     });
     res.json({ ok: true });
+  });
+  app2.patch("/api/tenant/portfolio-tier", isAuthenticated, async (req, res) => {
+    const { tier } = z2.object({ tier: z2.enum(["auto", "tiny", "small", "medium", "large"]) }).parse(req.body);
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    const config = await storage.getTenantConfig(tenant.id);
+    if (!config) return res.status(404).json({ error: "no_config" });
+    const capital = Number(config.paperStartingCapital);
+    const resolvedTier = tier === "auto" ? tierFor(capital) : tier;
+    const defaults = tierDefaults(resolvedTier);
+    await storage.applyPortfolioTier(
+      tenant.id,
+      tier === "auto" ? "auto" : resolvedTier,
+      defaults
+    );
+    audit({
+      userId: u.id,
+      tenantId: tenant.id,
+      action: "apply_portfolio_tier",
+      outcome: "success",
+      detail: { requestedTier: tier, resolvedTier, capital },
+      ipAddress: getIp(req)
+    });
+    res.json({ ok: true, resolvedTier, defaults });
   });
   app2.patch("/api/tenant/pair", isAuthenticated, async (req, res) => {
     const { pairId } = z2.object({ pairId: z2.string().uuid().nullable() }).parse(req.body);
