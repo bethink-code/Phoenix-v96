@@ -732,11 +732,7 @@ function HistoryTab({
     <div className="space-y-4">
       {timeline.map((item) =>
         item.kind === "session" ? (
-          <SessionHistoryCard
-            key={`s-${item.row.id}`}
-            session={item.row}
-            onContinueFromIteration={onContinueFromIteration}
-          />
+          <SessionHistoryCard key={`s-${item.row.id}`} session={item.row} />
         ) : (
           <ManualRunHistoryCard key={`r-${item.row.id}`} run={item.row} />
         )
@@ -753,13 +749,18 @@ function HistoryTab({
 // expand into the full SessionResult body (chart with axes, params).
 function SessionHistoryCard({
   session,
-  onContinueFromIteration,
 }: {
   session: ARSession;
-  onContinueFromIteration?: (p: StartFormPrefill) => void;
+  // onContinueFromIteration is no longer used here — clicking a card
+  // opens a dedicated SessionDetail page in a new browser tab, and
+  // any Continue actions happen from THAT page (which has its own
+  // path back to the Live tab via prefill). Keeping the prop in
+  // HistoryTab's signature for forward compat but not threading.
 }) {
-  const [open, setOpen] = useState(false);
-  const [view, setView] = useState<SessionView>("trades");
+  // History cards used to expand inline. Now they're pure summary
+  // cards: title + action + sparkline + metadata. Click anywhere on
+  // the card to open the full session detail in a new browser tab,
+  // letting the operator compare multiple past sessions side by side.
   const iterationsQuery = useQuery<ARIteration[]>({
     queryKey: [`/api/autoresearch/sessions/${session.id}/iterations`],
   });
@@ -768,107 +769,70 @@ function SessionHistoryCard({
   const toneClass = toneToClass(verdict.tone);
 
   return (
-    <div className={cn("rounded-lg border", toneClass)}>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="block w-full p-5 text-left transition-colors hover:bg-foreground/[0.02]"
-      >
-        {/* ACTION — biggest text on the card. Plain language description
-            of what the session produced. Mode badge sits next to the
-            status badge so the operator can tell tune from discover
-            sessions at a glance. */}
-        <div className="flex items-start justify-between gap-3">
-          <h3 className="min-w-0 flex-1 text-lg font-semibold leading-snug text-foreground">
-            {verdict.action}
-          </h3>
-          <div className="flex shrink-0 items-center gap-1">
-            <Badge className={cn("text-[10px]", modeBadgeClass(session.mode))}>
-              {session.mode}
-            </Badge>
-            <Badge className={cn("text-[10px]", sessionStatusClass(session.status))}>
-              {session.status}
-            </Badge>
-          </div>
+    <a
+      href={`/experiments/sessions/${session.id}`}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={cn(
+        "block rounded-lg border p-5 transition-colors hover:bg-foreground/[0.02]",
+        toneClass
+      )}
+    >
+      {/* ACTION — biggest text on the card. Plain language description
+          of what the session produced. Mode badge sits next to the
+          status badge so the operator can tell tune from discover
+          sessions at a glance. */}
+      <div className="flex items-start justify-between gap-3">
+        <h3 className="min-w-0 flex-1 text-lg font-semibold leading-snug text-foreground">
+          {verdict.action}
+        </h3>
+        <div className="flex shrink-0 items-center gap-1">
+          <Badge className={cn("text-[10px]", modeBadgeClass(session.mode))}>
+            {session.mode}
+          </Badge>
+          <Badge className={cn("text-[10px]", sessionStatusClass(session.status))}>
+            {session.status}
+          </Badge>
         </div>
+      </div>
 
-        {/* Optional supporting detail — smaller, grey */}
-        {verdict.detail && (
-          <p className="mt-1 text-xs text-muted-foreground">{verdict.detail}</p>
-        )}
+      {/* Optional supporting detail — smaller, grey */}
+      {verdict.detail && (
+        <p className="mt-1 text-xs text-muted-foreground">{verdict.detail}</p>
+      )}
 
-        {/* Sparkline — visible at-a-glance trade-count-over-iterations
-            shape. Trades is the more informative metric than score for
-            diagnostic experiments (score is 0 unless trades >= 3, so a
-            score sparkline is a flat line by definition for "no trades"
-            sessions). */}
-        {iterations.length > 0 && (
-          <div className="mt-3">
-            <Sparkline iterations={iterations} metric="trades" />
-          </div>
-        )}
-
-        {/* Goal — context, not headline. Small and grey because the
-            operator already knows what they asked; the answer is what
-            they care about. */}
-        <p className="mt-3 text-[11px] text-muted-foreground/70">
-          Goal: {session.goal}
-        </p>
-
-        {/* Metadata strip */}
-        <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground/70">
-          <span>{new Date(session.startedAt).toLocaleDateString()}</span>
-          <span>·</span>
-          <span>{session.timeframe} · {session.regime}</span>
-          <span>·</span>
-          <span>{session.iterationsRun}/{session.maxIterations} iters</span>
-          <span>·</span>
-          <span>{session.model}</span>
-          <span>·</span>
-          <span>${Number(session.totalCostUsd).toFixed(2)}</span>
-          <span className="ml-auto text-foreground/60">
-            {open ? "click to collapse ▴" : "click for details ▾"}
-          </span>
-        </div>
-      </button>
-
-      {/* Expanded body — same 4 sub-tabs as the Live surface so the
-          structure is consistent: Trades / Score / Iterations /
-          Successes. Plus the params block (winning diff or best-iter
-          reference) which is small enough to leave under the sub-tabs
-          rather than become its own tab. */}
-      {open && (
-        <div className="space-y-4 border-t border-border/40 p-4">
-          <SessionViewTabs view={view} onChange={setView} />
-          <SessionViewContent
-            view={view}
-            session={session}
-            iterations={iterations}
-            onContinueFromIteration={onContinueFromIteration}
-          />
-
-          {verdict.foundWinner && verdict.bestIter && verdict.baseline && (
-            <div className="mt-2 rounded border border-border/40 bg-background/40 p-3">
-              <div className="mb-2 text-[10px] uppercase tracking-wide text-muted-foreground">
-                What changed
-              </div>
-              <ParamDiffTable
-                baseline={verdict.baseline.params}
-                winner={verdict.bestIter.params}
-              />
-            </div>
-          )}
-          {!verdict.foundWinner && verdict.bestIter && (
-            <div className="mt-2 rounded border border-border/40 bg-background/40 p-3">
-              <div className="mb-2 text-[10px] uppercase tracking-wide text-muted-foreground">
-                Best iteration (#{verdict.bestIter.idx + 1}) — for reference
-              </div>
-              <ParamGrid params={verdict.bestIter.params} />
-            </div>
-          )}
+      {/* Sparkline — visible at-a-glance trade-count-over-iterations
+          shape. Trades is the more informative metric than score for
+          diagnostic experiments (score is 0 unless trades >= 3, so a
+          score sparkline is a flat line by definition for "no trades"
+          sessions). */}
+      {iterations.length > 0 && (
+        <div className="mt-3">
+          <Sparkline iterations={iterations} metric="trades" />
         </div>
       )}
-    </div>
+
+      {/* Goal — context, not headline. Small and grey because the
+          operator already knows what they asked; the answer is what
+          they care about. */}
+      <p className="mt-3 text-[11px] text-muted-foreground/70">
+        Goal: {session.goal}
+      </p>
+
+      {/* Metadata strip */}
+      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground/70">
+        <span>{new Date(session.startedAt).toLocaleDateString()}</span>
+        <span>·</span>
+        <span>{session.timeframe} · {session.regime}</span>
+        <span>·</span>
+        <span>{session.iterationsRun}/{session.maxIterations} iters</span>
+        <span>·</span>
+        <span>{session.model}</span>
+        <span>·</span>
+        <span>${Number(session.totalCostUsd).toFixed(2)}</span>
+        <span className="ml-auto text-foreground/60">open in new tab ↗</span>
+      </div>
+    </a>
   );
 }
 
@@ -994,7 +958,68 @@ interface ARIteration {
   createdAt: string;
 }
 
-type SessionView = "trades" | "score" | "iterations" | "successes";
+export type SessionView = "trades" | "score" | "iterations" | "successes";
+
+// Shared layout used by both the live AutoresearchSurface and the
+// dedicated SessionDetail page. Takes a session + iterations and renders
+// the identity card + 4 sub-tabs (Trades / Score / Iterations /
+// Successes). Caller provides optional `actions` for the identity card
+// (Live tab provides Start/Stop/View buttons; SessionDetail leaves it
+// empty so it's a pure viewer).
+export function SessionDetailView({
+  session,
+  iterations,
+  actions,
+  onContinueFromIteration,
+}: {
+  session: ARSession | null;
+  iterations: ARIteration[];
+  actions?: React.ReactNode;
+  onContinueFromIteration?: (p: StartFormPrefill) => void;
+}) {
+  const [view, setView] = useState<SessionView>("trades");
+  const status: "idle" | "running" | "done" | "aborted" | "error" =
+    session?.status ?? "idle";
+  const iterationsRun = session?.iterationsRun ?? 0;
+  const maxIterations = session?.maxIterations ?? 0;
+  const bestScore = session?.bestScore ? Number(session.bestScore) : null;
+  const spentUsd = session?.totalCostUsd ? Number(session.totalCostUsd) : 0;
+
+  return (
+    <div className="space-y-4">
+      <ResearcherIdentityCard
+        status={status}
+        iterationsRun={iterationsRun}
+        maxIterations={maxIterations}
+        bestScore={bestScore}
+        spentUsd={spentUsd}
+        goal={session?.goal}
+        stats={
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <StatBlock label="Status" value={status.toUpperCase()} />
+            <StatBlock
+              label="Iteration"
+              value={session ? `${iterationsRun} / ${maxIterations}` : "—"}
+            />
+            <StatBlock
+              label="Best score"
+              value={bestScore != null && bestScore > 0 ? bestScore.toFixed(4) : "—"}
+            />
+            <StatBlock label="Spent" value={`$${spentUsd.toFixed(2)}`} />
+          </div>
+        }
+        actions={actions}
+      />
+      <SessionViewTabs view={view} onChange={setView} />
+      <SessionViewContent
+        view={view}
+        session={session}
+        iterations={iterations}
+        onContinueFromIteration={onContinueFromIteration}
+      />
+    </div>
+  );
+}
 
 function AutoresearchSurface({
   onViewHistory,
@@ -1008,7 +1033,6 @@ function AutoresearchSurface({
   onContinueFromIteration: (p: StartFormPrefill) => void;
 }) {
   const qc = useQueryClient();
-  const [view, setView] = useState<SessionView>("trades");
 
   // Active session = currently running, OR most recently finished. The
   // identity card always shows ONE session — we resolve which one to show
@@ -1055,84 +1079,49 @@ function AutoresearchSurface({
 
   const status: "idle" | "running" | "done" | "aborted" | "error" =
     focusedSession?.status ?? "idle";
-  const iterationsRun = focusedSession?.iterationsRun ?? 0;
-  const maxIterations = focusedSession?.maxIterations ?? 0;
-  const bestScore = focusedSession?.bestScore ? Number(focusedSession.bestScore) : null;
-  const spentUsd = focusedSession?.totalCostUsd ? Number(focusedSession.totalCostUsd) : 0;
+
+  // Live-tab actions: Start form when idle, Stop when running,
+  // View-result link + Start form when done/aborted/error.
+  const actions = (
+    <div className="flex flex-wrap items-center gap-2">
+      {status === "running" && focusedSession ? (
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => stopMutation.mutate(focusedSession.id)}
+          disabled={stopMutation.isPending}
+        >
+          {stopMutation.isPending ? "Stopping…" : "Stop"}
+        </Button>
+      ) : status === "idle" ? (
+        <StartSessionForm
+          prefill={prefill ?? undefined}
+          onPrefillConsumed={onPrefillConsumed}
+        />
+      ) : (
+        <>
+          <Button size="sm" onClick={onViewHistory}>
+            View result in History →
+          </Button>
+          <StartSessionForm
+            prefill={prefill ?? undefined}
+            onPrefillConsumed={onPrefillConsumed}
+          />
+        </>
+      )}
+      {focusedSession && focusedSession.errorMessage && (
+        <span className="text-xs text-red-300">{focusedSession.errorMessage}</span>
+      )}
+    </div>
+  );
 
   return (
-    <div className="space-y-4">
-      <ResearcherIdentityCard
-        status={status}
-        iterationsRun={iterationsRun}
-        maxIterations={maxIterations}
-        bestScore={bestScore}
-        spentUsd={spentUsd}
-        goal={focusedSession?.goal}
-        stats={
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-            <StatBlock label="Status" value={status.toUpperCase()} />
-            <StatBlock
-              label="Iteration"
-              value={
-                focusedSession ? `${iterationsRun} / ${maxIterations}` : "—"
-              }
-            />
-            <StatBlock
-              label="Best score"
-              value={bestScore != null && bestScore > 0 ? bestScore.toFixed(4) : "—"}
-            />
-            <StatBlock label="Spent" value={`$${spentUsd.toFixed(2)}`} />
-          </div>
-        }
-        actions={
-          <div className="flex flex-wrap items-center gap-2">
-            {status === "running" && focusedSession ? (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => stopMutation.mutate(focusedSession.id)}
-                disabled={stopMutation.isPending}
-              >
-                {stopMutation.isPending ? "Stopping…" : "Stop"}
-              </Button>
-            ) : status === "idle" ? (
-              <StartSessionForm
-                prefill={prefill ?? undefined}
-                onPrefillConsumed={onPrefillConsumed}
-              />
-            ) : (
-              // Session is done/aborted/errored — give a clear path to
-              // the rich result card without blocking the operator from
-              // starting another session right away.
-              <>
-                <Button size="sm" onClick={onViewHistory}>
-                  View result in History →
-                </Button>
-                <StartSessionForm
-                prefill={prefill ?? undefined}
-                onPrefillConsumed={onPrefillConsumed}
-              />
-              </>
-            )}
-            {focusedSession && focusedSession.errorMessage && (
-              <span className="text-xs text-red-300">{focusedSession.errorMessage}</span>
-            )}
-          </div>
-        }
-      />
-
-      {/* Sub-tabs underneath the identity card — four views of the
-          active session. Each shows ONE thing well rather than four
-          things stacked. */}
-      <SessionViewTabs view={view} onChange={setView} />
-      <SessionViewContent
-        view={view}
-        session={focusedSession}
-        iterations={iterationsQuery.data ?? []}
-        onContinueFromIteration={onContinueFromIteration}
-      />
-    </div>
+    <SessionDetailView
+      session={focusedSession}
+      iterations={iterationsQuery.data ?? []}
+      actions={actions}
+      onContinueFromIteration={onContinueFromIteration}
+    />
   );
 }
 
