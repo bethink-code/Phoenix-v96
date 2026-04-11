@@ -50,7 +50,7 @@ export interface IterationSummary {
   winRate: number;
   netPnl: number;
   rejectionTop: Record<string, number> | null;
-  status: "keep" | "discard" | "crash" | "baseline";
+  status: "keep" | "discard" | "crash" | "baseline" | "sampled";
   rationale?: string;
 }
 
@@ -95,14 +95,58 @@ When picking your next hypothesis:
 
 Your responses are machine-parsed. JSON only. No markdown fences. No commentary outside the rationale field.`;
 
-// The default system prompt. The orchestrator does NOT use this directly
-// at runtime — every session carries its own `systemPrompt` value (set
-// via the start form, which fetches this default and lets the operator
-// edit it before submitting). This export exists so the
-// /api/autoresearch/default-system-prompt endpoint has something to
-// return, and so that buildMessages has a documented fallback if a
-// session row somehow has an empty systemPrompt.
+// The default system prompt for TUNE mode. The orchestrator does NOT use
+// this directly at runtime — every session carries its own `systemPrompt`
+// value (set via the start form, which fetches this default and lets the
+// operator edit it before submitting). This export exists so the
+// /api/autoresearch/default-system-prompt endpoint has something to return,
+// and so that buildMessages has a documented fallback if a session row
+// somehow has an empty systemPrompt.
 export const DEFAULT_SYSTEM_PROMPT = SYSTEM_PROMPT;
+
+// Discover-mode system prompt. The agent's job is fundamentally different:
+// no hill-climbing, no convergence — sample the search space diversely so
+// the operator can SEE what the strategy does across configs. The output
+// of a discover session is a survey of behaviour, not a recommendation.
+//
+// As with the tune prompt, the operator sees this in the start form and
+// can edit it per session. This is a starting point.
+export const DEFAULT_DISCOVER_PROMPT = `You are an autonomous trading-strategy explorer running in DISCOVER mode. Your job is NOT to find a winning configuration. Your job is to map the search space — sample diverse parameter combinations so the operator can see what the strategy actually DOES across the parameter range, where trades happen at all, where they don't, and what tradeoffs exist between trade count, win rate, P&L, and drawdown.
+
+You are NOT a chatbot. You do not greet the user, apologize, hedge, or explain what you're about to do outside the JSON output. Every response is a single JSON object with the shape:
+
+{
+  "params": { ... full ProposedParams object ... },
+  "rationale": "1-2 sentences explaining what region of the search space this iteration is exploring and why"
+}
+
+The params object MUST contain ALL of the following fields. Missing any field is a hard error.
+
+- minLevelRank (integer 1..5)
+- minRiskRewardRatio (number 1.0..3.0)
+- maxConcurrentPositions (integer 1..5)
+- swingLookback (integer 3..15)
+- equalTolerancePct (number 0.01..0.5)
+- mergeTolerancePct (number 0.05..0.5)
+- minTouches (integer 1..3)
+- minWickProtrusionPct (number 0.005..0.5)
+- targetDistanceMultiplier (number 1.0..3.0)
+
+Discover-mode discipline:
+
+1. DO NOT hill-climb. Do not try to "improve" on previous iterations. There is no "best" in discover mode — every iteration is a data point.
+2. DO sample widely. Cover the param space. If iteration 1 was at minLevelRank=3 swingLookback=5, iteration 2 should be at notably different values (e.g. minLevelRank=1 swingLookback=10) to explore a different region.
+3. Vary multiple dimensions per iteration when useful — coverage matters more than attribution here.
+4. Consciously target unexplored regions. Read the history of previous iterations and pick params that are FAR from the centroid of what's been tried so far.
+5. Don't repeat exact param sets you've already tried. Check the history.
+6. After ~half the iteration budget, you should have visited corners of the search space the operator wouldn't think to try manually. Lean into combinations that look counterintuitive.
+7. Your rationale should explain the REGION you're sampling, not the hypothesis ("targeting low-rank, long-lookback corner" — not "I think this will improve trades").
+
+The operator will read the resulting iteration log as a survey of strategy behaviour and use it to inform decisions about what rules to keep, change, or add. Your job is to give them coverage, not opinions.
+
+Your responses are machine-parsed. JSON only. No markdown fences. No commentary outside the rationale field.`;
+
+export type AutoresearchMode = "tune" | "discover";
 
 export function buildMessages(args: {
   ctx: SessionContext;
@@ -110,22 +154,38 @@ export function buildMessages(args: {
   currentParams: ProposedParams;
   isBaseline: boolean;
   systemPrompt: string;
+  mode: AutoresearchMode;
 }): { role: "system" | "user"; content: string }[] {
-  const { ctx, history, currentParams, isBaseline, systemPrompt } = args;
+  const { ctx, history, currentParams, isBaseline, systemPrompt, mode } = args;
 
-  const userContent = isBaseline
-    ? `Goal: ${ctx.goal}
+  let userContent: string;
+  if (isBaseline) {
+    userContent = `Goal: ${ctx.goal}
 
 Pair: ${ctx.pair.symbol} · timeframe: ${ctx.timeframe} · lookback: ${ctx.lookbackBars} bars · regime: ${ctx.regime}
+Mode: ${mode}
 
-This is the BASELINE iteration. Return the current params as-is so we can establish a starting score:
+This is the BASELINE iteration. Return the current params as-is so we can establish a starting reference point:
 
 ${JSON.stringify(currentParams, null, 2)}
 
-Respond with the same params and a one-sentence rationale that says "baseline".`
-    : `Goal: ${ctx.goal}
+Respond with the same params and a one-sentence rationale that says "baseline".`;
+  } else if (mode === "discover") {
+    userContent = `Goal: ${ctx.goal}
 
 Pair: ${ctx.pair.symbol} · timeframe: ${ctx.timeframe} · lookback: ${ctx.lookbackBars} bars · regime: ${ctx.regime}
+Mode: discover (sample the search space, do NOT hill-climb)
+
+Iterations sampled so far (${history.length} data points):
+${formatHistory(history)}
+
+Pick a NEW configuration that explores a region of the search space that previous iterations haven't covered yet. Vary multiple dimensions when useful. The goal is breadth — give the operator a survey of how the strategy behaves across the param space.`;
+  } else {
+    // tune mode
+    userContent = `Goal: ${ctx.goal}
+
+Pair: ${ctx.pair.symbol} · timeframe: ${ctx.timeframe} · lookback: ${ctx.lookbackBars} bars · regime: ${ctx.regime}
+Mode: tune (hill-climb to maximise score)
 
 History so far (${history.length} iterations):
 ${formatHistory(history)}
@@ -134,6 +194,7 @@ Current best params:
 ${JSON.stringify(currentParams, null, 2)}
 
 Propose the next iteration. Return a JSON object with "params" (all fields) and "rationale" (1-2 sentences).`;
+  }
 
   return [
     { role: "system", content: systemPrompt || DEFAULT_SYSTEM_PROMPT },

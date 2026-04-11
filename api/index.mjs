@@ -359,6 +359,15 @@ var autoresearchSessions = pgTable(
     regime: regimeEnum("regime").notNull(),
     model: varchar("model", { length: 64 }).notNull(),
     // gpt-4o, gpt-4o-mini, etc.
+    // Two modes:
+    //   tune     — agent hill-climbs to maximize score against the existing
+    //              strategy + scoring function. Find a winning config.
+    //   discover — agent samples the search space diversely. No hill-climb,
+    //              no winner. Output is a survey: trades, win rate, P&L,
+    //              drawdown across the param space. Used to understand what
+    //              the strategy DOES before deciding what rules to keep
+    //              or change.
+    mode: varchar("mode", { length: 16 }).notNull().default("tune"),
     maxIterations: integer("max_iterations").notNull(),
     // The system prompt actually used for this session. Stored verbatim
     // so the operator can audit what the agent was instructed to do.
@@ -2348,19 +2357,69 @@ When picking your next hypothesis:
 
 Your responses are machine-parsed. JSON only. No markdown fences. No commentary outside the rationale field.`;
 var DEFAULT_SYSTEM_PROMPT = SYSTEM_PROMPT;
+var DEFAULT_DISCOVER_PROMPT = `You are an autonomous trading-strategy explorer running in DISCOVER mode. Your job is NOT to find a winning configuration. Your job is to map the search space \u2014 sample diverse parameter combinations so the operator can see what the strategy actually DOES across the parameter range, where trades happen at all, where they don't, and what tradeoffs exist between trade count, win rate, P&L, and drawdown.
+
+You are NOT a chatbot. You do not greet the user, apologize, hedge, or explain what you're about to do outside the JSON output. Every response is a single JSON object with the shape:
+
+{
+  "params": { ... full ProposedParams object ... },
+  "rationale": "1-2 sentences explaining what region of the search space this iteration is exploring and why"
+}
+
+The params object MUST contain ALL of the following fields. Missing any field is a hard error.
+
+- minLevelRank (integer 1..5)
+- minRiskRewardRatio (number 1.0..3.0)
+- maxConcurrentPositions (integer 1..5)
+- swingLookback (integer 3..15)
+- equalTolerancePct (number 0.01..0.5)
+- mergeTolerancePct (number 0.05..0.5)
+- minTouches (integer 1..3)
+- minWickProtrusionPct (number 0.005..0.5)
+- targetDistanceMultiplier (number 1.0..3.0)
+
+Discover-mode discipline:
+
+1. DO NOT hill-climb. Do not try to "improve" on previous iterations. There is no "best" in discover mode \u2014 every iteration is a data point.
+2. DO sample widely. Cover the param space. If iteration 1 was at minLevelRank=3 swingLookback=5, iteration 2 should be at notably different values (e.g. minLevelRank=1 swingLookback=10) to explore a different region.
+3. Vary multiple dimensions per iteration when useful \u2014 coverage matters more than attribution here.
+4. Consciously target unexplored regions. Read the history of previous iterations and pick params that are FAR from the centroid of what's been tried so far.
+5. Don't repeat exact param sets you've already tried. Check the history.
+6. After ~half the iteration budget, you should have visited corners of the search space the operator wouldn't think to try manually. Lean into combinations that look counterintuitive.
+7. Your rationale should explain the REGION you're sampling, not the hypothesis ("targeting low-rank, long-lookback corner" \u2014 not "I think this will improve trades").
+
+The operator will read the resulting iteration log as a survey of strategy behaviour and use it to inform decisions about what rules to keep, change, or add. Your job is to give them coverage, not opinions.
+
+Your responses are machine-parsed. JSON only. No markdown fences. No commentary outside the rationale field.`;
 function buildMessages(args) {
-  const { ctx, history, currentParams, isBaseline, systemPrompt } = args;
-  const userContent = isBaseline ? `Goal: ${ctx.goal}
+  const { ctx, history, currentParams, isBaseline, systemPrompt, mode } = args;
+  let userContent;
+  if (isBaseline) {
+    userContent = `Goal: ${ctx.goal}
 
 Pair: ${ctx.pair.symbol} \xB7 timeframe: ${ctx.timeframe} \xB7 lookback: ${ctx.lookbackBars} bars \xB7 regime: ${ctx.regime}
+Mode: ${mode}
 
-This is the BASELINE iteration. Return the current params as-is so we can establish a starting score:
+This is the BASELINE iteration. Return the current params as-is so we can establish a starting reference point:
 
 ${JSON.stringify(currentParams, null, 2)}
 
-Respond with the same params and a one-sentence rationale that says "baseline".` : `Goal: ${ctx.goal}
+Respond with the same params and a one-sentence rationale that says "baseline".`;
+  } else if (mode === "discover") {
+    userContent = `Goal: ${ctx.goal}
 
 Pair: ${ctx.pair.symbol} \xB7 timeframe: ${ctx.timeframe} \xB7 lookback: ${ctx.lookbackBars} bars \xB7 regime: ${ctx.regime}
+Mode: discover (sample the search space, do NOT hill-climb)
+
+Iterations sampled so far (${history.length} data points):
+${formatHistory(history)}
+
+Pick a NEW configuration that explores a region of the search space that previous iterations haven't covered yet. Vary multiple dimensions when useful. The goal is breadth \u2014 give the operator a survey of how the strategy behaves across the param space.`;
+  } else {
+    userContent = `Goal: ${ctx.goal}
+
+Pair: ${ctx.pair.symbol} \xB7 timeframe: ${ctx.timeframe} \xB7 lookback: ${ctx.lookbackBars} bars \xB7 regime: ${ctx.regime}
+Mode: tune (hill-climb to maximise score)
 
 History so far (${history.length} iterations):
 ${formatHistory(history)}
@@ -2369,6 +2428,7 @@ Current best params:
 ${JSON.stringify(currentParams, null, 2)}
 
 Propose the next iteration. Return a JSON object with "params" (all fields) and "rationale" (1-2 sentences).`;
+  }
   return [
     { role: "system", content: systemPrompt || DEFAULT_SYSTEM_PROMPT },
     { role: "user", content: userContent }
@@ -2440,12 +2500,17 @@ function narrateIteration(o) {
   }
   if (o.isBaseline || o.status === "baseline") {
     if (o.trades === 0) {
-      return `Baseline: ${o.trades} trades, score ${o.newScore.toFixed(4)}. The current config doesn't trade at all on this dataset \u2014 that's the problem to solve.`;
+      return `Baseline: ${o.trades} trades. Reference point recorded.`;
     }
-    return `Baseline: ${o.trades} trades, score ${o.newScore.toFixed(4)}. That's the bar to beat.`;
+    return `Baseline: ${o.trades} trades, score ${o.newScore.toFixed(4)}. Reference point recorded.`;
   }
   const diff = diffParams(o.prevParams, o.newParams);
   const change = diff ? `${diff.key} ${formatVal(diff.before)} \u2192 ${formatVal(diff.after)}` : "tweaked params";
+  if (o.status === "sampled") {
+    const wr = o.winRate != null ? `${Math.round(o.winRate * 100)}%` : "\u2014";
+    const pnl = o.netPnl != null ? `${o.netPnl >= 0 ? "+" : ""}${o.netPnl.toFixed(2)}` : "\u2014";
+    return `Iteration ${o.idx + 1}: ${change}. ${o.trades} trades, ${wr} wins, ${pnl} P&L.`;
+  }
   if (o.status === "keep") {
     const delta = o.prevScore != null ? o.newScore - o.prevScore : o.newScore;
     return `Iteration ${o.idx + 1}: ${change}. Score ${o.newScore.toFixed(4)} (+${delta.toFixed(4)}), ${o.trades} trades. Keeping.`;
@@ -2489,6 +2554,7 @@ async function startSession(args) {
     lookbackBars: args.lookbackBars,
     regime: args.regime,
     model: args.model,
+    mode: args.mode,
     maxIterations: args.maxIterations,
     systemPrompt: args.systemPrompt,
     status: "running",
@@ -2551,7 +2617,8 @@ async function runLoop(session2, args) {
           // Read the prompt from the session row, NOT a module-level
           // constant. The operator's confirmed/edited prompt at start
           // time is what runs.
-          systemPrompt: session2.systemPrompt
+          systemPrompt: session2.systemPrompt,
+          mode: args.mode
         });
         const response = await chat({
           model: args.model,
@@ -2649,6 +2716,9 @@ async function runLoop(session2, args) {
       bestScore = score;
       bestParams = proposedParams;
       currentParams = proposedParams;
+    } else if (args.mode === "discover") {
+      status = "sampled";
+      currentParams = proposedParams;
     } else if (score > bestScore) {
       status = "keep";
       bestScore = score;
@@ -2667,6 +2737,8 @@ async function runLoop(session2, args) {
       prevScore: idx === 0 ? null : bestScore - (status === "keep" ? score - bestScore : 0),
       newScore: score,
       trades: backtestResult.trades,
+      winRate: backtestResult.winRate,
+      netPnl: backtestResult.netPnl,
       status
     });
     const iterationRow = await persistIteration({
@@ -2699,12 +2771,12 @@ async function runLoop(session2, args) {
       status,
       rationale
     });
-    if (status === "keep" || status === "baseline") {
+    if (args.mode === "tune" && (status === "keep" || status === "baseline")) {
       bestIterationId = iterationRow.id;
     }
     await db.update(autoresearchSessions).set({
       iterationsRun: idx + 1,
-      bestScore: bestScore.toFixed(6),
+      bestScore: args.mode === "tune" ? bestScore.toFixed(6) : null,
       bestIterationId,
       totalCostUsd: totalCostUsd.toFixed(6)
     }).where(eq3(autoresearchSessions.id, session2.id));
@@ -3065,8 +3137,10 @@ function registerRoutes(app2) {
   app2.get("/api/autoresearch/capabilities", isAuthenticated, (_req, res) => {
     res.json({ available: isOpenAIConfigured() });
   });
-  app2.get("/api/autoresearch/default-system-prompt", isAuthenticated, (_req, res) => {
-    res.type("text/plain").send(DEFAULT_SYSTEM_PROMPT);
+  app2.get("/api/autoresearch/default-system-prompt", isAuthenticated, (req, res) => {
+    const mode = req.query.mode === "discover" ? "discover" : "tune";
+    const prompt = mode === "discover" ? DEFAULT_DISCOVER_PROMPT : DEFAULT_SYSTEM_PROMPT;
+    res.type("text/plain").send(prompt);
   });
   app2.post("/api/autoresearch/sessions", isAuthenticated, async (req, res) => {
     if (!isOpenAIConfigured()) {
@@ -3091,6 +3165,7 @@ function registerRoutes(app2) {
       ]),
       model: z2.enum(["gpt-4o", "gpt-4o-mini"]),
       maxIterations: z2.number().int().min(5).max(200),
+      mode: z2.enum(["tune", "discover"]).default("tune"),
       // Operator-confirmed system prompt. Required — the client always
       // submits the textarea contents (pre-populated from
       // /api/autoresearch/default-system-prompt and editable). Capped
@@ -3124,7 +3199,8 @@ function registerRoutes(app2) {
         regime: parsed.data.regime,
         model: parsed.data.model,
         maxIterations: parsed.data.maxIterations,
-        systemPrompt: parsed.data.systemPrompt
+        systemPrompt: parsed.data.systemPrompt,
+        mode: parsed.data.mode
       });
       audit({
         userId: u.id,

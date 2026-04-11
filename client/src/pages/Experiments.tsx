@@ -732,16 +732,22 @@ function SessionHistoryCard({ session }: { session: ARSession }) {
         onClick={() => setOpen((v) => !v)}
         className="block w-full p-5 text-left transition-colors hover:bg-foreground/[0.02]"
       >
-        {/* ACTION — biggest text on the card. Plain language, combines
-            outcome + recommendation. This is what the operator needs to
-            read; everything else is supporting context. */}
+        {/* ACTION — biggest text on the card. Plain language description
+            of what the session produced. Mode badge sits next to the
+            status badge so the operator can tell tune from discover
+            sessions at a glance. */}
         <div className="flex items-start justify-between gap-3">
           <h3 className="min-w-0 flex-1 text-lg font-semibold leading-snug text-foreground">
             {verdict.action}
           </h3>
-          <Badge className={cn("shrink-0 text-[10px]", sessionStatusClass(session.status))}>
-            {session.status}
-          </Badge>
+          <div className="flex shrink-0 items-center gap-1">
+            <Badge className={cn("text-[10px]", modeBadgeClass(session.mode))}>
+              {session.mode}
+            </Badge>
+            <Badge className={cn("text-[10px]", sessionStatusClass(session.status))}>
+              {session.status}
+            </Badge>
+          </div>
         </div>
 
         {/* Optional supporting detail — smaller, grey */}
@@ -784,18 +790,25 @@ function SessionHistoryCard({ session }: { session: ARSession }) {
         </div>
       </button>
 
-      {/* Expanded body — supporting data only. The verdict text is
-          already visible in the collapsed header above; expanding adds
-          both charts (trades + score) and the params.
-          Trades chart first because it's the more useful signal for
-          diagnostic experiments. Score second for sessions where the
-          goal is profit-based. */}
+      {/* Expanded body — supporting data. Chart shape depends on mode:
+          - tune: trades + score, both with running-best lines (the
+            climb/flatline signal is what tune mode is about)
+          - discover: trades + win rate + net PnL + drawdown, no
+            running-best lines (every point is a sample, no winner) */}
       {open && (
         <div className="space-y-4 border-t border-border/40 p-4">
-          {iterations.length > 0 && (
+          {iterations.length > 0 && session.mode === "tune" && (
             <>
               <IterationChart iterations={iterations} metric="trades" />
               <IterationChart iterations={iterations} metric="score" />
+            </>
+          )}
+          {iterations.length > 0 && session.mode === "discover" && (
+            <>
+              <IterationChart iterations={iterations} metric="trades" showBest={false} />
+              <IterationChart iterations={iterations} metric="winRate" showBest={false} />
+              <IterationChart iterations={iterations} metric="netPnl" showBest={false} />
+              <IterationChart iterations={iterations} metric="drawdown" showBest={false} />
             </>
           )}
 
@@ -912,6 +925,7 @@ interface ARSession {
   lookbackBars: number;
   regime: string;
   model: string;
+  mode: "tune" | "discover";
   maxIterations: number;
   status: "running" | "done" | "aborted" | "error";
   iterationsRun: number;
@@ -936,7 +950,7 @@ interface ARIteration {
   barsEvaluated: number;
   entriesTaken: number;
   rejectionTop: Record<string, number> | null;
-  status: "keep" | "discard" | "crash" | "baseline";
+  status: "keep" | "discard" | "crash" | "baseline" | "sampled";
   narration: string;
   rationale: string | null;
   inputTokens: number;
@@ -1112,6 +1126,7 @@ function StartSessionForm() {
   const qc = useQueryClient();
   const pairs = useQuery<MarketPair[]>({ queryKey: ["/api/markets"] });
   const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState<"tune" | "discover">("tune");
   const [goal, setGoal] = useState(
     "Find a config where this pair opens at least 1 trade per day with positive net PnL."
   );
@@ -1125,18 +1140,38 @@ function StartSessionForm() {
   const [maxIterations, setMaxIterations] = useState(30);
   const [systemPrompt, setSystemPrompt] = useState("");
   const [promptOpen, setPromptOpen] = useState(false);
+  // When the form opens or the mode toggles, refetch the default prompt
+  // for that mode. We track which mode the current textarea contents
+  // came from so toggling mode → refetches → replaces. If the operator
+  // has edited the prompt, switching mode wipes their edit (intentional —
+  // mode-specific prompts are very different in shape).
+  const [promptLoadedForMode, setPromptLoadedForMode] = useState<"tune" | "discover" | null>(null);
 
-  // Fetch the default system prompt when the form first opens. Only
-  // overwrites the textarea if it's empty — never clobbers an in-progress
-  // edit. This is the source of the agent's "constitution"; the operator
-  // sees and confirms it before every session.
   useEffect(() => {
-    if (!open || systemPrompt) return;
-    fetch("/api/autoresearch/default-system-prompt", { credentials: "include" })
+    if (!open) return;
+    if (promptLoadedForMode === mode && systemPrompt) return;
+    fetch(`/api/autoresearch/default-system-prompt?mode=${mode}`, {
+      credentials: "include",
+    })
       .then((r) => (r.ok ? r.text() : Promise.reject(r.statusText)))
-      .then((text) => setSystemPrompt(text))
+      .then((text) => {
+        setSystemPrompt(text);
+        setPromptLoadedForMode(mode);
+      })
       .catch((err) => console.error("[autoresearch] fetch default prompt failed", err));
-  }, [open, systemPrompt]);
+  }, [open, mode, promptLoadedForMode, systemPrompt]);
+
+  // When goal isn't explicitly customised AND mode flips to discover,
+  // suggest a more discover-flavoured default goal text. The operator
+  // can still edit. Tune-flavoured stays as-is when flipping back.
+  useEffect(() => {
+    if (mode === "discover" && goal.startsWith("Find a config where")) {
+      setGoal("Map how this pair behaves across the parameter space — show me where trades happen and how they relate to win rate, P&L, and drawdown.");
+    } else if (mode === "tune" && goal.startsWith("Map how")) {
+      setGoal("Find a config where this pair opens at least 1 trade per day with positive net PnL.");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode]);
 
   const start = useMutation({
     mutationFn: async () => {
@@ -1150,6 +1185,7 @@ function StartSessionForm() {
           regime,
           model,
           maxIterations,
+          mode,
           systemPrompt,
         }),
       });
@@ -1181,6 +1217,46 @@ function StartSessionForm() {
   return (
     <div className="w-full rounded-md border border-primary/40 bg-primary/5 p-4">
       <h3 className="mb-3 text-sm font-semibold">New autoresearch session</h3>
+
+      {/* Mode toggle — top of form because it changes everything below
+          (default goal text, default system prompt, agent behaviour, and
+          how the result is rendered). */}
+      <div className="mb-4">
+        <Label className="text-xs">Mode</Label>
+        <div className="mt-1 grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={() => setMode("tune")}
+            className={cn(
+              "rounded border p-3 text-left text-xs transition-colors",
+              mode === "tune"
+                ? "border-primary bg-primary/10 text-foreground"
+                : "border-border bg-card text-muted-foreground hover:text-foreground"
+            )}
+          >
+            <div className="text-sm font-semibold">Tune</div>
+            <div className="mt-0.5">
+              Hill-climb against the existing scoring function. Find the best param set under our current rules.
+            </div>
+          </button>
+          <button
+            type="button"
+            onClick={() => setMode("discover")}
+            className={cn(
+              "rounded border p-3 text-left text-xs transition-colors",
+              mode === "discover"
+                ? "border-primary bg-primary/10 text-foreground"
+                : "border-border bg-card text-muted-foreground hover:text-foreground"
+            )}
+          >
+            <div className="text-sm font-semibold">Discover</div>
+            <div className="mt-0.5">
+              Sample the search space diversely. No winner — output is a survey of how the strategy behaves across configs.
+            </div>
+          </button>
+        </div>
+      </div>
+
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div className="sm:col-span-2">
           <Label className="text-xs">Goal</Label>
@@ -1448,6 +1524,42 @@ function computeVerdict(session: ARSession, iterations: ARIteration[]): Verdict 
     };
   }
 
+  // Discover-mode sessions get a descriptive survey verdict — no
+  // "winner", no "best", no opinions. Just the spread of what was
+  // sampled across iterations.
+  if (session.mode === "discover") {
+    const trades = iterations.map((i) => i.trades);
+    const winRates = iterations.map((i) => Number(i.winRate) || 0);
+    const pnls = iterations.map((i) => Number(i.netPnl) || 0);
+    const drawdowns = iterations.map((i) => Number(i.maxDrawdownPct) || 0);
+    const tradesNonZero = iterations.filter((i) => i.trades > 0).length;
+    const action = `${session.iterationsRun} configurations sampled. ${tradesNonZero} of them produced any trades.`;
+    const ranges: string[] = [];
+    if (trades.length > 0) {
+      ranges.push(`Trades ${Math.min(...trades)}–${Math.max(...trades)}`);
+    }
+    if (winRates.length > 0 && tradesNonZero > 0) {
+      ranges.push(`win rate ${Math.round(Math.min(...winRates) * 100)}%–${Math.round(Math.max(...winRates) * 100)}%`);
+    }
+    if (pnls.length > 0 && tradesNonZero > 0) {
+      const minPnl = Math.min(...pnls);
+      const maxPnl = Math.max(...pnls);
+      ranges.push(`P&L ${minPnl >= 0 ? "+" : ""}${minPnl.toFixed(0)} to ${maxPnl >= 0 ? "+" : ""}${maxPnl.toFixed(0)}`);
+    }
+    if (drawdowns.length > 0 && tradesNonZero > 0) {
+      ranges.push(`drawdown ${Math.min(...drawdowns).toFixed(1)}%–${Math.max(...drawdowns).toFixed(1)}%`);
+    }
+    return {
+      tone: tradesNonZero === 0 ? "bad" : "neutral",
+      action,
+      detail: ranges.length > 0 ? ranges.join(" · ") + "." : undefined,
+      suggestions: [],
+      foundWinner: false,
+      bestIter: null,
+      baseline,
+    };
+  }
+
   // Found a winner: describe the winning iteration with real numbers.
   if (foundWinner) {
     const t = bestIter!.trades;
@@ -1464,10 +1576,10 @@ function computeVerdict(session: ARSession, iterations: ARIteration[]): Verdict 
     };
   }
 
-  // No winner — describe what the data shows. The action is purely
-  // factual: "X iterations · Y trades · top rejection was Z (N%)". No
-  // recommendation. The agent's per-iteration rationales (visible in
-  // the Live tab and Iterations table) are the real analysis.
+  // No winner (tune mode) — describe what the data shows. The action is
+  // purely factual. No recommendation. The agent's per-iteration
+  // rationales (visible in the Live tab and Iterations table) are the
+  // real analysis.
   const factParts: string[] = [
     `${session.iterationsRun} iterations completed`,
     `${maxTrades === 0 ? "no trades produced" : `${maxTrades} trades at best`}`,
@@ -1566,35 +1678,81 @@ function fmt(v: number): string {
 // goal is "find a config that trades", trades is the more informative
 // signal because score is 0 by definition until trades >= 3.
 
-type Metric = "score" | "trades";
+type Metric = "score" | "trades" | "winRate" | "netPnl" | "drawdown";
 
 function getMetricValue(it: ARIteration, metric: Metric): number {
-  return metric === "score" ? Number(it.score) || 0 : it.trades;
+  switch (metric) {
+    case "score":
+      return Number(it.score) || 0;
+    case "trades":
+      return it.trades;
+    case "winRate":
+      return Number(it.winRate) || 0;
+    case "netPnl":
+      return Number(it.netPnl) || 0;
+    case "drawdown":
+      return Number(it.maxDrawdownPct) || 0;
+  }
 }
 
 function metricLabel(metric: Metric): string {
-  return metric === "score" ? "Score over iterations" : "Trades over iterations";
+  switch (metric) {
+    case "score":
+      return "Score over iterations";
+    case "trades":
+      return "Trades over iterations";
+    case "winRate":
+      return "Win rate over iterations";
+    case "netPnl":
+      return "Net PnL over iterations";
+    case "drawdown":
+      return "Max drawdown % over iterations";
+  }
 }
 
 function metricFormat(metric: Metric, v: number): string {
-  return metric === "score" ? v.toFixed(4) : v.toFixed(0);
+  switch (metric) {
+    case "score":
+      return v.toFixed(4);
+    case "trades":
+      return v.toFixed(0);
+    case "winRate":
+      return `${Math.round(v * 100)}%`;
+    case "netPnl":
+      return `${v >= 0 ? "+" : ""}${v.toFixed(0)}`;
+    case "drawdown":
+      return `${v.toFixed(1)}%`;
+  }
 }
 
 function IterationChart({
   iterations,
   metric,
+  showBest = true,
 }: {
   iterations: ARIteration[];
   metric: Metric;
+  // showBest=true draws a step-line of the running best (used in tune
+  // mode where the agent is hill-climbing). discover mode passes false
+  // because every iteration is a data point — there's no "best so far".
+  showBest?: boolean;
 }) {
   if (iterations.length === 0) return null;
   const sorted = [...iterations].sort((a, b) => a.idx - b.idx);
   const values = sorted.map((i) => getMetricValue(i, metric));
-  const maxValue = Math.max(...values, metric === "score" ? 0.0001 : 1);
-  const yMax = maxValue * 1.1; // a bit of headroom
+  // Compute y range from actual data so metrics that can be negative
+  // (like netPnl) render correctly. Always include 0 in the range so
+  // there's a zero baseline visible.
+  const dataMin = Math.min(...values, 0);
+  const dataMax = Math.max(...values, metric === "score" ? 0.0001 : 0);
+  const span = Math.max(dataMax - dataMin, 0.0001);
+  const yMin = dataMin - span * 0.05;
+  const yMax = dataMax + span * 0.05;
+  const yToPx = (v: number) =>
+    padT + innerH - ((v - yMin) / (yMax - yMin)) * innerH;
   const W = 600;
   const H = 200;
-  const padL = 40;
+  const padL = 48;
   const padR = 12;
   const padT = 12;
   const padB = 28;
@@ -1602,36 +1760,41 @@ function IterationChart({
   const innerH = H - padT - padB;
   const xStep = sorted.length > 1 ? innerW / (sorted.length - 1) : 0;
 
-  // Build the running-best step path
-  let bestSoFar = 0;
+  // Build the running-best step path (only used when showBest is true).
+  // For metrics where higher is better (score, trades, winRate, netPnl)
+  // we track the running max. drawdown isn't shown with a best line
+  // because lower-is-better — caller passes showBest=false for it.
   const bestPath: string[] = [];
-  sorted.forEach((it, i) => {
-    const v = getMetricValue(it, metric);
-    if (v > bestSoFar) bestSoFar = v;
-    const x = padL + i * xStep;
-    const y = padT + innerH - (bestSoFar / yMax) * innerH;
-    if (i === 0) {
-      bestPath.push(`M ${x} ${y}`);
-    } else {
-      const prevBest = Math.max(...values.slice(0, i));
-      const prevY = padT + innerH - (prevBest / yMax) * innerH;
-      bestPath.push(`L ${x} ${prevY} L ${x} ${y}`);
-    }
-  });
+  if (showBest) {
+    let bestSoFar = -Infinity;
+    sorted.forEach((it, i) => {
+      const v = getMetricValue(it, metric);
+      if (v > bestSoFar) bestSoFar = v;
+      const x = padL + i * xStep;
+      const y = yToPx(bestSoFar);
+      if (i === 0) {
+        bestPath.push(`M ${x} ${y}`);
+      } else {
+        const prevBest = Math.max(...values.slice(0, i));
+        const prevY = yToPx(prevBest);
+        bestPath.push(`L ${x} ${prevY} L ${x} ${y}`);
+      }
+    });
+  }
 
-  const yTicks = [0, yMax * 0.5, yMax];
+  const yTicks = [yMin, (yMin + yMax) / 2, yMax];
 
   return (
     <div className="rounded border border-border/40 bg-background/40 p-3">
       <div className="mb-2 flex items-baseline justify-between gap-3 text-[10px] uppercase tracking-wide text-muted-foreground">
         <span>{metricLabel(metric)}</span>
         <span>
-          {sorted.length} iterations · best {metricFormat(metric, maxValue)}
+          {sorted.length} iterations · range {metricFormat(metric, dataMin)}–{metricFormat(metric, dataMax)}
         </span>
       </div>
       <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full">
         {yTicks.map((v, i) => {
-          const y = padT + innerH - (v / yMax) * innerH;
+          const y = yToPx(v);
           return (
             <g key={i}>
               <line
@@ -1657,6 +1820,18 @@ function IterationChart({
           );
         })}
 
+        {/* Zero baseline for metrics that can go negative */}
+        {yMin < 0 && yMax > 0 && (
+          <line
+            x1={padL}
+            x2={W - padR}
+            y1={yToPx(0)}
+            y2={yToPx(0)}
+            stroke="currentColor"
+            strokeOpacity={0.25}
+          />
+        )}
+
         {[0, Math.floor(sorted.length / 2), sorted.length - 1].map((i) => {
           if (i < 0 || i >= sorted.length) return null;
           const x = padL + i * xStep;
@@ -1675,18 +1850,20 @@ function IterationChart({
           );
         })}
 
-        <path
-          d={bestPath.join(" ")}
-          fill="none"
-          stroke="rgb(16 185 129)"
-          strokeWidth="2"
-          strokeOpacity={0.8}
-        />
+        {showBest && (
+          <path
+            d={bestPath.join(" ")}
+            fill="none"
+            stroke="rgb(16 185 129)"
+            strokeWidth="2"
+            strokeOpacity={0.8}
+          />
+        )}
 
         {sorted.map((it, i) => {
           const v = getMetricValue(it, metric);
           const x = padL + i * xStep;
-          const y = padT + innerH - (v / yMax) * innerH;
+          const y = yToPx(v);
           const color = dotColor(it.status);
           return (
             <circle
@@ -1699,7 +1876,7 @@ function IterationChart({
               strokeWidth={0.5}
             >
               <title>
-                #{it.idx + 1} · score {Number(it.score).toFixed(4)} · {it.trades} trades · {it.status}
+                #{it.idx + 1} · {metricFormat(metric, v)} · {it.trades} trades · {it.status}
               </title>
             </circle>
           );
@@ -1708,9 +1885,9 @@ function IterationChart({
       <div className="mt-2 flex flex-wrap items-center gap-3 text-[10px] text-muted-foreground">
         <LegendDot color="rgb(59 130 246)" label="baseline" />
         <LegendDot color="rgb(16 185 129)" label="keep" />
-        <LegendDot color="rgb(115 115 115)" label="discard" />
+        <LegendDot color="rgb(115 115 115)" label="discard / sampled" />
         <LegendDot color="rgb(239 68 68)" label="crash" />
-        <span className="ml-auto">— line: best so far</span>
+        {showBest && <span className="ml-auto">— line: best so far</span>}
       </div>
     </div>
   );
@@ -1796,6 +1973,8 @@ function dotColor(status: ARIteration["status"]): string {
       return "rgb(16 185 129)"; // emerald
     case "discard":
       return "rgb(115 115 115)"; // grey
+    case "sampled":
+      return "rgb(168 85 247)"; // purple — discover-mode data point
     case "crash":
       return "rgb(239 68 68)"; // red
   }
@@ -1883,6 +2062,8 @@ function iterationMoodClass(status: ARIteration["status"]): string {
       return "border-blue-500/50 text-blue-200";
     case "discard":
       return "border-border/60 text-muted-foreground";
+    case "sampled":
+      return "border-purple-500/50 text-purple-200";
     case "crash":
       return "border-red-500/50 text-red-300";
   }
@@ -1952,6 +2133,8 @@ function iterationStatusClass(status: ARIteration["status"]): string {
       return "border-blue-500/40 text-blue-200";
     case "discard":
       return "border-border text-muted-foreground";
+    case "sampled":
+      return "border-purple-500/40 text-purple-200";
     case "crash":
       return "border-red-500/40 text-red-300";
   }
@@ -1967,5 +2150,14 @@ function sessionStatusClass(status: ARSession["status"]): string {
       return "border-border text-muted-foreground";
     case "error":
       return "border-red-500/40 text-red-300";
+  }
+}
+
+function modeBadgeClass(mode: ARSession["mode"]): string {
+  switch (mode) {
+    case "tune":
+      return "border-blue-500/40 text-blue-200";
+    case "discover":
+      return "border-purple-500/40 text-purple-200";
   }
 }

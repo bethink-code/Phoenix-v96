@@ -18,7 +18,9 @@ export interface IterationOutcome {
   prevScore: number | null;
   newScore: number;
   trades: number;
-  status: "keep" | "discard" | "crash" | "baseline";
+  winRate?: number;
+  netPnl?: number;
+  status: "keep" | "discard" | "crash" | "baseline" | "sampled";
   crashReason?: string;
 }
 
@@ -29,17 +31,28 @@ export function narrateIteration(o: IterationOutcome): string {
 
   if (o.isBaseline || o.status === "baseline") {
     if (o.trades === 0) {
-      return `Baseline: ${o.trades} trades, score ${o.newScore.toFixed(4)}. The current config doesn't trade at all on this dataset — that's the problem to solve.`;
+      return `Baseline: ${o.trades} trades. Reference point recorded.`;
     }
-    return `Baseline: ${o.trades} trades, score ${o.newScore.toFixed(4)}. That's the bar to beat.`;
+    return `Baseline: ${o.trades} trades, score ${o.newScore.toFixed(4)}. Reference point recorded.`;
   }
 
   // Find what changed between prev and new params so the narration is
-  // specific instead of vague.
+  // specific instead of vague. In discover mode, multi-knob changes are
+  // expected, so we list up to 3.
   const diff = diffParams(o.prevParams, o.newParams);
   const change = diff
     ? `${diff.key} ${formatVal(diff.before)} → ${formatVal(diff.after)}`
     : "tweaked params";
+
+  if (o.status === "sampled") {
+    // Discover mode — describe the data point as data, no judgement
+    const wr = o.winRate != null ? `${Math.round(o.winRate * 100)}%` : "—";
+    const pnl =
+      o.netPnl != null
+        ? `${o.netPnl >= 0 ? "+" : ""}${o.netPnl.toFixed(2)}`
+        : "—";
+    return `Iteration ${o.idx + 1}: ${change}. ${o.trades} trades, ${wr} wins, ${pnl} P&L.`;
+  }
 
   if (o.status === "keep") {
     const delta = o.prevScore != null ? o.newScore - o.prevScore : o.newScore;

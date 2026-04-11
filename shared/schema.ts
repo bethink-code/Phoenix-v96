@@ -405,6 +405,15 @@ export const autoresearchSessions = pgTable(
     lookbackBars: integer("lookback_bars").notNull(),
     regime: regimeEnum("regime").notNull(),
     model: varchar("model", { length: 64 }).notNull(), // gpt-4o, gpt-4o-mini, etc.
+    // Two modes:
+    //   tune     — agent hill-climbs to maximize score against the existing
+    //              strategy + scoring function. Find a winning config.
+    //   discover — agent samples the search space diversely. No hill-climb,
+    //              no winner. Output is a survey: trades, win rate, P&L,
+    //              drawdown across the param space. Used to understand what
+    //              the strategy DOES before deciding what rules to keep
+    //              or change.
+    mode: varchar("mode", { length: 16 }).notNull().default("tune"),
     maxIterations: integer("max_iterations").notNull(),
     // The system prompt actually used for this session. Stored verbatim
     // so the operator can audit what the agent was instructed to do.

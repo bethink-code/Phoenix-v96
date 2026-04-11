@@ -67,6 +67,9 @@ export interface StartArgs {
   // call inside the loop. The orchestrator never reads any module-level
   // constant for the prompt — what's in the session row is what runs.
   systemPrompt: string;
+  // tune     — agent hill-climbs to maximise score (default)
+  // discover — agent samples diversely, no winner, output is a survey
+  mode: "tune" | "discover";
 }
 
 export async function startSession(args: StartArgs): Promise<AutoresearchSession> {
@@ -86,6 +89,7 @@ export async function startSession(args: StartArgs): Promise<AutoresearchSession
       lookbackBars: args.lookbackBars,
       regime: args.regime,
       model: args.model,
+      mode: args.mode,
       maxIterations: args.maxIterations,
       systemPrompt: args.systemPrompt,
       status: "running",
@@ -171,6 +175,7 @@ async function runLoop(session: AutoresearchSession, args: StartArgs) {
           // constant. The operator's confirmed/edited prompt at start
           // time is what runs.
           systemPrompt: session.systemPrompt,
+          mode: args.mode,
         });
         const response = await chat({
           model: args.model,
@@ -281,13 +286,25 @@ async function runLoop(session: AutoresearchSession, args: StartArgs) {
 
     const score = scoreBacktest(backtestResult);
 
-    // Decide keep/discard. Baseline is always kept. Subsequent iterations
-    // are kept only if score strictly improved over previous best.
-    let status: "keep" | "discard" | "baseline";
+    // Decide iteration status. Branches on session mode:
+    //   tune     — hill-climb. Baseline always kept. Subsequent iterations
+    //              kept only if they strictly improve the best score.
+    //   discover — every iteration is a data point. Status is "sampled".
+    //              No best tracking. The agent gets the full history on
+    //              each call to inform diverse sampling, but there's no
+    //              "current best" to build on.
+    let status: "keep" | "discard" | "baseline" | "sampled";
     if (isBaseline) {
       status = "baseline";
       bestScore = score;
       bestParams = proposedParams;
+      currentParams = proposedParams;
+    } else if (args.mode === "discover") {
+      status = "sampled";
+      // No best tracking in discover mode — currentParams stays at the
+      // last sampled values just so the next baseline-style fallback
+      // exists, but the agent is told to sample diversely so it shouldn't
+      // anchor on currentParams anyway.
       currentParams = proposedParams;
     } else if (score > bestScore) {
       status = "keep";
@@ -309,6 +326,8 @@ async function runLoop(session: AutoresearchSession, args: StartArgs) {
       prevScore: idx === 0 ? null : bestScore - (status === "keep" ? score - bestScore : 0),
       newScore: score,
       trades: backtestResult.trades,
+      winRate: backtestResult.winRate,
+      netPnl: backtestResult.netPnl,
       status,
     });
 
@@ -345,15 +364,18 @@ async function runLoop(session: AutoresearchSession, args: StartArgs) {
       rationale,
     });
 
-    // Update session totals
-    if (status === "keep" || status === "baseline") {
+    // Update session totals. In discover mode there's no "best
+    // iteration" — bestIterationId stays null and bestScore stays 0
+    // (the verdict layer treats discover sessions as descriptive
+    // surveys rather than hunts for a winner).
+    if (args.mode === "tune" && (status === "keep" || status === "baseline")) {
       bestIterationId = iterationRow.id;
     }
     await db
       .update(autoresearchSessions)
       .set({
         iterationsRun: idx + 1,
-        bestScore: bestScore.toFixed(6),
+        bestScore: args.mode === "tune" ? bestScore.toFixed(6) : null,
         bestIterationId,
         totalCostUsd: totalCostUsd.toFixed(6),
       })
@@ -386,7 +408,7 @@ interface PersistArgs {
   barsEvaluated: number;
   entriesTaken: number;
   rejectionTop: Record<string, number> | null;
-  status: "keep" | "discard" | "crash" | "baseline";
+  status: "keep" | "discard" | "crash" | "baseline" | "sampled";
   narration: string;
   rationale: string;
   inputTokens: number;

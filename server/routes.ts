@@ -22,7 +22,10 @@ import {
 import { applyRecommendation } from "./modules/experiments/applier";
 import { startSession, requestStop } from "./modules/autoresearch/orchestrator";
 import { isOpenAIConfigured } from "./modules/autoresearch/openai";
-import { DEFAULT_SYSTEM_PROMPT } from "./modules/autoresearch/prompt";
+import {
+  DEFAULT_SYSTEM_PROMPT,
+  DEFAULT_DISCOVER_PROMPT,
+} from "./modules/autoresearch/prompt";
 import type { Timeframe } from "./modules/exchange/types";
 import {
   APPLIABLE_PARAM_KEYS,
@@ -403,13 +406,16 @@ export function registerRoutes(app: Express) {
     res.json({ available: isOpenAIConfigured() });
   });
 
-  // Returns the current default system prompt verbatim. The Start form
-  // fetches this when it opens, populates a textarea with it, and lets
-  // the operator edit before submitting. Source of truth at runtime is
-  // whatever the operator submitted — this endpoint just provides a
-  // sane starting point.
-  app.get("/api/autoresearch/default-system-prompt", isAuthenticated, (_req, res) => {
-    res.type("text/plain").send(DEFAULT_SYSTEM_PROMPT);
+  // Returns the default system prompt for the requested mode (?mode=tune
+  // or ?mode=discover). The Start form fetches this when it opens (and
+  // when the operator switches mode), populates a textarea with it, and
+  // lets the operator edit before submitting. Source of truth at runtime
+  // is whatever the operator submitted — this endpoint just provides a
+  // sane starting point per mode.
+  app.get("/api/autoresearch/default-system-prompt", isAuthenticated, (req, res) => {
+    const mode = req.query.mode === "discover" ? "discover" : "tune";
+    const prompt = mode === "discover" ? DEFAULT_DISCOVER_PROMPT : DEFAULT_SYSTEM_PROMPT;
+    res.type("text/plain").send(prompt);
   });
 
   app.post("/api/autoresearch/sessions", isAuthenticated, async (req, res) => {
@@ -436,6 +442,7 @@ export function registerRoutes(app: Express) {
       ]),
       model: z.enum(["gpt-4o", "gpt-4o-mini"]),
       maxIterations: z.number().int().min(5).max(200),
+      mode: z.enum(["tune", "discover"]).default("tune"),
       // Operator-confirmed system prompt. Required — the client always
       // submits the textarea contents (pre-populated from
       // /api/autoresearch/default-system-prompt and editable). Capped
@@ -474,6 +481,7 @@ export function registerRoutes(app: Express) {
         model: parsed.data.model,
         maxIterations: parsed.data.maxIterations,
         systemPrompt: parsed.data.systemPrompt,
+        mode: parsed.data.mode,
       });
       audit({
         userId: u.id,
