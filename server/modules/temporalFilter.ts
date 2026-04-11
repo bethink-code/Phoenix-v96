@@ -31,10 +31,14 @@ export interface TemporalRules {
   weekendMode: "off" | "restricted" | "full";
 }
 
+// Crypto markets are 24/7. Defaults allow every day, every session, and
+// the in-between hours that fall outside any named session window. The
+// temporal filter is still useful as a *feature* — operators can opt in
+// to e.g. London-only via Settings — but it must not block by default.
 export const DEFAULT_TEMPORAL_RULES: TemporalRules = {
-  enabledSessions: ["london", "newyork"],
-  enabledDaysOfWeek: [1, 2, 3, 4, 5],
-  weekendMode: "off",
+  enabledSessions: ["asia", "london", "newyork", "none"],
+  enabledDaysOfWeek: [0, 1, 2, 3, 4, 5, 6],
+  weekendMode: "full",
 };
 
 export function temporalFilterOpen(
