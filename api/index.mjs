@@ -1692,9 +1692,7 @@ function runBacktest(input) {
       diag.recentRejections.push({ atMs: barTime, reason, detail });
     }
   };
-  const LEVEL_REFRESH_EVERY = 5;
-  let cachedLevels = [];
-  let lastLevelRefreshAt = -Infinity;
+  const fullWindowLevels = identifyLevels(input.candles);
   for (let i = warmup; i < input.candles.length; i++) {
     const bar = input.candles[i];
     diag.barsEvaluated++;
@@ -1722,13 +1720,7 @@ function runBacktest(input) {
         openTrades.splice(t, 1);
       }
     }
-    let levels = cachedLevels;
-    if (i - lastLevelRefreshAt >= LEVEL_REFRESH_EVERY) {
-      const window = input.candles.slice(0, i + 1);
-      levels = identifyLevels(window);
-      cachedLevels = levels;
-      lastLevelRefreshAt = i;
-    }
+    const levels = fullWindowLevels.filter((l) => l.firstSeenAt <= bar.openTime);
     if (levels.length === 0) {
       reject(bar.openTime, "no_levels");
       continue;

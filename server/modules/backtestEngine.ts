@@ -102,16 +102,19 @@ export function runBacktest(input: BacktestInput): BacktestResult {
     }
   };
 
-  // Level identification is the most expensive call in the loop (six O(n)
-  // passes plus O(n²) clustering). Recomputing it every bar gives O(n³)
-  // total, which times out on serverless functions for windows >300 bars.
-  // We refresh levels every LEVEL_REFRESH_EVERY bars and reuse the cached
-  // set in between. Sweep detection still runs every bar against the cached
-  // levels — sweeps are the time-sensitive bit, levels barely shift between
-  // adjacent candles.
-  const LEVEL_REFRESH_EVERY = 5;
-  let cachedLevels: ReturnType<typeof identifyLevels> = [];
-  let lastLevelRefreshAt = -Infinity;
+  // Level identification is the most expensive call in the engine — six
+  // O(n) passes plus O(n²) clustering. Recomputing per bar gave O(n³)
+  // and timed out on serverless functions. We compute levels ONCE on the
+  // full candle window and reuse for every bar.
+  //
+  // Trade-off: this introduces lookahead bias (bar i sees levels that
+  // depend on bars > i). For all current experiment shapes (diagnostic,
+  // param sweep, comparison) this is fine — every variant sees the same
+  // level set, so comparisons are still valid, and the diagnostic question
+  // "why isn't the bot trading right now?" is naturally answered against
+  // the current level set anyway. If we ever add an experiment that varies
+  // level-identification config itself, that needs a separate run mode.
+  const fullWindowLevels = identifyLevels(input.candles);
 
   for (let i = warmup; i < input.candles.length; i++) {
     const bar = input.candles[i];
@@ -143,16 +146,10 @@ export function runBacktest(input: BacktestInput): BacktestResult {
       }
     }
 
-    // ---- Evaluate a new entry using bars up to and including this one ----
-    // Recompute levels only every LEVEL_REFRESH_EVERY bars; reuse the cache
-    // in between. Massive speedup over the naive O(n²) full recompute.
-    let levels = cachedLevels;
-    if (i - lastLevelRefreshAt >= LEVEL_REFRESH_EVERY) {
-      const window = input.candles.slice(0, i + 1);
-      levels = identifyLevels(window);
-      cachedLevels = levels;
-      lastLevelRefreshAt = i;
-    }
+    // Reuse the precomputed level set, filtering to those that existed by
+    // this bar's time so we don't sweep against a level a future swing
+    // created. Cheap O(L) filter per bar.
+    const levels = fullWindowLevels.filter((l) => l.firstSeenAt <= bar.openTime);
     if (levels.length === 0) {
       reject(bar.openTime, "no_levels");
       continue;
