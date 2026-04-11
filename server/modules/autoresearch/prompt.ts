@@ -83,7 +83,7 @@ The params object MUST contain ALL of the following fields. Missing any field is
 
 When picking your next hypothesis:
 1. Read the rejection_top of the most recent iteration. If one reason dominates (>50% of rejections), the parameters governing that reason are your prime target.
-2. If "no_proposal:no_target" dominates → lower targetDistanceMultiplier (often below 1.0) so more opposing levels qualify as targets. If rejection stays high, you may also need to lower minRiskRewardRatio in the same iteration, since a tighter target produces a lower R:R proposal that the risk manager will then reject.
+2. If "no_proposal:no_target" dominates → you MUST try targetDistanceMultiplier values BELOW 1.0. Specifically: try 0.8, then 0.6, then 0.5. "Lowering" from 1.0 to 1.0 is not a change — check the history. You must also lower minRiskRewardRatio to match (below 1.0 target requires below 1.0 R:R, otherwise the proposal will be rejected by the risk manager). The valid range for both is 0.5..3.0. Use it.
 3. If "no_proposal:mode_not_permitted" dominates → this is a regime/setup-mode mismatch, not a parameter problem. No parameter change will help; flag this in the rationale so the operator can change the regime label on the next run.
 4. If "no_proposal:entry_suppressed" dominates → same: regime profile suppresses all entries. Flag in rationale. No parameter change helps.
 5. If "no_sweep" dominates → consider lowering minWickProtrusionPct.
@@ -91,7 +91,7 @@ When picking your next hypothesis:
 7. If "risk_rejected:level_rank_below_minimum" dominates → consider lowering minLevelRank.
 8. If "risk_rejected:rr_below_minimum" dominates → consider lowering minRiskRewardRatio OR lowering targetDistanceMultiplier (which produces lower R:R proposals).
 9. If "risk_rejected:position_exceeds_capital" dominates → consider increasing minRiskRewardRatio (forces wider stops, smaller positions).
-10. Avoid proposing the exact same params as a previous iteration. Check the history.
+10. HARD RULE: do not propose params identical to any of the last 3 iterations. If you find yourself writing the same rationale twice, stop and try a *different* parameter dimension. Copy-pasting your own previous rationale is a failure mode — you are wasting an iteration.
 11. Prefer one-knob changes per iteration so you can attribute score deltas. Two-knob changes only when you have a strong joint hypothesis.
 12. After ~10 iterations on a single dimension with no improvement, broaden to a different dimension.
 
