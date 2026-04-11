@@ -764,14 +764,17 @@ function AutoresearchTab() {
   // by checking active first, then falling back to the latest archive
   // entry. This way the operator sees their last result without needing
   // to dig into archive.
+  // Polling cadences are calibrated to ≈ iteration speed (~3-5s per
+  // iteration). Faster polling buys nothing because the data only changes
+  // when an iteration completes, and faster polling burns rate-limit
+  // budget.
   const activeQuery = useQuery<ARSession | null>({
     queryKey: ["/api/autoresearch/active"],
-    refetchInterval: 3_000,
+    refetchInterval: 5_000,
   });
   const archiveQuery = useQuery<ARSession[]>({
     queryKey: ["/api/autoresearch/sessions"],
-    // Refetch when active session goes from running -> done
-    refetchInterval: activeQuery.data?.status === "running" ? 3_000 : false,
+    refetchInterval: activeQuery.data?.status === "running" ? 5_000 : false,
   });
 
   const focusedSession =
@@ -783,7 +786,7 @@ function AutoresearchTab() {
       ? [`/api/autoresearch/sessions/${focusedSession.id}/iterations`]
       : ["__no_session__"],
     enabled: !!focusedSession,
-    refetchInterval: focusedSession?.status === "running" ? 3_000 : false,
+    refetchInterval: focusedSession?.status === "running" ? 5_000 : false,
   });
 
   const stopMutation = useMutation({

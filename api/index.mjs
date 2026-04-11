@@ -3551,8 +3551,11 @@ app.use(express.urlencoded({ extended: true }));
 app.use(
   "/api",
   rateLimit({
+    // See server/index.ts for the rationale — 1000/15min per IP gives
+    // active dev sessions and active prd users enough headroom while
+    // still rate-limited against floods.
     windowMs: 15 * 60 * 1e3,
-    max: 200,
+    max: 1e3,
     standardHeaders: true,
     legacyHeaders: false
   })

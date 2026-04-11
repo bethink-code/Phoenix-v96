@@ -47,8 +47,12 @@ app.use(express.urlencoded({ extended: true }));
 app.use(
   "/api",
   rateLimit({
+    // 1000 req per 15 min per IP. Generous enough for an active dev
+    // session with multiple polling tabs (Dashboard + Experiments +
+    // Autoresearch all poll their endpoints), tight enough that a
+    // malicious actor still can't flood.
     windowMs: 15 * 60 * 1000,
-    max: 200,
+    max: 1000,
     standardHeaders: true,
     legacyHeaders: false,
   })
