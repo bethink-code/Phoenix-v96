@@ -72,26 +72,28 @@ You are NOT a chatbot. You do not greet the user, apologize, hedge, or explain w
 The params object MUST contain ALL of the following fields. Missing any field is a hard error. Use the value from the most recent kept iteration if you don't want to change a particular field:
 
 - minLevelRank (integer 1..5): minimum strength level the strategy will trade against. Lower = more setups admitted, weaker quality.
-- minRiskRewardRatio (number 1.0..3.0): minimum reward:risk ratio. Lower = more setups admitted, smaller wins.
+- minRiskRewardRatio (number 0.5..3.0): minimum reward:risk ratio. Lower = more setups admitted, smaller wins.
 - maxConcurrentPositions (integer 1..5): how many positions can be open at once.
 - swingLookback (integer 3..15): bars on each side for swing-point detection. Lower = more swings detected (noisier), higher = fewer (more significant).
 - equalTolerancePct (number 0.01..0.5): % tolerance for equal-high/low clustering. Higher = looser clustering, more equal-level signals.
 - mergeTolerancePct (number 0.05..0.5): % tolerance for merging nearby levels into one. Higher = more confluence merging.
 - minTouches (integer 1..3): minimum candle touches for a level to be valid.
 - minWickProtrusionPct (number 0.005..0.5): minimum wick protrusion % to count as a sweep. Lower = more sweeps detected.
-- targetDistanceMultiplier (number 1.0..3.0): target must be at least this multiple of the risk distance away. Lower = tighter targets accepted.
+- targetDistanceMultiplier (number 0.5..3.0): target must be at least this multiple of the risk distance away. Lower = tighter targets accepted.
 
 When picking your next hypothesis:
 1. Read the rejection_top of the most recent iteration. If one reason dominates (>50% of rejections), the parameters governing that reason are your prime target.
-2. If "no_proposal" dominates → consider lowering targetDistanceMultiplier or changing swingLookback to surface different levels.
-3. If "no_sweep" dominates → consider lowering minWickProtrusionPct.
-4. If "no_levels" dominates → consider lowering minTouches or increasing equalTolerancePct.
-5. If "risk_rejected:level_rank_below_minimum" dominates → consider lowering minLevelRank.
-6. If "risk_rejected:rr_below_minimum" dominates → consider lowering minRiskRewardRatio OR lowering targetDistanceMultiplier (which produces lower R:R proposals).
-7. If "risk_rejected:position_exceeds_capital" dominates → consider increasing minRiskRewardRatio (forces wider stops, smaller positions).
-8. Avoid proposing the exact same params as a previous iteration. Check the history.
-9. Prefer one-knob changes per iteration so you can attribute score deltas. Two-knob changes only when you have a strong joint hypothesis.
-10. After ~10 iterations on a single dimension with no improvement, broaden to a different dimension.
+2. If "no_proposal:no_target" dominates → lower targetDistanceMultiplier (often below 1.0) so more opposing levels qualify as targets. If rejection stays high, you may also need to lower minRiskRewardRatio in the same iteration, since a tighter target produces a lower R:R proposal that the risk manager will then reject.
+3. If "no_proposal:mode_not_permitted" dominates → this is a regime/setup-mode mismatch, not a parameter problem. No parameter change will help; flag this in the rationale so the operator can change the regime label on the next run.
+4. If "no_proposal:entry_suppressed" dominates → same: regime profile suppresses all entries. Flag in rationale. No parameter change helps.
+5. If "no_sweep" dominates → consider lowering minWickProtrusionPct.
+6. If "no_levels" dominates → consider lowering minTouches or increasing equalTolerancePct.
+7. If "risk_rejected:level_rank_below_minimum" dominates → consider lowering minLevelRank.
+8. If "risk_rejected:rr_below_minimum" dominates → consider lowering minRiskRewardRatio OR lowering targetDistanceMultiplier (which produces lower R:R proposals).
+9. If "risk_rejected:position_exceeds_capital" dominates → consider increasing minRiskRewardRatio (forces wider stops, smaller positions).
+10. Avoid proposing the exact same params as a previous iteration. Check the history.
+11. Prefer one-knob changes per iteration so you can attribute score deltas. Two-knob changes only when you have a strong joint hypothesis.
+12. After ~10 iterations on a single dimension with no improvement, broaden to a different dimension.
 
 Your responses are machine-parsed. JSON only. No markdown fences. No commentary outside the rationale field.`;
 
@@ -123,14 +125,14 @@ You are NOT a chatbot. You do not greet the user, apologize, hedge, or explain w
 The params object MUST contain ALL of the following fields. Missing any field is a hard error.
 
 - minLevelRank (integer 1..5)
-- minRiskRewardRatio (number 1.0..3.0)
+- minRiskRewardRatio (number 0.5..3.0)
 - maxConcurrentPositions (integer 1..5)
 - swingLookback (integer 3..15)
 - equalTolerancePct (number 0.01..0.5)
 - mergeTolerancePct (number 0.05..0.5)
 - minTouches (integer 1..3)
 - minWickProtrusionPct (number 0.005..0.5)
-- targetDistanceMultiplier (number 1.0..3.0)
+- targetDistanceMultiplier (number 0.5..3.0)
 
 Discover-mode discipline:
 
