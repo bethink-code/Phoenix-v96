@@ -1399,7 +1399,12 @@ function ChartView({ sessionId }: { sessionId: string }) {
     return <div className="text-xs text-muted-foreground">Loading candles…</div>;
   }
   if (q.isError || !q.data) {
-    return <div className="text-xs text-red-400">Failed to load chart data.</div>;
+    const msg = q.error instanceof Error ? q.error.message : "unknown";
+    return (
+      <div className="text-xs text-red-400">
+        Failed to load chart data: {msg}
+      </div>
+    );
   }
   const { candles, levels } = q.data;
   if (candles.length === 0) {
