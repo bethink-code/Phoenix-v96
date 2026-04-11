@@ -188,6 +188,9 @@ export default function Dashboard() {
                 PAPER TRADING
               </Badge>
             )}
+            <Link href="/experiments">
+              <Button variant="outline" size="sm">Experiments</Button>
+            </Link>
             <Link href="/settings">
               <Button variant="outline" size="sm">Settings</Button>
             </Link>

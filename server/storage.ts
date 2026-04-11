@@ -15,6 +15,10 @@ import {
   llmUsage,
   regimeChanges,
   riskEvents,
+  experiments,
+  experimentRuns,
+  type Experiment,
+  type InsertExperiment,
   type User,
   type InsertUser,
   type Tenant,
@@ -299,6 +303,11 @@ export const storage = {
     return db.select().from(marketPairs).orderBy(desc(marketPairs.createdAt));
   },
 
+  async getMarketPair(id: string) {
+    const [row] = await db.select().from(marketPairs).where(eq(marketPairs.id, id));
+    return row ?? null;
+  },
+
   async createPair(input: typeof marketPairs.$inferInsert) {
     const [row] = await db.insert(marketPairs).values(input).returning();
     return row;
@@ -558,6 +567,86 @@ export const storage = {
         target: cachedSymbols.exchange,
         set: { symbols: symbols as object, refreshedAt: new Date() },
       });
+  },
+
+  // ---------- Experiments (PRD §11) ----------
+
+  async listExperiments(tenantId: string): Promise<Experiment[]> {
+    return db
+      .select()
+      .from(experiments)
+      .where(eq(experiments.tenantId, tenantId))
+      .orderBy(desc(experiments.createdAt));
+  },
+
+  async getExperiment(id: string): Promise<Experiment | null> {
+    const [row] = await db.select().from(experiments).where(eq(experiments.id, id));
+    return row ?? null;
+  },
+
+  async createExperiment(input: InsertExperiment): Promise<Experiment> {
+    const [row] = await db.insert(experiments).values(input).returning();
+    return row;
+  },
+
+  async setExperimentEnabled(id: string, enabled: boolean) {
+    await db.update(experiments).set({ enabled }).where(eq(experiments.id, id));
+  },
+
+  async deleteExperiment(id: string) {
+    await db.delete(experiments).where(eq(experiments.id, id));
+  },
+
+  async insertExperimentRun(input: typeof experimentRuns.$inferInsert) {
+    const [row] = await db.insert(experimentRuns).values(input).returning();
+    return row;
+  },
+
+  async listExperimentRunsForTenant(tenantId: string, limit = 50) {
+    return db
+      .select()
+      .from(experimentRuns)
+      .where(eq(experimentRuns.tenantId, tenantId))
+      .orderBy(desc(experimentRuns.createdAt))
+      .limit(limit);
+  },
+
+  async listExperimentRunsForExperiment(experimentId: string, limit = 20) {
+    return db
+      .select()
+      .from(experimentRuns)
+      .where(eq(experimentRuns.experimentId, experimentId))
+      .orderBy(desc(experimentRuns.createdAt))
+      .limit(limit);
+  },
+
+  async listPendingRecommendations(tenantId: string) {
+    return db
+      .select()
+      .from(experimentRuns)
+      .where(
+        and(eq(experimentRuns.tenantId, tenantId), eq(experimentRuns.verdict, "pending"))
+      )
+      .orderBy(desc(experimentRuns.createdAt));
+  },
+
+  async getExperimentRun(id: string) {
+    const [row] = await db.select().from(experimentRuns).where(eq(experimentRuns.id, id));
+    return row ?? null;
+  },
+
+  async setRunVerdict(
+    id: string,
+    verdict: "approved" | "rejected" | "deferred" | "applied" | "no_action",
+    reviewedByUserId?: string
+  ) {
+    const patch: Record<string, unknown> = { verdict };
+    if (reviewedByUserId) {
+      patch.reviewedByUserId = reviewedByUserId;
+      patch.reviewedAt = new Date();
+    }
+    if (verdict === "applied") patch.appliedAt = new Date();
+    await db.update(experimentRuns).set(patch).where(eq(experimentRuns.id, id));
   },
 
   async listExchangeKeyMetadata(tenantId: string) {

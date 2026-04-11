@@ -7,7 +7,6 @@ import type { Regime } from "../../shared/schema";
 import type { Candle } from "./strategy/types";
 import { identifyLevels, detectLatestSweep, generateProposal } from "./strategy";
 import { assessTrade } from "./riskManager";
-import { getRegimeProfile } from "./regimeEngine";
 
 export interface BacktestInput {
   candles: Candle[]; // chronological, oldest first
@@ -47,6 +46,26 @@ export interface BacktestResult {
   avgRR: number;
   sharpe: number | null;
   tradeLog: BacktestTrade[];
+  diagnostic: BacktestDiagnostic;
+}
+
+// Per-bar rejection accounting. Every evaluated bar lands in exactly one
+// bucket: an opened trade, or a rejection reason. Sums to barsEvaluated.
+export interface BacktestDiagnostic {
+  barsEvaluated: number;
+  entriesTaken: number;
+  rejections: Record<string, number>;
+  // Closest-miss trackers — "the bot almost traded, but..."
+  bestLevelRankSeen: number; // highest candidate level rank across all bars with a sweep
+  minLevelRankFloor: number; // the floor used during this run
+  bestRRSeen: number; // highest R:R of any generated proposal
+  minRRFloor: number;
+  // Sample of recent rejections with context so the UI can show "last 5"
+  recentRejections: Array<{
+    atMs: number;
+    reason: string;
+    detail?: Record<string, unknown>;
+  }>;
 }
 
 // Deterministic replay. Walks the candle array forward bar-by-bar. At each
@@ -66,8 +85,26 @@ export function runBacktest(input: BacktestInput): BacktestResult {
   const openTrades: OpenTrade[] = [];
   const closedTrades: BacktestTrade[] = [];
 
+  const diag: BacktestDiagnostic = {
+    barsEvaluated: 0,
+    entriesTaken: 0,
+    rejections: {},
+    bestLevelRankSeen: 0,
+    minLevelRankFloor: input.config.minLevelRank,
+    bestRRSeen: 0,
+    minRRFloor: input.config.minRiskRewardRatio,
+    recentRejections: [],
+  };
+  const reject = (barTime: number, reason: string, detail?: Record<string, unknown>) => {
+    diag.rejections[reason] = (diag.rejections[reason] ?? 0) + 1;
+    if (diag.recentRejections.length < 20) {
+      diag.recentRejections.push({ atMs: barTime, reason, detail });
+    }
+  };
+
   for (let i = warmup; i < input.candles.length; i++) {
     const bar = input.candles[i];
+    diag.barsEvaluated++;
 
     // ---- Resolve open trades against this bar ----
     for (let t = openTrades.length - 1; t >= 0; t--) {
@@ -98,9 +135,36 @@ export function runBacktest(input: BacktestInput): BacktestResult {
     // ---- Evaluate a new entry using bars up to and including this one ----
     const window = input.candles.slice(0, i + 1);
     const levels = identifyLevels(window);
+    if (levels.length === 0) {
+      reject(bar.openTime, "no_levels");
+      continue;
+    }
     const sweep = detectLatestSweep(window, levels);
+    if (!sweep) {
+      reject(bar.openTime, "no_sweep", { levelCount: levels.length });
+      continue;
+    }
+    // Track the best candidate rank any sweep produced — even if we reject
+    // it, this tells the operator how close they got to the floor.
+    if (sweep.level.rank > diag.bestLevelRankSeen) {
+      diag.bestLevelRankSeen = sweep.level.rank;
+    }
+
     const proposal = generateProposal(sweep, window, levels, input.regime);
-    if (!proposal) continue;
+    if (!proposal) {
+      reject(bar.openTime, "no_proposal", {
+        levelType: sweep.level.type,
+        sweepDirection: sweep.direction,
+        closedBack: sweep.closedBack,
+      });
+      continue;
+    }
+
+    // Track best R:R seen on any generated proposal
+    const proposalRisk = Math.abs(proposal.entryPrice - proposal.stopPrice);
+    const proposalReward = Math.abs(proposal.targetPrice - proposal.entryPrice);
+    const proposalRR = proposalRisk > 0 ? proposalReward / proposalRisk : 0;
+    if (proposalRR > diag.bestRRSeen) diag.bestRRSeen = proposalRR;
 
     // Drawdown aggregates
     const { dailyPnlPct, weeklyPnlPct } = windowedPnl(closedTrades, bar.openTime, input.startingCapital);
@@ -119,12 +183,16 @@ export function runBacktest(input: BacktestInput): BacktestResult {
       weeklyPnlPct,
       dailyDrawdownLimitPct: input.config.dailyDrawdownLimitPct,
       weeklyDrawdownLimitPct: input.config.weeklyDrawdownLimitPct,
-      minLevelRank: getRegimeProfile(input.regime).entrySuppressed ? 99 : 1,
-      candidateLevelRank: sweep!.level.rank,
+      minLevelRank: input.config.minLevelRank,
+      candidateLevelRank: sweep.level.rank,
       pairMinOrderSize: 0, // backtests assume any size is fillable
     });
-    if (!decision.approved) continue;
+    if (!decision.approved) {
+      reject(bar.openTime, `risk_rejected:${decision.reason}`, decision.detail);
+      continue;
+    }
 
+    diag.entriesTaken++;
     openTrades.push({
       openedAt: bar.openTime,
       side: proposal.side,
@@ -156,7 +224,7 @@ export function runBacktest(input: BacktestInput): BacktestResult {
     capital += pnl;
   }
 
-  return summarise(closedTrades, capital - input.startingCapital, maxDrawdown);
+  return summarise(closedTrades, capital - input.startingCapital, maxDrawdown, diag);
 }
 
 // ------------ helpers ------------
@@ -219,7 +287,8 @@ function windowedPnl(
 function summarise(
   trades: BacktestTrade[],
   netPnl: number,
-  maxDrawdown: number
+  maxDrawdown: number,
+  diagnostic: BacktestDiagnostic
 ): BacktestResult {
   const wins = trades.filter((t) => t.realisedPnl > 0).length;
   const losses = trades.filter((t) => t.realisedPnl <= 0).length;
@@ -248,6 +317,7 @@ function summarise(
     avgRR: trades.length ? rrSum / trades.length : 0,
     sharpe,
     tradeLog: trades,
+    diagnostic,
   };
 }
 
@@ -262,5 +332,15 @@ function emptyResult(): BacktestResult {
     avgRR: 0,
     sharpe: null,
     tradeLog: [],
+    diagnostic: {
+      barsEvaluated: 0,
+      entriesTaken: 0,
+      rejections: {},
+      bestLevelRankSeen: 0,
+      minLevelRankFloor: 0,
+      bestRRSeen: 0,
+      minRRFloor: 0,
+      recentRejections: [],
+    },
   };
 }

@@ -31,6 +31,7 @@ __export(schema_exports, {
   cachedSymbols: () => cachedSymbols,
   exchangeKeys: () => exchangeKeys,
   experimentRuns: () => experimentRuns,
+  experiments: () => experiments,
   insertAccessRequestSchema: () => insertAccessRequestSchema,
   insertInviteSchema: () => insertInviteSchema,
   insertMarketPairSchema: () => insertMarketPairSchema,
@@ -303,16 +304,34 @@ var riskEvents = pgTable(
   },
   (t) => [index("risk_events_tenant_idx").on(t.tenantId)]
 );
+var experiments = pgTable(
+  "experiments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id").notNull().references(() => tenants.id),
+    name: varchar("name", { length: 200 }).notNull(),
+    kind: varchar("kind", { length: 32 }).notNull(),
+    // diagnostic | param_sweep | comparison
+    config: jsonb("config").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    createdByUserId: uuid("created_by_user_id").notNull().references(() => users.id),
+    createdAt: timestamp("created_at").notNull().defaultNow()
+  },
+  (t) => [index("experiments_tenant_idx").on(t.tenantId)]
+);
 var experimentRuns = pgTable("experiment_runs", {
   id: uuid("id").primaryKey().defaultRandom(),
   tenantId: uuid("tenant_id").notNull().references(() => tenants.id),
-  week: varchar("week", { length: 10 }).notNull(),
-  // ISO week e.g. 2026-W15
+  experimentId: uuid("experiment_id").references(() => experiments.id),
+  week: varchar("week", { length: 10 }),
+  // ISO week, optional
   baselineConfig: jsonb("baseline_config").notNull(),
   proposedConfig: jsonb("proposed_config").notNull(),
   metrics: jsonb("metrics").notNull(),
-  verdict: varchar("verdict", { length: 16 }).notNull(),
-  // kept/discarded/pending_review
+  recommendation: jsonb("recommendation"),
+  // Recommendation shape from shared/experiments
+  verdict: varchar("verdict", { length: 16 }).notNull().default("pending"),
+  // pending | approved | rejected | deferred | applied | no_action
   reviewedByUserId: uuid("reviewed_by_user_id").references(() => users.id),
   reviewedAt: timestamp("reviewed_at"),
   appliedAt: timestamp("applied_at"),
@@ -587,6 +606,10 @@ var storage = {
   async listAllPairs() {
     return db.select().from(marketPairs).orderBy(desc(marketPairs.createdAt));
   },
+  async getMarketPair(id) {
+    const [row] = await db.select().from(marketPairs).where(eq(marketPairs.id, id));
+    return row ?? null;
+  },
   async createPair(input) {
     const [row] = await db.insert(marketPairs).values(input).returning();
     return row;
@@ -733,6 +756,52 @@ var storage = {
       target: cachedSymbols.exchange,
       set: { symbols, refreshedAt: /* @__PURE__ */ new Date() }
     });
+  },
+  // ---------- Experiments (PRD §11) ----------
+  async listExperiments(tenantId) {
+    return db.select().from(experiments).where(eq(experiments.tenantId, tenantId)).orderBy(desc(experiments.createdAt));
+  },
+  async getExperiment(id) {
+    const [row] = await db.select().from(experiments).where(eq(experiments.id, id));
+    return row ?? null;
+  },
+  async createExperiment(input) {
+    const [row] = await db.insert(experiments).values(input).returning();
+    return row;
+  },
+  async setExperimentEnabled(id, enabled) {
+    await db.update(experiments).set({ enabled }).where(eq(experiments.id, id));
+  },
+  async deleteExperiment(id) {
+    await db.delete(experiments).where(eq(experiments.id, id));
+  },
+  async insertExperimentRun(input) {
+    const [row] = await db.insert(experimentRuns).values(input).returning();
+    return row;
+  },
+  async listExperimentRunsForTenant(tenantId, limit = 50) {
+    return db.select().from(experimentRuns).where(eq(experimentRuns.tenantId, tenantId)).orderBy(desc(experimentRuns.createdAt)).limit(limit);
+  },
+  async listExperimentRunsForExperiment(experimentId, limit = 20) {
+    return db.select().from(experimentRuns).where(eq(experimentRuns.experimentId, experimentId)).orderBy(desc(experimentRuns.createdAt)).limit(limit);
+  },
+  async listPendingRecommendations(tenantId) {
+    return db.select().from(experimentRuns).where(
+      and(eq(experimentRuns.tenantId, tenantId), eq(experimentRuns.verdict, "pending"))
+    ).orderBy(desc(experimentRuns.createdAt));
+  },
+  async getExperimentRun(id) {
+    const [row] = await db.select().from(experimentRuns).where(eq(experimentRuns.id, id));
+    return row ?? null;
+  },
+  async setRunVerdict(id, verdict, reviewedByUserId) {
+    const patch = { verdict };
+    if (reviewedByUserId) {
+      patch.reviewedByUserId = reviewedByUserId;
+      patch.reviewedAt = /* @__PURE__ */ new Date();
+    }
+    if (verdict === "applied") patch.appliedAt = /* @__PURE__ */ new Date();
+    await db.update(experimentRuns).set(patch).where(eq(experimentRuns.id, id));
   },
   async listExchangeKeyMetadata(tenantId) {
     return db.select({
@@ -1210,6 +1279,877 @@ function tierDefaults(tier) {
   }
 }
 
+// server/modules/strategy/levels.ts
+var DEFAULT_LEVEL_CONFIG = {
+  swingLookback: 5,
+  equalTolerancePct: 0.05,
+  // 5 bps — tight for crypto
+  mergeTolerancePct: 0.1,
+  // 10 bps
+  minTouches: 1
+};
+function findSwingHighs(candles, lookback = DEFAULT_LEVEL_CONFIG.swingLookback) {
+  const out = [];
+  for (let i = lookback; i < candles.length - lookback; i++) {
+    const c = candles[i];
+    let isSwing = true;
+    for (let j = 1; j <= lookback; j++) {
+      if (candles[i - j].high >= c.high || candles[i + j].high >= c.high) {
+        isSwing = false;
+        break;
+      }
+    }
+    if (isSwing) {
+      out.push(level("swing_high", "resistance", c.high, c.openTime));
+    }
+  }
+  return out;
+}
+function findSwingLows(candles, lookback = DEFAULT_LEVEL_CONFIG.swingLookback) {
+  const out = [];
+  for (let i = lookback; i < candles.length - lookback; i++) {
+    const c = candles[i];
+    let isSwing = true;
+    for (let j = 1; j <= lookback; j++) {
+      if (candles[i - j].low <= c.low || candles[i + j].low <= c.low) {
+        isSwing = false;
+        break;
+      }
+    }
+    if (isSwing) {
+      out.push(level("swing_low", "support", c.low, c.openTime));
+    }
+  }
+  return out;
+}
+function findEqualHighs(candles, tolerancePct) {
+  return clusterByPrice(
+    candles.map((c) => ({ price: c.high, at: c.openTime })),
+    tolerancePct
+  ).map(
+    (g) => level(
+      "equal_high",
+      "resistance",
+      average(g.map((p) => p.price)),
+      g[0].at,
+      g[g.length - 1].at,
+      g.length
+    )
+  );
+}
+function findEqualLows(candles, tolerancePct) {
+  return clusterByPrice(
+    candles.map((c) => ({ price: c.low, at: c.openTime })),
+    tolerancePct
+  ).map(
+    (g) => level(
+      "equal_low",
+      "support",
+      average(g.map((p) => p.price)),
+      g[0].at,
+      g[g.length - 1].at,
+      g.length
+    )
+  );
+}
+function findPrevDayLevels(candles) {
+  const byDay = groupByDay(candles);
+  const out = [];
+  const days = Array.from(byDay.keys()).sort();
+  if (days.length < 2) return out;
+  const prev = byDay.get(days[days.length - 2]);
+  const high = Math.max(...prev.map((c) => c.high));
+  const low = Math.min(...prev.map((c) => c.low));
+  const at = prev[0].openTime;
+  out.push(level("prev_day_high", "resistance", high, at));
+  out.push(level("prev_day_low", "support", low, at));
+  return out;
+}
+function findPrevWeekLevels(candles) {
+  const byWeek = groupByWeek(candles);
+  const out = [];
+  const weeks = Array.from(byWeek.keys()).sort();
+  if (weeks.length < 2) return out;
+  const prev = byWeek.get(weeks[weeks.length - 2]);
+  const high = Math.max(...prev.map((c) => c.high));
+  const low = Math.min(...prev.map((c) => c.low));
+  const at = prev[0].openTime;
+  out.push(level("prev_week_high", "resistance", high, at));
+  out.push(level("prev_week_low", "support", low, at));
+  return out;
+}
+function identifyLevels(candles, config = DEFAULT_LEVEL_CONFIG) {
+  if (candles.length < config.swingLookback * 2 + 1) return [];
+  const raw = [
+    ...findSwingHighs(candles, config.swingLookback),
+    ...findSwingLows(candles, config.swingLookback),
+    ...findEqualHighs(candles, config.equalTolerancePct),
+    ...findEqualLows(candles, config.equalTolerancePct),
+    ...findPrevDayLevels(candles),
+    ...findPrevWeekLevels(candles)
+  ];
+  const merged = mergeConfluentLevels(raw, config.mergeTolerancePct);
+  for (const lvl of merged) {
+    lvl.touches = countTouches(candles, lvl.price, config.equalTolerancePct);
+    lvl.rank = rankLevel(lvl);
+  }
+  return merged.filter((l) => l.touches >= config.minTouches).sort((a, b) => b.rank - a.rank || a.price - b.price);
+}
+function mergeConfluentLevels(levels, tolerancePct) {
+  const sorted = [...levels].sort((a, b) => a.price - b.price);
+  const merged = [];
+  for (const l of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && withinTolerance(last.price, l.price, tolerancePct)) {
+      last.components = [...last.components ?? [last.type], l.type];
+      last.price = (last.price + l.price) / 2;
+      last.firstSeenAt = Math.min(last.firstSeenAt, l.firstSeenAt);
+      last.lastSeenAt = Math.max(last.lastSeenAt, l.lastSeenAt);
+    } else {
+      merged.push({ ...l, components: [l.type] });
+    }
+  }
+  return merged;
+}
+function rankLevel(l) {
+  const baseByType = {
+    prev_week_high: 4,
+    prev_week_low: 4,
+    prev_day_high: 3,
+    prev_day_low: 3,
+    equal_high: 3,
+    equal_low: 3,
+    session_high: 2,
+    session_low: 2,
+    swing_high: 2,
+    swing_low: 2
+  };
+  const base = Math.max(...(l.components ?? [l.type]).map((t) => baseByType[t]));
+  const confluence = new Set(l.components ?? [l.type]).size - 1;
+  const touch = Math.min(2, Math.floor(l.touches / 3));
+  return Math.min(5, base + confluence + touch);
+}
+function level(type, side, price, firstSeenAt, lastSeenAt, touches) {
+  return {
+    id: `${type}:${price.toFixed(2)}`,
+    type,
+    side,
+    price,
+    rank: 1,
+    touches: touches ?? 1,
+    firstSeenAt,
+    lastSeenAt: lastSeenAt ?? firstSeenAt
+  };
+}
+function withinTolerance(a, b, tolerancePct) {
+  if (a === 0) return b === 0;
+  return Math.abs(a - b) / a * 100 <= tolerancePct;
+}
+function clusterByPrice(points, tolerancePct) {
+  const sorted = [...points].sort((a, b) => a.price - b.price);
+  const groups = [];
+  for (const p of sorted) {
+    const last = groups[groups.length - 1];
+    if (last && withinTolerance(last[last.length - 1].price, p.price, tolerancePct)) {
+      last.push(p);
+    } else {
+      groups.push([p]);
+    }
+  }
+  return groups.filter((g) => g.length >= 2);
+}
+function countTouches(candles, price, tolerancePct) {
+  let n = 0;
+  for (const c of candles) {
+    if (withinTolerance(c.high, price, tolerancePct) || withinTolerance(c.low, price, tolerancePct) || c.low <= price && c.high >= price) {
+      n++;
+    }
+  }
+  return n;
+}
+function groupByDay(candles) {
+  const m = /* @__PURE__ */ new Map();
+  for (const c of candles) {
+    const d = new Date(c.openTime);
+    const key = `${d.getUTCFullYear()}-${d.getUTCMonth() + 1}-${d.getUTCDate()}`;
+    if (!m.has(key)) m.set(key, []);
+    m.get(key).push(c);
+  }
+  return m;
+}
+function groupByWeek(candles) {
+  const m = /* @__PURE__ */ new Map();
+  for (const c of candles) {
+    const d = new Date(c.openTime);
+    const year = d.getUTCFullYear();
+    const week = isoWeek(d);
+    const key = `${year}-W${week}`;
+    if (!m.has(key)) m.set(key, []);
+    m.get(key).push(c);
+  }
+  return m;
+}
+function isoWeek(d) {
+  const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const dayNum = date.getUTCDay() || 7;
+  date.setUTCDate(date.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+  return Math.ceil(((date.getTime() - yearStart.getTime()) / 864e5 + 1) / 7);
+}
+function average(nums) {
+  return nums.reduce((a, b) => a + b, 0) / nums.length;
+}
+
+// server/modules/strategy/sweeps.ts
+var DEFAULT_SWEEP_CONFIG = {
+  minWickProtrusionPct: 0.02
+  // 2 bps — noise floor for crypto
+};
+function detectSweeps(candles, levels, config = DEFAULT_SWEEP_CONFIG) {
+  const out = [];
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
+    for (const lvl of levels) {
+      if (lvl.firstSeenAt > c.openTime) continue;
+      if (lvl.side === "resistance") {
+        const protrusion = (c.high - lvl.price) / lvl.price * 100;
+        if (c.high > lvl.price && protrusion >= config.minWickProtrusionPct) {
+          out.push({
+            candleIndex: i,
+            candleTime: c.openTime,
+            direction: "up",
+            level: lvl,
+            wickExtreme: c.high,
+            closeBackPrice: c.close,
+            closedBack: c.close < lvl.price
+            // closed back inside = Mode B valid
+          });
+        }
+      } else {
+        const protrusion = (lvl.price - c.low) / lvl.price * 100;
+        if (c.low < lvl.price && protrusion >= config.minWickProtrusionPct) {
+          out.push({
+            candleIndex: i,
+            candleTime: c.openTime,
+            direction: "down",
+            level: lvl,
+            wickExtreme: c.low,
+            closeBackPrice: c.close,
+            closedBack: c.close > lvl.price
+          });
+        }
+      }
+    }
+  }
+  return out;
+}
+function detectLatestSweep(candles, levels, config = DEFAULT_SWEEP_CONFIG) {
+  if (candles.length === 0) return null;
+  const last = candles.length - 1;
+  const sweeps = detectSweeps(candles.slice(last), levels, config);
+  if (sweeps.length === 0) return null;
+  sweeps.sort((a, b) => b.level.rank - a.level.rank);
+  return { ...sweeps[0], candleIndex: last };
+}
+
+// server/modules/strategy/entries.ts
+function generateProposal(sweep, candles, allLevels, regime) {
+  if (!sweep) return null;
+  const profile = getRegimeProfile(regime);
+  if (profile.entrySuppressed) return null;
+  const mode = sweep.closedBack ? "mode_b" : "mode_a";
+  if (!profile.permittedModes.includes(mode)) return null;
+  const side = sweep.direction === "up" ? "short" : "long";
+  const entryPrice = sweep.level.price;
+  const stopPrice = side === "short" ? sweep.wickExtreme * 1.0005 : sweep.wickExtreme * 0.9995;
+  const riskPerUnit = Math.abs(entryPrice - stopPrice);
+  const minTargetDistance = riskPerUnit * 1.5;
+  const target = findTargetLevel(allLevels, entryPrice, side, minTargetDistance);
+  if (!target) return null;
+  const reasoning = [
+    `sweep_${sweep.direction}`,
+    `level:${sweep.level.type}@${sweep.level.price.toFixed(2)}`,
+    `rank:${sweep.level.rank}`,
+    `mode:${mode}`,
+    `target:${target.type}@${target.price.toFixed(2)}`
+  ].join(" ");
+  return {
+    side,
+    setupMode: mode,
+    entryPrice,
+    stopPrice,
+    targetPrice: target.price,
+    levelId: sweep.level.id,
+    sweepCandleIndex: sweep.candleIndex,
+    reasoning
+  };
+}
+function findTargetLevel(levels, entry, side, minDistance) {
+  const candidates = levels.filter((l) => {
+    if (side === "short") {
+      return l.side === "support" && l.price < entry && entry - l.price >= minDistance;
+    }
+    return l.side === "resistance" && l.price > entry && l.price - entry >= minDistance;
+  });
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => {
+    const distA = Math.abs(a.price - entry);
+    const distB = Math.abs(b.price - entry);
+    const scoreA = distA / Math.max(1, a.rank);
+    const scoreB = distB / Math.max(1, b.rank);
+    return scoreA - scoreB;
+  });
+  return candidates[0];
+}
+
+// server/modules/riskManager.ts
+function assessTrade(i) {
+  const profile = getRegimeProfile(i.regime);
+  if (profile.entrySuppressed) {
+    return { approved: false, reason: "regime_suppresses_entries", detail: { regime: i.regime } };
+  }
+  if (i.dailyPnlPct <= -i.dailyDrawdownLimitPct) {
+    return { approved: false, reason: "daily_drawdown_breached", detail: { dailyPnlPct: i.dailyPnlPct } };
+  }
+  if (i.weeklyPnlPct <= -i.weeklyDrawdownLimitPct) {
+    return { approved: false, reason: "weekly_drawdown_breached", detail: { weeklyPnlPct: i.weeklyPnlPct } };
+  }
+  if (i.openPositionCount >= i.maxConcurrentPositions) {
+    return { approved: false, reason: "max_concurrent_positions_reached" };
+  }
+  if (i.candidateLevelRank < i.minLevelRank) {
+    return { approved: false, reason: "level_rank_below_minimum" };
+  }
+  const effectiveMinRR = Math.max(i.minRiskRewardRatio, profile.minRiskRewardRatio);
+  const riskPerUnit = Math.abs(i.entryPrice - i.stopPrice);
+  const rewardPerUnit = Math.abs(i.targetPrice - i.entryPrice);
+  if (riskPerUnit <= 0) {
+    return { approved: false, reason: "invalid_stop_distance" };
+  }
+  const plannedRR = rewardPerUnit / riskPerUnit;
+  if (plannedRR < effectiveMinRR) {
+    return {
+      approved: false,
+      reason: "rr_below_minimum",
+      detail: { plannedRR, effectiveMinRR }
+    };
+  }
+  const riskAmount = i.capital * i.riskPercentPerTrade * profile.sizeMultiplier / 100;
+  if (riskAmount <= 0) {
+    return { approved: false, reason: "regime_size_multiplier_zero" };
+  }
+  const positionSize = riskAmount / riskPerUnit;
+  if (positionSize < i.pairMinOrderSize) {
+    return {
+      approved: false,
+      reason: "below_min_order_size",
+      detail: {
+        positionSize,
+        minOrderSize: i.pairMinOrderSize,
+        capital: i.capital
+      }
+    };
+  }
+  const positionNotional = positionSize * i.entryPrice;
+  if (positionNotional > i.capital) {
+    return {
+      approved: false,
+      reason: "position_exceeds_capital",
+      detail: { positionNotional, capital: i.capital }
+    };
+  }
+  return { approved: true, positionSize, riskAmount, plannedRR };
+}
+
+// server/modules/backtestEngine.ts
+function runBacktest(input) {
+  const warmup = input.warmupCandles ?? 100;
+  if (input.candles.length <= warmup) {
+    return emptyResult();
+  }
+  let capital = input.startingCapital;
+  let peakCapital = capital;
+  let maxDrawdown = 0;
+  const openTrades = [];
+  const closedTrades = [];
+  const diag = {
+    barsEvaluated: 0,
+    entriesTaken: 0,
+    rejections: {},
+    bestLevelRankSeen: 0,
+    minLevelRankFloor: input.config.minLevelRank,
+    bestRRSeen: 0,
+    minRRFloor: input.config.minRiskRewardRatio,
+    recentRejections: []
+  };
+  const reject = (barTime, reason, detail) => {
+    diag.rejections[reason] = (diag.rejections[reason] ?? 0) + 1;
+    if (diag.recentRejections.length < 20) {
+      diag.recentRejections.push({ atMs: barTime, reason, detail });
+    }
+  };
+  for (let i = warmup; i < input.candles.length; i++) {
+    const bar = input.candles[i];
+    diag.barsEvaluated++;
+    for (let t = openTrades.length - 1; t >= 0; t--) {
+      const ot = openTrades[t];
+      const hit = resolveBar(ot, bar);
+      if (hit) {
+        const closed = {
+          openedAt: ot.openedAt,
+          closedAt: bar.openTime,
+          side: ot.side,
+          setupMode: ot.setupMode,
+          entry: ot.entry,
+          stop: ot.stop,
+          target: ot.target,
+          size: ot.size,
+          realisedPnl: hit.pnl,
+          outcome: hit.outcome
+        };
+        closedTrades.push(closed);
+        capital += hit.pnl;
+        peakCapital = Math.max(peakCapital, capital);
+        const dd = (peakCapital - capital) / peakCapital * 100;
+        if (dd > maxDrawdown) maxDrawdown = dd;
+        openTrades.splice(t, 1);
+      }
+    }
+    const window = input.candles.slice(0, i + 1);
+    const levels = identifyLevels(window);
+    if (levels.length === 0) {
+      reject(bar.openTime, "no_levels");
+      continue;
+    }
+    const sweep = detectLatestSweep(window, levels);
+    if (!sweep) {
+      reject(bar.openTime, "no_sweep", { levelCount: levels.length });
+      continue;
+    }
+    if (sweep.level.rank > diag.bestLevelRankSeen) {
+      diag.bestLevelRankSeen = sweep.level.rank;
+    }
+    const proposal = generateProposal(sweep, window, levels, input.regime);
+    if (!proposal) {
+      reject(bar.openTime, "no_proposal", {
+        levelType: sweep.level.type,
+        sweepDirection: sweep.direction,
+        closedBack: sweep.closedBack
+      });
+      continue;
+    }
+    const proposalRisk = Math.abs(proposal.entryPrice - proposal.stopPrice);
+    const proposalReward = Math.abs(proposal.targetPrice - proposal.entryPrice);
+    const proposalRR = proposalRisk > 0 ? proposalReward / proposalRisk : 0;
+    if (proposalRR > diag.bestRRSeen) diag.bestRRSeen = proposalRR;
+    const { dailyPnlPct, weeklyPnlPct } = windowedPnl(closedTrades, bar.openTime, input.startingCapital);
+    const decision = assessTrade({
+      capital,
+      riskPercentPerTrade: input.config.riskPercentPerTrade,
+      entryPrice: proposal.entryPrice,
+      stopPrice: proposal.stopPrice,
+      targetPrice: proposal.targetPrice,
+      regime: input.regime,
+      minRiskRewardRatio: input.config.minRiskRewardRatio,
+      openPositionCount: openTrades.length,
+      maxConcurrentPositions: input.config.maxConcurrentPositions,
+      dailyPnlPct,
+      weeklyPnlPct,
+      dailyDrawdownLimitPct: input.config.dailyDrawdownLimitPct,
+      weeklyDrawdownLimitPct: input.config.weeklyDrawdownLimitPct,
+      minLevelRank: input.config.minLevelRank,
+      candidateLevelRank: sweep.level.rank,
+      pairMinOrderSize: 0
+      // backtests assume any size is fillable
+    });
+    if (!decision.approved) {
+      reject(bar.openTime, `risk_rejected:${decision.reason}`, decision.detail);
+      continue;
+    }
+    diag.entriesTaken++;
+    openTrades.push({
+      openedAt: bar.openTime,
+      side: proposal.side,
+      setupMode: proposal.setupMode,
+      entry: proposal.entryPrice,
+      stop: proposal.stopPrice,
+      target: proposal.targetPrice,
+      size: decision.positionSize,
+      riskAmount: decision.riskAmount
+    });
+  }
+  const last = input.candles[input.candles.length - 1];
+  for (const ot of openTrades) {
+    const pnl = pnlAt(ot, last.close);
+    closedTrades.push({
+      openedAt: ot.openedAt,
+      closedAt: last.openTime,
+      side: ot.side,
+      setupMode: ot.setupMode,
+      entry: ot.entry,
+      stop: ot.stop,
+      target: ot.target,
+      size: ot.size,
+      realisedPnl: pnl,
+      outcome: "timeout"
+    });
+    capital += pnl;
+  }
+  return summarise(closedTrades, capital - input.startingCapital, maxDrawdown, diag);
+}
+function resolveBar(ot, bar) {
+  if (ot.side === "long") {
+    if (bar.low <= ot.stop) return { pnl: -ot.riskAmount, outcome: "stop" };
+    if (bar.high >= ot.target) {
+      const reward = (ot.target - ot.entry) * ot.size;
+      return { pnl: reward, outcome: "target" };
+    }
+  } else {
+    if (bar.high >= ot.stop) return { pnl: -ot.riskAmount, outcome: "stop" };
+    if (bar.low <= ot.target) {
+      const reward = (ot.entry - ot.target) * ot.size;
+      return { pnl: reward, outcome: "target" };
+    }
+  }
+  return null;
+}
+function pnlAt(ot, price) {
+  return ot.side === "long" ? (price - ot.entry) * ot.size : (ot.entry - price) * ot.size;
+}
+function windowedPnl(closed, nowMs, startingCapital) {
+  const day = nowMs - 24 * 60 * 60 * 1e3;
+  const week = nowMs - 7 * 24 * 60 * 60 * 1e3;
+  let d = 0, w = 0;
+  for (const t of closed) {
+    if (t.closedAt >= day) d += t.realisedPnl;
+    if (t.closedAt >= week) w += t.realisedPnl;
+  }
+  return {
+    dailyPnlPct: d / startingCapital * 100,
+    weeklyPnlPct: w / startingCapital * 100
+  };
+}
+function summarise(trades2, netPnl, maxDrawdown, diagnostic) {
+  const wins = trades2.filter((t) => t.realisedPnl > 0).length;
+  const losses = trades2.filter((t) => t.realisedPnl <= 0).length;
+  const rrSum = trades2.reduce((s, t) => {
+    const risk = Math.abs(t.entry - t.stop);
+    const reward = Math.abs(t.target - t.entry);
+    return s + (risk > 0 ? reward / risk : 0);
+  }, 0);
+  const returns = trades2.map((t) => t.realisedPnl);
+  const mean = returns.reduce((a, b) => a + b, 0) / (returns.length || 1);
+  const variance = returns.reduce((s, r) => s + (r - mean) ** 2, 0) / (returns.length || 1);
+  const std = Math.sqrt(variance);
+  const sharpe = std > 0 ? mean / std * Math.sqrt(365) : null;
+  return {
+    trades: trades2.length,
+    wins,
+    losses,
+    winRate: trades2.length ? wins / trades2.length : 0,
+    netPnl,
+    maxDrawdown,
+    avgRR: trades2.length ? rrSum / trades2.length : 0,
+    sharpe,
+    tradeLog: trades2,
+    diagnostic
+  };
+}
+function emptyResult() {
+  return {
+    trades: 0,
+    wins: 0,
+    losses: 0,
+    winRate: 0,
+    netPnl: 0,
+    maxDrawdown: 0,
+    avgRR: 0,
+    sharpe: null,
+    tradeLog: [],
+    diagnostic: {
+      barsEvaluated: 0,
+      entriesTaken: 0,
+      rejections: {},
+      bestLevelRankSeen: 0,
+      minLevelRankFloor: 0,
+      bestRRSeen: 0,
+      minRRFloor: 0,
+      recentRejections: []
+    }
+  };
+}
+
+// server/modules/experiments/runners.ts
+function scoreBacktest(r) {
+  if (r.trades < 3) return 0;
+  const sharpe = r.sharpe ?? 0;
+  const tradesPenalty = Math.min(1, r.trades / 20);
+  const winBonus = r.winRate;
+  return Math.max(0, sharpe * tradesPenalty + winBonus);
+}
+function variantOf(label, r) {
+  return {
+    label,
+    score: scoreBacktest(r),
+    trades: r.trades,
+    winRate: r.winRate,
+    netPnl: r.netPnl,
+    maxDrawdown: r.maxDrawdown
+  };
+}
+function runDiagnostic(args) {
+  const { candles, regime, live } = args;
+  const result = runBacktest({
+    candles,
+    regime,
+    startingCapital: live.startingCapital,
+    config: {
+      riskPercentPerTrade: live.riskPercentPerTrade,
+      minRiskRewardRatio: live.minRiskRewardRatio,
+      minLevelRank: live.minLevelRank,
+      maxConcurrentPositions: live.maxConcurrentPositions,
+      dailyDrawdownLimitPct: live.dailyDrawdownLimitPct,
+      weeklyDrawdownLimitPct: live.weeklyDrawdownLimitPct
+    }
+  });
+  const diag = result.diagnostic;
+  const totalRejected = Object.values(diag.rejections).reduce((a, b) => a + b, 0);
+  const findings = [];
+  findings.push(
+    `${diag.barsEvaluated} bars evaluated \xB7 ${diag.entriesTaken} entries taken \xB7 ${totalRejected} rejected.`
+  );
+  const sorted = Object.entries(diag.rejections).sort((a, b) => b[1] - a[1]);
+  if (sorted.length > 0) {
+    const [topReason, topCount] = sorted[0];
+    const pct = totalRejected > 0 ? Math.round(topCount / totalRejected * 100) : 0;
+    findings.push(
+      `Dominant rejection: ${humanReason(topReason)} (${topCount} bars, ${pct}% of all rejections).`
+    );
+  }
+  if (diag.bestLevelRankSeen > 0 && diag.bestLevelRankSeen < diag.minLevelRankFloor) {
+    findings.push(
+      `Best level rank seen was ${diag.bestLevelRankSeen}; your floor is ${diag.minLevelRankFloor}. Every sweep in this window was below the bar.`
+    );
+  }
+  if (diag.bestRRSeen > 0 && diag.bestRRSeen < diag.minRRFloor) {
+    findings.push(
+      `Best R:R produced was ${diag.bestRRSeen.toFixed(2)}; your minimum is ${diag.minRRFloor.toFixed(2)}.`
+    );
+  }
+  let diff;
+  const rejKey = (k) => diag.rejections[`risk_rejected:${k}`] ?? 0;
+  const dominantRank = rejKey("level_rank_below_minimum");
+  const dominantRR = rejKey("rr_below_minimum");
+  if (dominantRank > 0 && dominantRank >= totalRejected * 0.5 && diag.bestLevelRankSeen >= 1 && diag.bestLevelRankSeen < diag.minLevelRankFloor) {
+    diff = {
+      paramKey: "minLevelRank",
+      fromValue: diag.minLevelRankFloor,
+      toValue: diag.bestLevelRankSeen,
+      rationale: `${Math.round(dominantRank / totalRejected * 100)}% of rejections were level_rank_below_minimum, and the best rank seen in this window was ${diag.bestLevelRankSeen}. Lowering the floor to ${diag.bestLevelRankSeen} would have admitted those sweeps for evaluation.`
+    };
+  } else if (dominantRR > 0 && dominantRR >= totalRejected * 0.5 && diag.bestRRSeen >= 1 && diag.bestRRSeen < diag.minRRFloor) {
+    const floor = Math.floor(diag.bestRRSeen * 10) / 10;
+    diff = {
+      paramKey: "minRiskRewardRatio",
+      fromValue: diag.minRRFloor,
+      toValue: floor,
+      rationale: `${Math.round(dominantRR / totalRejected * 100)}% of rejections were rr_below_minimum, and the best R:R any proposal produced was ${diag.bestRRSeen.toFixed(2)}. Lowering the minimum to ${floor.toFixed(1)} would have admitted those.`
+    };
+  }
+  const summary = diff ? `Found a likely blocker \u2014 suggesting ${diff.paramKey} ${diff.fromValue} \u2192 ${diff.toValue}.` : diag.entriesTaken > 0 ? `Bot is trading (${diag.entriesTaken} entries in window). No change suggested.` : `Bot found no entries, but no single rejection reason dominates. No change suggested \u2014 review findings.`;
+  return {
+    metrics: result,
+    recommendation: {
+      summary,
+      findings,
+      diff,
+      diagnosticPayload: {
+        diagnostic: diag,
+        trades: result.trades,
+        winRate: result.winRate,
+        netPnl: result.netPnl
+      }
+    }
+  };
+}
+function runParamSweep(args) {
+  const { config, candles, regime, live } = args;
+  const variants = [];
+  const baseConfig = {
+    riskPercentPerTrade: live.riskPercentPerTrade,
+    minRiskRewardRatio: live.minRiskRewardRatio,
+    minLevelRank: live.minLevelRank,
+    maxConcurrentPositions: live.maxConcurrentPositions,
+    dailyDrawdownLimitPct: live.dailyDrawdownLimitPct,
+    weeklyDrawdownLimitPct: live.weeklyDrawdownLimitPct
+  };
+  for (const value of config.values) {
+    const cfg = { ...baseConfig, [config.paramKey]: value };
+    const r = runBacktest({
+      candles,
+      regime,
+      startingCapital: live.startingCapital,
+      config: cfg
+    });
+    variants.push(variantOf(`${config.paramKey}=${value}`, r));
+  }
+  const ranked = [...variants].sort(
+    (a, b) => b.score !== a.score ? b.score - a.score : b.trades - a.trades
+  );
+  const winner = ranked[0];
+  const currentValue = live[config.paramKey];
+  const findings = [
+    `Tested ${variants.length} values of ${config.paramKey}: ${config.values.join(", ")}.`,
+    `Best: ${winner.label} (score ${winner.score.toFixed(2)}, ${winner.trades} trades, ${Math.round(winner.winRate * 100)}% wins).`,
+    `Current live value: ${currentValue}.`
+  ];
+  const winnerValue = Number(winner.label.split("=")[1]);
+  let diff;
+  if (winnerValue !== currentValue && winner.score > 0) {
+    diff = {
+      paramKey: config.paramKey,
+      fromValue: currentValue,
+      toValue: winnerValue,
+      rationale: `Sweeping ${config.paramKey} over ${config.values.length} values, ${winner.label} produced the highest score (${winner.score.toFixed(2)}) versus the current live value of ${currentValue}.`
+    };
+  }
+  return {
+    metrics: { variants },
+    recommendation: {
+      summary: diff ? `Recommend ${config.paramKey}: ${diff.fromValue} \u2192 ${diff.toValue}.` : `Current ${config.paramKey} (${currentValue}) is already optimal.`,
+      findings,
+      diff,
+      variants
+    }
+  };
+}
+function runComparison(args) {
+  const { config, candles, regime, live } = args;
+  const baseConfig = {
+    riskPercentPerTrade: live.riskPercentPerTrade,
+    minRiskRewardRatio: live.minRiskRewardRatio,
+    minLevelRank: live.minLevelRank,
+    maxConcurrentPositions: live.maxConcurrentPositions,
+    dailyDrawdownLimitPct: live.dailyDrawdownLimitPct,
+    weeklyDrawdownLimitPct: live.weeklyDrawdownLimitPct
+  };
+  const variants = [];
+  for (const alt of config.alternatives) {
+    const cfg = { ...baseConfig, ...alt.overrides };
+    const r = runBacktest({
+      candles,
+      regime,
+      startingCapital: live.startingCapital,
+      config: cfg
+    });
+    variants.push(variantOf(alt.label, r));
+  }
+  const ranked = [...variants].sort(
+    (a, b) => b.score !== a.score ? b.score - a.score : b.trades - a.trades
+  );
+  const winner = ranked[0];
+  const findings = [
+    `Compared ${variants.length} alternatives.`,
+    ...ranked.map(
+      (v, i) => `${i + 1}. ${v.label} \u2014 score ${v.score.toFixed(2)}, ${v.trades} trades, ${Math.round(v.winRate * 100)}% wins`
+    )
+  ];
+  return {
+    metrics: { variants },
+    recommendation: {
+      summary: `Best alternative: ${winner.label} (score ${winner.score.toFixed(2)}).`,
+      findings,
+      variants
+      // diff intentionally omitted — comparison results are read-only insights.
+    }
+  };
+}
+function humanReason(machineReason) {
+  const map = {
+    no_levels: "no levels identified",
+    no_sweep: "no liquidity sweep detected",
+    no_proposal: "sweep found but no valid setup",
+    "risk_rejected:regime_suppresses_entries": "regime suppresses entries",
+    "risk_rejected:daily_drawdown_breached": "daily drawdown breached",
+    "risk_rejected:weekly_drawdown_breached": "weekly drawdown breached",
+    "risk_rejected:max_concurrent_positions_reached": "at max concurrent positions",
+    "risk_rejected:level_rank_below_minimum": "level rank below minimum",
+    "risk_rejected:rr_below_minimum": "R:R below minimum",
+    "risk_rejected:invalid_stop_distance": "invalid stop distance",
+    "risk_rejected:regime_size_multiplier_zero": "regime size multiplier zero",
+    "risk_rejected:below_min_order_size": "position below exchange minimum",
+    "risk_rejected:position_exceeds_capital": "position would exceed capital"
+  };
+  return map[machineReason] ?? machineReason;
+}
+
+// shared/experiments.ts
+var APPLIABLE_PARAM_KEYS = [
+  "minLevelRank",
+  "minRiskRewardRatio",
+  "maxConcurrentPositions"
+];
+
+// server/modules/experiments/applier.ts
+async function applyRecommendation(args) {
+  const run = await storage.getExperimentRun(args.runId);
+  if (!run) return { ok: false, reason: "run_not_found" };
+  if (run.verdict !== "approved") {
+    return { ok: false, reason: `verdict_not_approved (was: ${run.verdict})` };
+  }
+  const recommendation = run.recommendation;
+  if (!recommendation || !recommendation.diff) {
+    return { ok: false, reason: "recommendation_has_no_diff" };
+  }
+  const { diff } = recommendation;
+  if (!APPLIABLE_PARAM_KEYS.includes(diff.paramKey)) {
+    return { ok: false, reason: `param_key_not_appliable: ${diff.paramKey}` };
+  }
+  const config = await storage.getTenantConfig(run.tenantId);
+  if (!config) return { ok: false, reason: "tenant_config_missing" };
+  const currentLive = readNumericKey(config, diff.paramKey);
+  if (currentLive !== diff.fromValue) {
+    return {
+      ok: false,
+      reason: `stale_recommendation: live ${diff.paramKey} is ${currentLive}, recommendation expected ${diff.fromValue}`
+    };
+  }
+  await storage.updateTenantConfig(run.tenantId, {
+    [diff.paramKey]: writableValue(diff.paramKey, diff.toValue)
+  });
+  await storage.setRunVerdict(args.runId, "applied", args.operatorUserId);
+  audit({
+    userId: args.operatorUserId,
+    tenantId: run.tenantId,
+    action: "apply_experiment_recommendation",
+    resourceType: "experiment_run",
+    resourceId: args.runId,
+    outcome: "success",
+    detail: {
+      paramKey: diff.paramKey,
+      fromValue: diff.fromValue,
+      toValue: diff.toValue,
+      experimentId: run.experimentId
+    },
+    ipAddress: args.ipAddress
+  });
+  return {
+    ok: true,
+    tenantId: run.tenantId,
+    appliedDiff: { paramKey: diff.paramKey, fromValue: diff.fromValue, toValue: diff.toValue }
+  };
+}
+function readNumericKey(config, key) {
+  const v = config[key];
+  if (typeof v === "string") return Number(v);
+  if (typeof v === "number") return v;
+  return NaN;
+}
+function writableValue(key, value) {
+  if (key === "minLevelRank" || key === "maxConcurrentPositions") return value;
+  return String(value);
+}
+
 // server/routes.ts
 function getUser(req) {
   return req.user;
@@ -1304,6 +2244,204 @@ function registerRoutes(app2) {
     const u = getUser(req);
     const tenant = await storage.getOrCreateTenantForUser(u.id);
     res.json(await storage.listBotDecisions(tenant.id));
+  });
+  app2.get("/api/tenant/experiments", isAuthenticated, async (req, res) => {
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    res.json(await storage.listExperiments(tenant.id));
+  });
+  app2.post("/api/tenant/experiments", isAuthenticated, async (req, res) => {
+    const schema = z2.object({
+      name: z2.string().min(2).max(200),
+      kind: z2.enum(["diagnostic", "param_sweep", "comparison"]),
+      config: z2.record(z2.string(), z2.unknown())
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "invalid", issues: parsed.error.issues });
+    }
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    const row = await storage.createExperiment({
+      tenantId: tenant.id,
+      name: parsed.data.name,
+      kind: parsed.data.kind,
+      config: parsed.data.config,
+      createdByUserId: u.id
+    });
+    audit({
+      userId: u.id,
+      tenantId: tenant.id,
+      action: "create_experiment",
+      resourceType: "experiment",
+      resourceId: row.id,
+      outcome: "success",
+      detail: { name: row.name, kind: row.kind },
+      ipAddress: getIp(req)
+    });
+    res.json(row);
+  });
+  app2.patch("/api/tenant/experiments/:id", isAuthenticated, async (req, res) => {
+    const id = pid(req, "id");
+    const { enabled } = z2.object({ enabled: z2.boolean() }).parse(req.body);
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    const exp = await storage.getExperiment(id);
+    if (!exp || exp.tenantId !== tenant.id) {
+      return res.status(404).json({ error: "not_found" });
+    }
+    await storage.setExperimentEnabled(id, enabled);
+    res.json({ ok: true });
+  });
+  app2.delete("/api/tenant/experiments/:id", isAuthenticated, async (req, res) => {
+    const id = pid(req, "id");
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    const exp = await storage.getExperiment(id);
+    if (!exp || exp.tenantId !== tenant.id) {
+      return res.status(404).json({ error: "not_found" });
+    }
+    await storage.deleteExperiment(id);
+    audit({
+      userId: u.id,
+      tenantId: tenant.id,
+      action: "delete_experiment",
+      resourceType: "experiment",
+      resourceId: id,
+      outcome: "success",
+      ipAddress: getIp(req)
+    });
+    res.json({ ok: true });
+  });
+  app2.post("/api/tenant/experiments/:id/run", isAuthenticated, async (req, res) => {
+    const id = pid(req, "id");
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    const exp = await storage.getExperiment(id);
+    if (!exp || exp.tenantId !== tenant.id) {
+      return res.status(404).json({ error: "not_found" });
+    }
+    const config = await storage.getTenantConfig(tenant.id);
+    if (!config) return res.status(404).json({ error: "no_tenant_config" });
+    const expConfig = exp.config;
+    if (!expConfig.pairId) return res.status(400).json({ error: "experiment_missing_pairId" });
+    const pair = await storage.getMarketPair(expConfig.pairId);
+    if (!pair) return res.status(404).json({ error: "pair_not_found" });
+    const symbol = `${pair.baseAsset}${pair.quoteAsset}`;
+    const timeframe = expConfig.timeframe ?? "15m";
+    const lookback = expConfig.lookbackBars ?? 672;
+    const candles = await getBinance().fetchCandles({
+      symbol,
+      timeframe,
+      limit: lookback
+    });
+    const live = {
+      riskPercentPerTrade: Number(config.riskPercentPerTrade),
+      minRiskRewardRatio: Number(config.minRiskRewardRatio),
+      minLevelRank: config.minLevelRank,
+      maxConcurrentPositions: config.maxConcurrentPositions,
+      dailyDrawdownLimitPct: Number(config.dailyDrawdownLimitPct),
+      weeklyDrawdownLimitPct: Number(config.weeklyDrawdownLimitPct),
+      startingCapital: Number(config.paperStartingCapital ?? 1e4)
+    };
+    let metrics;
+    let recommendation;
+    if (exp.kind === "diagnostic") {
+      const out = runDiagnostic({
+        config: exp.config,
+        candles,
+        regime: tenant.activeRegime,
+        live
+      });
+      metrics = out.metrics;
+      recommendation = out.recommendation;
+    } else if (exp.kind === "param_sweep") {
+      const out = runParamSweep({
+        config: exp.config,
+        candles,
+        regime: tenant.activeRegime,
+        live
+      });
+      metrics = out.metrics;
+      recommendation = out.recommendation;
+    } else if (exp.kind === "comparison") {
+      const out = runComparison({
+        config: exp.config,
+        candles,
+        regime: tenant.activeRegime,
+        live
+      });
+      metrics = out.metrics;
+      recommendation = out.recommendation;
+    } else {
+      return res.status(400).json({ error: `unknown_kind: ${exp.kind}` });
+    }
+    const verdict = recommendation.diff ? "pending" : "no_action";
+    const run = await storage.insertExperimentRun({
+      tenantId: tenant.id,
+      experimentId: exp.id,
+      baselineConfig: live,
+      proposedConfig: recommendation.diff ? { [recommendation.diff.paramKey]: recommendation.diff.toValue } : {},
+      metrics,
+      recommendation,
+      verdict
+    });
+    res.json(run);
+  });
+  app2.get("/api/tenant/experiment-runs", isAuthenticated, async (req, res) => {
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    res.json(await storage.listExperimentRunsForTenant(tenant.id));
+  });
+  app2.get("/api/tenant/recommendations/pending", isAuthenticated, async (req, res) => {
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    res.json(await storage.listPendingRecommendations(tenant.id));
+  });
+  app2.post(
+    "/api/tenant/recommendations/:id/:action",
+    isAuthenticated,
+    async (req, res) => {
+      const id = pid(req, "id");
+      const action = pid(req, "action");
+      if (!["approve", "reject", "defer", "apply"].includes(action)) {
+        return res.status(400).json({ error: "invalid_action" });
+      }
+      const u = getUser(req);
+      const tenant = await storage.getOrCreateTenantForUser(u.id);
+      const run = await storage.getExperimentRun(id);
+      if (!run || run.tenantId !== tenant.id) {
+        return res.status(404).json({ error: "not_found" });
+      }
+      if (action === "apply") {
+        const result = await applyRecommendation({
+          runId: id,
+          operatorUserId: u.id,
+          ipAddress: getIp(req)
+        });
+        if (!result.ok) return res.status(400).json({ error: result.reason });
+        return res.json(result);
+      }
+      const verdictMap = {
+        approve: "approved",
+        reject: "rejected",
+        defer: "deferred"
+      };
+      await storage.setRunVerdict(id, verdictMap[action], u.id);
+      audit({
+        userId: u.id,
+        tenantId: tenant.id,
+        action: `recommendation_${action}`,
+        resourceType: "experiment_run",
+        resourceId: id,
+        outcome: "success",
+        ipAddress: getIp(req)
+      });
+      res.json({ ok: true });
+    }
+  );
+  app2.get("/api/tenant/experiments/appliable-keys", isAuthenticated, (_req, res) => {
+    res.json(APPLIABLE_PARAM_KEYS);
   });
   app2.get("/api/tenant/costs", isAuthenticated, async (req, res) => {
     const u = getUser(req);

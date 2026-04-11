@@ -318,16 +318,50 @@ export const riskEvents = pgTable(
 // Backtest Sundays (PRD §11) + LLM usage metering (PRD §12.6)
 // ============================================================================
 
+// Experiment definitions — the operator's library of research questions.
+// Each row is a reusable, named, configured experiment that can be run on
+// demand and produces a recommendation. Templates are picked from a small
+// fixed set (`kind`); the `config` blob is template-specific.
+export const experiments = pgTable(
+  "experiments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
+    name: varchar("name", { length: 200 }).notNull(),
+    kind: varchar("kind", { length: 32 }).notNull(), // diagnostic | param_sweep | comparison
+    config: jsonb("config").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    createdByUserId: uuid("created_by_user_id")
+      .notNull()
+      .references(() => users.id),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [index("experiments_tenant_idx").on(t.tenantId)]
+);
+
+// Per-execution result of an experiment. Stores baseline + proposed param
+// snapshots, raw run output (`metrics`), and a structured `recommendation`
+// the operator reviews. `verdict` walks pending → approved/rejected/deferred,
+// and finally → applied once the change has been written to live config.
+//
+// `experimentId` is nullable to allow legacy / ad-hoc rows; new rows always
+// reference an experiment definition. `week` is nullable now that runs are
+// triggered on demand instead of in a Sunday batch.
 export const experimentRuns = pgTable("experiment_runs", {
   id: uuid("id").primaryKey().defaultRandom(),
   tenantId: uuid("tenant_id")
     .notNull()
     .references(() => tenants.id),
-  week: varchar("week", { length: 10 }).notNull(), // ISO week e.g. 2026-W15
+  experimentId: uuid("experiment_id").references(() => experiments.id),
+  week: varchar("week", { length: 10 }), // ISO week, optional
   baselineConfig: jsonb("baseline_config").notNull(),
   proposedConfig: jsonb("proposed_config").notNull(),
   metrics: jsonb("metrics").notNull(),
-  verdict: varchar("verdict", { length: 16 }).notNull(), // kept/discarded/pending_review
+  recommendation: jsonb("recommendation"), // Recommendation shape from shared/experiments
+  verdict: varchar("verdict", { length: 16 }).notNull().default("pending"),
+  // pending | approved | rejected | deferred | applied | no_action
   reviewedByUserId: uuid("reviewed_by_user_id").references(() => users.id),
   reviewedAt: timestamp("reviewed_at"),
   appliedAt: timestamp("applied_at"),
@@ -451,6 +485,8 @@ export type AuditLog = typeof auditLogs.$inferSelect;
 export type AccessRequest = typeof accessRequests.$inferSelect;
 export type InvitedUser = typeof invitedUsers.$inferSelect;
 export type ExperimentRun = typeof experimentRuns.$inferSelect;
+export type Experiment = typeof experiments.$inferSelect;
+export type InsertExperiment = typeof experiments.$inferInsert;
 export type LlmUsage = typeof llmUsage.$inferSelect;
 export type RegimeChange = typeof regimeChanges.$inferSelect;
 

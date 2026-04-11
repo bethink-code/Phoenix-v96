@@ -4,6 +4,7 @@ import Landing from "@/pages/Landing";
 import Dashboard from "@/pages/Dashboard";
 import Admin from "@/pages/Admin";
 import Settings from "@/pages/Settings";
+import Experiments from "@/pages/Experiments";
 import NotFound from "@/pages/not-found";
 import TermsModal from "@/components/TermsModal";
 
@@ -30,6 +31,9 @@ export default function App() {
         </Route>
         <Route path="/settings">
           {isAuthenticated ? <Settings /> : <Redirect to="/" />}
+        </Route>
+        <Route path="/experiments">
+          {isAuthenticated ? <Experiments /> : <Redirect to="/" />}
         </Route>
         <Route component={NotFound} />
       </Switch>

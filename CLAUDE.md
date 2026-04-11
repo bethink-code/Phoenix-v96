@@ -43,7 +43,7 @@ Other PRD modules:
 - `server/modules/emergencyExit.ts` — PRD §7.2 fire extinguisher. Phase 0 stub — no real exchange calls yet.
 - `server/modules/paperTrading.ts` — PRD Rule 4 hard gate. Global via env + per-tenant flag.
 - `server/modules/whatsapp.ts` — PRD §3.5 tiered alerts. Twilio stub.
-- `server/modules/backtestEngine.ts` — PRD §11.4 scriptable, isolated. Phase 0 stub.
+- `server/modules/backtestEngine.ts` — PRD §11.4 scriptable, isolated. Real bar-by-bar replay that reuses live strategy + risk functions; emits rejection diagnostics. Used by Dashboard Diagnostic tab and (Phase 3) the Sunday agent loop.
 - `server/cryptoUtil.ts` — AES-256-GCM for tenant exchange keys (PRD §12.3).
 
 ## Database
@@ -77,8 +77,7 @@ Schema lives in `shared/schema.ts`. Key tables:
 - Bot runner process (process-per-tenant isolation per PRD §12.4)
 - Coinglass liquidation heatmap integration
 - WhatsApp Business API Twilio wiring (templates pre-approved)
-- Backtest engine simulator (currently returns zeroed result)
-- Backtest Sundays agent loop
+- Backtest Sundays agent loop (engine exists; the autonomous experiment loop + Sunday review UI are Phase 3)
 - Stripe billing (Phase 2)
 - Mobile / copy trading (never — Phase 1 out of scope)
 

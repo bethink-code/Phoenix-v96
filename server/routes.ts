@@ -13,6 +13,20 @@ import { emergencyMarketExit } from "./modules/emergencyExit";
 import { getRegimeProfile } from "./modules/regimeEngine";
 import { getBinance } from "./modules/exchange/binance";
 import { tierFor, tierDefaults } from "./modules/portfolioTier";
+import {
+  runDiagnostic,
+  runParamSweep,
+  runComparison,
+  type LiveParams,
+} from "./modules/experiments/runners";
+import { applyRecommendation } from "./modules/experiments/applier";
+import {
+  APPLIABLE_PARAM_KEYS,
+  type DiagnosticConfig,
+  type ParamSweepConfig,
+  type ComparisonConfig,
+  type Recommendation,
+} from "../shared/experiments";
 
 function getUser(req: Request) {
   return req.user as { id: string; email: string; isAdmin: boolean };
@@ -120,6 +134,246 @@ export function registerRoutes(app: Express) {
     const u = getUser(req);
     const tenant = await storage.getOrCreateTenantForUser(u.id);
     res.json(await storage.listBotDecisions(tenant.id));
+  });
+
+  // ==========================================================================
+  // Experiments (PRD §11) — the operator's research bench. Each experiment
+  // is a reusable, configured research question that produces a structured
+  // recommendation when run. Routes:
+  //   GET  /api/tenant/experiments              list defs
+  //   POST /api/tenant/experiments              create def
+  //   POST /api/tenant/experiments/:id/run      run def → write run row
+  //   PATCH /api/tenant/experiments/:id         enable/disable
+  //   DELETE /api/tenant/experiments/:id        delete def + runs
+  //   GET  /api/tenant/experiment-runs          list recent runs
+  //   GET  /api/tenant/recommendations/pending  list pending review
+  //   POST /api/tenant/recommendations/:id/approve
+  //   POST /api/tenant/recommendations/:id/reject
+  //   POST /api/tenant/recommendations/:id/defer
+  //   POST /api/tenant/recommendations/:id/apply  (after approve)
+  // ==========================================================================
+
+  app.get("/api/tenant/experiments", isAuthenticated, async (req, res) => {
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    res.json(await storage.listExperiments(tenant.id));
+  });
+
+  app.post("/api/tenant/experiments", isAuthenticated, async (req, res) => {
+    const schema = z.object({
+      name: z.string().min(2).max(200),
+      kind: z.enum(["diagnostic", "param_sweep", "comparison"]),
+      config: z.record(z.string(), z.unknown()),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "invalid", issues: parsed.error.issues });
+    }
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    const row = await storage.createExperiment({
+      tenantId: tenant.id,
+      name: parsed.data.name,
+      kind: parsed.data.kind,
+      config: parsed.data.config,
+      createdByUserId: u.id,
+    });
+    audit({
+      userId: u.id,
+      tenantId: tenant.id,
+      action: "create_experiment",
+      resourceType: "experiment",
+      resourceId: row.id,
+      outcome: "success",
+      detail: { name: row.name, kind: row.kind },
+      ipAddress: getIp(req),
+    });
+    res.json(row);
+  });
+
+  app.patch("/api/tenant/experiments/:id", isAuthenticated, async (req, res) => {
+    const id = pid(req, "id");
+    const { enabled } = z.object({ enabled: z.boolean() }).parse(req.body);
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    const exp = await storage.getExperiment(id);
+    if (!exp || exp.tenantId !== tenant.id) {
+      return res.status(404).json({ error: "not_found" });
+    }
+    await storage.setExperimentEnabled(id, enabled);
+    res.json({ ok: true });
+  });
+
+  app.delete("/api/tenant/experiments/:id", isAuthenticated, async (req, res) => {
+    const id = pid(req, "id");
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    const exp = await storage.getExperiment(id);
+    if (!exp || exp.tenantId !== tenant.id) {
+      return res.status(404).json({ error: "not_found" });
+    }
+    await storage.deleteExperiment(id);
+    audit({
+      userId: u.id,
+      tenantId: tenant.id,
+      action: "delete_experiment",
+      resourceType: "experiment",
+      resourceId: id,
+      outcome: "success",
+      ipAddress: getIp(req),
+    });
+    res.json({ ok: true });
+  });
+
+  app.post("/api/tenant/experiments/:id/run", isAuthenticated, async (req, res) => {
+    const id = pid(req, "id");
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    const exp = await storage.getExperiment(id);
+    if (!exp || exp.tenantId !== tenant.id) {
+      return res.status(404).json({ error: "not_found" });
+    }
+    const config = await storage.getTenantConfig(tenant.id);
+    if (!config) return res.status(404).json({ error: "no_tenant_config" });
+
+    // Resolve pair from experiment config (all three template kinds carry pairId)
+    const expConfig = exp.config as { pairId?: string; timeframe?: string; lookbackBars?: number };
+    if (!expConfig.pairId) return res.status(400).json({ error: "experiment_missing_pairId" });
+    const pair = await storage.getMarketPair(expConfig.pairId);
+    if (!pair) return res.status(404).json({ error: "pair_not_found" });
+
+    const symbol = `${pair.baseAsset}${pair.quoteAsset}`;
+    const timeframe = (expConfig.timeframe as "15m" | "1h" | "4h" | "1d") ?? "15m";
+    const lookback = expConfig.lookbackBars ?? 672;
+
+    const candles = await getBinance().fetchCandles({
+      symbol,
+      timeframe,
+      limit: lookback,
+    });
+
+    const live: LiveParams = {
+      riskPercentPerTrade: Number(config.riskPercentPerTrade),
+      minRiskRewardRatio: Number(config.minRiskRewardRatio),
+      minLevelRank: config.minLevelRank,
+      maxConcurrentPositions: config.maxConcurrentPositions,
+      dailyDrawdownLimitPct: Number(config.dailyDrawdownLimitPct),
+      weeklyDrawdownLimitPct: Number(config.weeklyDrawdownLimitPct),
+      startingCapital: Number(config.paperStartingCapital ?? 10_000),
+    };
+
+    let metrics: unknown;
+    let recommendation: Recommendation;
+    if (exp.kind === "diagnostic") {
+      const out = runDiagnostic({
+        config: exp.config as DiagnosticConfig,
+        candles,
+        regime: tenant.activeRegime,
+        live,
+      });
+      metrics = out.metrics;
+      recommendation = out.recommendation;
+    } else if (exp.kind === "param_sweep") {
+      const out = runParamSweep({
+        config: exp.config as ParamSweepConfig,
+        candles,
+        regime: tenant.activeRegime,
+        live,
+      });
+      metrics = out.metrics;
+      recommendation = out.recommendation;
+    } else if (exp.kind === "comparison") {
+      const out = runComparison({
+        config: exp.config as ComparisonConfig,
+        candles,
+        regime: tenant.activeRegime,
+        live,
+      });
+      metrics = out.metrics;
+      recommendation = out.recommendation;
+    } else {
+      return res.status(400).json({ error: `unknown_kind: ${exp.kind}` });
+    }
+
+    // Verdict starts pending if there's a diff to approve, no_action otherwise.
+    const verdict = recommendation.diff ? "pending" : "no_action";
+
+    const run = await storage.insertExperimentRun({
+      tenantId: tenant.id,
+      experimentId: exp.id,
+      baselineConfig: live as unknown as object,
+      proposedConfig: (recommendation.diff
+        ? { [recommendation.diff.paramKey]: recommendation.diff.toValue }
+        : {}) as object,
+      metrics: metrics as object,
+      recommendation: recommendation as unknown as object,
+      verdict,
+    });
+    res.json(run);
+  });
+
+  app.get("/api/tenant/experiment-runs", isAuthenticated, async (req, res) => {
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    res.json(await storage.listExperimentRunsForTenant(tenant.id));
+  });
+
+  app.get("/api/tenant/recommendations/pending", isAuthenticated, async (req, res) => {
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    res.json(await storage.listPendingRecommendations(tenant.id));
+  });
+
+  app.post(
+    "/api/tenant/recommendations/:id/:action",
+    isAuthenticated,
+    async (req, res) => {
+      const id = pid(req, "id");
+      const action = pid(req, "action");
+      if (!["approve", "reject", "defer", "apply"].includes(action)) {
+        return res.status(400).json({ error: "invalid_action" });
+      }
+      const u = getUser(req);
+      const tenant = await storage.getOrCreateTenantForUser(u.id);
+      const run = await storage.getExperimentRun(id);
+      if (!run || run.tenantId !== tenant.id) {
+        return res.status(404).json({ error: "not_found" });
+      }
+
+      if (action === "apply") {
+        // Two-step: must already be approved before apply.
+        const result = await applyRecommendation({
+          runId: id,
+          operatorUserId: u.id,
+          ipAddress: getIp(req),
+        });
+        if (!result.ok) return res.status(400).json({ error: result.reason });
+        return res.json(result);
+      }
+
+      const verdictMap = {
+        approve: "approved",
+        reject: "rejected",
+        defer: "deferred",
+      } as const;
+      await storage.setRunVerdict(id, verdictMap[action as keyof typeof verdictMap], u.id);
+      audit({
+        userId: u.id,
+        tenantId: tenant.id,
+        action: `recommendation_${action}`,
+        resourceType: "experiment_run",
+        resourceId: id,
+        outcome: "success",
+        ipAddress: getIp(req),
+      });
+      res.json({ ok: true });
+    }
+  );
+
+  // List of param keys the applier will accept — used by the UI to render
+  // forms and validate input client-side.
+  app.get("/api/tenant/experiments/appliable-keys", isAuthenticated, (_req, res) => {
+    res.json(APPLIABLE_PARAM_KEYS);
   });
 
   app.get("/api/tenant/costs", isAuthenticated, async (req, res) => {
