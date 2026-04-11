@@ -9,7 +9,11 @@ import { cn } from "@/lib/utils";
 // so the operator's mental model transfers cleanly.
 
 interface ResearcherIdentityCardProps {
-  status: "idle" | "running" | "done" | "aborted" | "error";
+  // Session lifecycle. Mirrors ARSession["status"] + "idle" for the
+  // empty state. paused = natural or operator pause, can continue.
+  // stopped = terminal (operator clicked Done). Legacy "done" and
+  // "aborted" values handled for pre-refactor rows.
+  status: "idle" | "running" | "paused" | "stopped" | "done" | "aborted" | "error";
   iterationsRun: number;
   maxIterations: number;
   bestScore: number | null;
@@ -74,14 +78,11 @@ function statusLine(args: {
       : " No improvement yet — still searching.";
     return `Iteration ${iterationsRun} of ${maxIterations}.${bestPart}`;
   }
-  if (status === "done") {
-    if (bestScore != null && bestScore > 0) {
-      return `Done. Ran ${iterationsRun} iterations, best score ${bestScore.toFixed(4)}.`;
-    }
-    return `Done. Ran ${iterationsRun} iterations but didn't find a config that scored. Want to try a different approach?`;
+  if (status === "paused" || status === "aborted") {
+    return `Paused at iteration ${iterationsRun} of ${maxIterations}. Continue to keep going, or mark Done to finish.`;
   }
-  if (status === "aborted") {
-    return `Stopped at your request after ${iterationsRun} iterations.`;
+  if (status === "stopped" || status === "done") {
+    return `Finished after ${iterationsRun} iterations. Archived to History.`;
   }
   if (status === "error") {
     return "Something went wrong. Check the error message and try again.";
@@ -93,8 +94,10 @@ function MoodIndicator({ status }: { status: ResearcherIdentityCardProps["status
   const map: Record<string, { dot: string; label: string }> = {
     idle: { dot: "bg-muted-foreground", label: "Idle" },
     running: { dot: "bg-primary animate-pulse", label: "Running" },
-    done: { dot: "bg-emerald-500", label: "Done" },
-    aborted: { dot: "bg-amber-400", label: "Stopped" },
+    paused: { dot: "bg-blue-400", label: "Paused" },
+    aborted: { dot: "bg-blue-400", label: "Paused" }, // legacy = paused
+    stopped: { dot: "bg-emerald-500", label: "Done" },
+    done: { dot: "bg-emerald-500", label: "Done" }, // legacy = stopped
     error: { dot: "bg-red-500", label: "Error" },
   };
   const { dot, label } = map[status] ?? map.idle;

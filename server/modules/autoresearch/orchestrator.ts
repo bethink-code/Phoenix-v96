@@ -20,7 +20,7 @@
 // The UI polls the session for progress.
 
 import { db } from "../../db";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import {
   autoresearchSessions,
   autoresearchIterations,
@@ -105,8 +105,114 @@ export async function startSession(args: StartArgs): Promise<AutoresearchSession
 
   // Fire-and-forget the loop. Errors are caught and persisted on the
   // session row so the UI can surface them.
-  void runLoop(session, args).catch(async (err) => {
-    console.error(`[autoresearch] session ${session.id} fatal:`, err);
+  void runLoop(session, args, { startIdx: 0, initialHistory: [] }).catch(
+    async (err) => {
+      console.error(`[autoresearch] session ${session.id} fatal:`, err);
+      await db
+        .update(autoresearchSessions)
+        .set({
+          status: "error",
+          errorMessage: (err as Error).message,
+          stoppedAt: new Date(),
+        })
+        .where(eq(autoresearchSessions.id, session.id));
+    }
+  );
+
+  return session;
+}
+
+// Resume a paused / aborted / done session. Re-enters the orchestrator
+// loop on the SAME session row. No new session is created; iterations
+// keep ticking up on the existing iterations table. The agent sees all
+// previous iterations in its history context, so it literally picks
+// up where it left off — no reseeding, no new instructions.
+//
+// Extends maxIterations by `extraIterations` (defaults to the session's
+// original maxIterations so each Continue click doubles the budget).
+export async function resumeSession(args: {
+  sessionId: string;
+  extraIterations?: number;
+}): Promise<AutoresearchSession> {
+  const [session] = await db
+    .select()
+    .from(autoresearchSessions)
+    .where(eq(autoresearchSessions.id, args.sessionId));
+  if (!session) throw new Error("session_not_found");
+  if (!isContinuable(session.status)) {
+    throw new Error(`session_not_continuable (status: ${session.status})`);
+  }
+
+  // Load the session's existing iterations as history context for the
+  // agent. These rows were produced by previous runs of the loop on this
+  // same session; the LLM sees them all when proposing the next move.
+  const existingIterations = await db
+    .select()
+    .from(autoresearchIterations)
+    .where(eq(autoresearchIterations.sessionId, session.id))
+    .orderBy(autoresearchIterations.idx);
+
+  const initialHistory: IterationSummary[] = existingIterations
+    .filter((it) => it.status !== "crash")
+    .map((it) => ({
+      idx: it.idx,
+      params: it.params as unknown as ProposedParams,
+      score: Number(it.score),
+      trades: it.trades,
+      winRate: Number(it.winRate),
+      netPnl: Number(it.netPnl),
+      rejectionTop: (it.rejectionTop as Record<string, number> | null) ?? null,
+      status: it.status as "keep" | "discard" | "baseline" | "sampled",
+      rationale: it.rationale ?? undefined,
+    }));
+
+  // Extend the iteration budget by the requested amount (default: the
+  // original budget). Each Continue adds another batch.
+  const extra = args.extraIterations ?? session.maxIterations;
+  const newMaxIterations = session.maxIterations + extra;
+  const startIdx = session.iterationsRun;
+
+  await db
+    .update(autoresearchSessions)
+    .set({
+      status: "running",
+      maxIterations: newMaxIterations,
+      stoppedAt: null,
+      errorMessage: null,
+    })
+    .where(eq(autoresearchSessions.id, session.id));
+
+  // Rebuild the StartArgs shape that runLoop expects. We need the
+  // pair symbol again — it's not on the session row, so look it up.
+  const { marketPairs } = await import("../../../shared/schema");
+  const [pair] = await db
+    .select()
+    .from(marketPairs)
+    .where(eq(marketPairs.id, session.pairId));
+  if (!pair) throw new Error("pair_not_found");
+  const pairSymbol = `${pair.baseAsset}${pair.quoteAsset}`;
+
+  const refreshedSession = { ...session, status: "running", maxIterations: newMaxIterations };
+  const resumeArgs: StartArgs = {
+    tenantId: session.tenantId,
+    userId: session.createdByUserId,
+    goal: session.goal,
+    pairId: session.pairId,
+    pairSymbol,
+    timeframe: session.timeframe as Timeframe,
+    lookbackBars: session.lookbackBars,
+    regime: session.regime,
+    model: session.model,
+    maxIterations: newMaxIterations,
+    systemPrompt: session.systemPrompt,
+    mode: session.mode as "tune" | "discover",
+  };
+
+  void runLoop(refreshedSession as AutoresearchSession, resumeArgs, {
+    startIdx,
+    initialHistory,
+  }).catch(async (err) => {
+    console.error(`[autoresearch] resume ${session.id} fatal:`, err);
     await db
       .update(autoresearchSessions)
       .set({
@@ -117,10 +223,45 @@ export async function startSession(args: StartArgs): Promise<AutoresearchSession
       .where(eq(autoresearchSessions.id, session.id));
   });
 
-  return session;
+  return refreshedSession as AutoresearchSession;
 }
 
-async function runLoop(session: AutoresearchSession, args: StartArgs) {
+// A session is continuable when it has iterations preserved and the
+// orchestrator loop is not currently active. "done" is treated as
+// paused for backwards compatibility with rows created before the
+// paused status existed.
+function isContinuable(status: string): boolean {
+  return status === "paused" || status === "done" || status === "aborted";
+}
+
+// On server boot, any session stuck at status=running is a stranded
+// row from a prior process. The in-memory orchestrator loop is gone;
+// the row gets flipped to "paused" so the operator can continue it
+// when the server comes back up. Called from server/index.ts at
+// startup.
+export async function cleanupStaleRunningSessions() {
+  const stranded = await db
+    .select({ id: autoresearchSessions.id })
+    .from(autoresearchSessions)
+    .where(eq(autoresearchSessions.status, "running"));
+  if (stranded.length === 0) return;
+  await db
+    .update(autoresearchSessions)
+    .set({
+      status: "paused",
+      errorMessage: "Server restarted while session was running",
+    })
+    .where(eq(autoresearchSessions.status, "running"));
+  console.log(
+    `[autoresearch] reconciled ${stranded.length} stranded running session(s) on boot`
+  );
+}
+
+async function runLoop(
+  session: AutoresearchSession,
+  args: StartArgs,
+  options: { startIdx: number; initialHistory: IterationSummary[] }
+) {
   const ctx: SessionContext = {
     goal: args.goal,
     pair: { symbol: args.pairSymbol },
@@ -155,19 +296,44 @@ async function runLoop(session: AutoresearchSession, args: StartArgs) {
   let bestScore = -Infinity;
   let bestIterationId: string | null = null;
   let totalCostUsd = 0;
-  const history: IterationSummary[] = [];
+  // History is preloaded for resumed sessions so the agent sees every
+  // iteration the previous run of this loop produced. Each new
+  // iteration appends to this array.
+  const history: IterationSummary[] = [...options.initialHistory];
 
-  for (let idx = 0; idx < args.maxIterations; idx++) {
+  // Resumed sessions already have a baseline (iteration 0 from a
+  // previous run). Skip the baseline fast-path when startIdx > 0.
+  // If we're resuming and there's history, seed bestParams/bestScore
+  // from the best-scoring prior iteration so tune-mode keeps climbing
+  // from where it left off instead of restarting from DEFAULT_PARAMS.
+  if (options.startIdx > 0 && history.length > 0) {
+    const highest = history.reduce((best, it) =>
+      it.score > best.score ? it : best
+    );
+    bestScore = highest.score;
+    bestParams = { ...highest.params };
+    currentParams = { ...highest.params };
+  }
+
+  for (let idx = options.startIdx; idx < args.maxIterations; idx++) {
     // Stop flag check happens BEFORE starting the next iteration so the
     // operator's Stop click is honoured promptly. The current iteration
     // runs to completion if it's already in progress.
     if (stopFlags.get(session.id)) {
       stopFlags.delete(session.id);
-      await markStopped(session.id, "aborted");
+      // Operator clicked Pause mid-run (or Done, before any iteration
+      // completed in the new batch). Transition to paused — the
+      // session keeps all its iterations and can be continued later.
+      // The explicit terminal (stopped) is a separate transition via
+      // the /done endpoint, not from here.
+      await markPaused(session.id);
       return;
     }
 
-    const isBaseline = idx === 0;
+    // Baseline is only iteration 0 of a fresh session. Resumed
+    // sessions (startIdx > 0) never take the baseline path — their
+    // "baseline" was set by the original run.
+    const isBaseline = idx === 0 && options.startIdx === 0;
     let proposedParams: ProposedParams;
     let rationale = "";
     let llmInputTokens = 0;
@@ -400,8 +566,19 @@ async function runLoop(session: AutoresearchSession, args: StartArgs) {
   // Loop finished naturally — mark session done
   await db
     .update(autoresearchSessions)
-    .set({ status: "done", stoppedAt: new Date() })
+    // Natural end of the iteration budget. Session is PAUSED, not
+    // done. Operator decides whether to Continue (adds another batch
+    // of iterations) or Done (explicit terminal, moves to history).
+    // stoppedAt stays null — the session isn't terminated yet.
+    .set({ status: "paused" })
     .where(eq(autoresearchSessions.id, session.id));
+}
+
+async function markPaused(sessionId: string) {
+  await db
+    .update(autoresearchSessions)
+    .set({ status: "paused" })
+    .where(eq(autoresearchSessions.id, sessionId));
 }
 
 async function markStopped(sessionId: string, status: "aborted" | "done") {

@@ -5,6 +5,7 @@ import rateLimit from "express-rate-limit";
 import { setupAuth } from "./auth";
 import { registerRoutes } from "./routes";
 import { startBotRunner } from "./modules/botRunner";
+import { cleanupStaleRunningSessions } from "./modules/autoresearch/orchestrator";
 
 const app = express();
 const PORT = Number(process.env.PORT || 5000);
@@ -90,4 +91,10 @@ app.listen(PORT, () => {
     `[phoenix-v96] paper-trading=${process.env.PAPER_TRADING_MODE} env=${process.env.NODE_ENV}`
   );
   startBotRunner();
+  // Reconcile any autoresearch sessions left stranded in "running"
+  // status by a previous process death (server restart, crash, etc).
+  // They get flipped to "paused" so the operator can continue them.
+  cleanupStaleRunningSessions().catch((err) =>
+    console.error("[autoresearch] cleanup failed", err)
+  );
 });

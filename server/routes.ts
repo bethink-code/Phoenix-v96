@@ -20,7 +20,14 @@ import {
   type LiveParams,
 } from "./modules/experiments/runners";
 import { applyRecommendation } from "./modules/experiments/applier";
-import { startSession, requestStop } from "./modules/autoresearch/orchestrator";
+import {
+  startSession,
+  requestStop,
+  resumeSession,
+} from "./modules/autoresearch/orchestrator";
+import { db } from "./db";
+import { autoresearchSessions } from "../shared/schema";
+import { eq } from "drizzle-orm";
 import { isOpenAIConfigured } from "./modules/autoresearch/openai";
 import {
   DEFAULT_SYSTEM_PROMPT,
@@ -510,8 +517,11 @@ export function registerRoutes(app: Express) {
     }
   });
 
+  // Pause a running session. Sets the stop flag; the orchestrator
+  // loop exits after the current iteration and marks the session
+  // as "paused". NOT terminal — session can be continued.
   app.post(
-    "/api/autoresearch/sessions/:id/stop",
+    "/api/autoresearch/sessions/:id/pause",
     isAuthenticated,
     async (req, res) => {
       const id = pid(req, "id");
@@ -525,7 +535,82 @@ export function registerRoutes(app: Express) {
       audit({
         userId: u.id,
         tenantId: tenant.id,
-        action: "autoresearch_session_stopped",
+        action: "autoresearch_session_paused",
+        resourceType: "autoresearch_session",
+        resourceId: id,
+        outcome: "success",
+        ipAddress: getIp(req),
+      });
+      res.json({ ok: true });
+    }
+  );
+
+  // Continue a paused / aborted / legacy-done session. Re-enters the
+  // orchestrator loop on the SAME session row, preloading the existing
+  // iterations into the agent's history context so it picks up exactly
+  // where it left off. Extends maxIterations by the original budget
+  // amount (optional `extra` query param overrides).
+  app.post(
+    "/api/autoresearch/sessions/:id/continue",
+    isAuthenticated,
+    async (req, res) => {
+      const id = pid(req, "id");
+      const u = getUser(req);
+      const tenant = await storage.getOrCreateTenantForUser(u.id);
+      const session = await storage.getAutoresearchSession(id);
+      if (!session || session.tenantId !== tenant.id) {
+        return res.status(404).json({ error: "not_found" });
+      }
+      const extra =
+        typeof req.body?.extra === "number" && req.body.extra > 0
+          ? Math.min(200, Math.floor(req.body.extra))
+          : undefined;
+      try {
+        const resumed = await resumeSession({ sessionId: id, extraIterations: extra });
+        audit({
+          userId: u.id,
+          tenantId: tenant.id,
+          action: "autoresearch_session_continued",
+          resourceType: "autoresearch_session",
+          resourceId: id,
+          outcome: "success",
+          detail: { extra, newMaxIterations: resumed.maxIterations },
+          ipAddress: getIp(req),
+        });
+        res.json(resumed);
+      } catch (err) {
+        res.status(400).json({ error: (err as Error).message });
+      }
+    }
+  );
+
+  // Mark a paused session as Done. Terminal transition to "stopped".
+  // Session moves to History and can no longer be continued.
+  app.post(
+    "/api/autoresearch/sessions/:id/done",
+    isAuthenticated,
+    async (req, res) => {
+      const id = pid(req, "id");
+      const u = getUser(req);
+      const tenant = await storage.getOrCreateTenantForUser(u.id);
+      const session = await storage.getAutoresearchSession(id);
+      if (!session || session.tenantId !== tenant.id) {
+        return res.status(404).json({ error: "not_found" });
+      }
+      if (session.status === "running") {
+        return res.status(400).json({
+          error: "pause_first",
+          message: "Pause the session before marking it Done.",
+        });
+      }
+      await db
+        .update(autoresearchSessions)
+        .set({ status: "stopped", stoppedAt: new Date() })
+        .where(eq(autoresearchSessions.id, id));
+      audit({
+        userId: u.id,
+        tenantId: tenant.id,
+        action: "autoresearch_session_done",
         resourceType: "autoresearch_session",
         resourceId: id,
         outcome: "success",

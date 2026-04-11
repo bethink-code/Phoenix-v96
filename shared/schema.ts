@@ -441,6 +441,13 @@ export const autoresearchSessions = pgTable(
     // Empty object means "use DEFAULT_PARAMS as baseline" (the
     // historical behaviour).
     seedParams: jsonb("seed_params").notNull().default({}),
+    // When this session is a continuation of a previous one, points to
+    // the parent session id. The orchestrator preloads the parent's
+    // iterations into the agent's history context so the LLM sees what
+    // was already tried and picks up where the parent left off — no
+    // reseeding, no new instructions, just more iterations on the same
+    // problem. Null for sessions started fresh from the Start form.
+    parentSessionId: uuid("parent_session_id"),
     status: varchar("status", { length: 16 }).notNull().default("running"),
     // running | done | aborted | error | idle
     iterationsRun: integer("iterations_run").notNull().default(0),

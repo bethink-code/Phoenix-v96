@@ -673,12 +673,10 @@ function HistoryTab() {
   });
   const runs = useQuery<RunRow[]>({ queryKey: ["/api/tenant/experiment-runs"] });
 
-  // Running sessions live on the Autoresearch tab. History only shows
-  // finished ones (done/aborted/error) so the "View result in History"
-  // button always lands on a row that has a verdict to render.
-  const sessionRows = (sessions.data ?? []).filter(
-    (s) => s.status !== "running"
-  );
+  // History only shows TERMINAL sessions — ones the operator has
+  // finished via Done, or that errored. Running/paused/aborted
+  // sessions live on the Live tab and are still actionable.
+  const sessionRows = (sessions.data ?? []).filter((s) => isTerminal(s.status));
   const runRows = runs.data ?? [];
 
   if (sessionRows.length === 0 && runRows.length === 0) {
@@ -895,6 +893,13 @@ function verdictClass(v: RunRow["verdict"]): string {
 // live narration feed, the iteration table, and the archive of past
 // sessions. Local-only — gated upstream by the OPENAI_API_KEY probe.
 
+// Session lifecycle:
+//   running  — orchestrator loop is active
+//   paused   — budget hit OR operator clicked Pause. Can continue.
+//   stopped  — operator clicked Done. Terminal.
+//   error    — permanent failure. Terminal.
+//   done     — legacy terminal (pre-refactor). Treated as stopped.
+//   aborted  — legacy non-terminal (pre-refactor). Treated as paused.
 interface ARSession {
   id: string;
   goal: string;
@@ -905,7 +910,7 @@ interface ARSession {
   model: string;
   mode: "tune" | "discover";
   maxIterations: number;
-  status: "running" | "done" | "aborted" | "error";
+  status: "running" | "paused" | "stopped" | "done" | "aborted" | "error";
   iterationsRun: number;
   bestIterationId: string | null;
   bestScore: string | null;
@@ -913,6 +918,17 @@ interface ARSession {
   errorMessage: string | null;
   startedAt: string;
   stoppedAt: string | null;
+}
+
+// Pure helper: which statuses are terminal (live in History, can't
+// be continued). Matches the server's cutoff.
+function isTerminal(status: ARSession["status"]): boolean {
+  return status === "stopped" || status === "error" || status === "done";
+}
+
+// Which statuses are continuable (paused, legacy aborted).
+function isContinuable(status: ARSession["status"]): boolean {
+  return status === "paused" || status === "aborted";
 }
 
 interface ARIteration {
@@ -957,7 +973,7 @@ export function SessionDetailView({
   onContinueFromIteration?: (p: StartFormPrefill) => void;
 }) {
   const [view, setView] = useState<SessionView>("trades");
-  const status: "idle" | "running" | "done" | "aborted" | "error" =
+  const status: "idle" | "running" | "paused" | "stopped" | "done" | "aborted" | "error" =
     session?.status ?? "idle";
   const iterationsRun = session?.iterationsRun ?? 0;
   const maxIterations = session?.maxIterations ?? 0;
@@ -1045,26 +1061,18 @@ function AutoresearchSurface({
 }) {
   const qc = useQueryClient();
 
-  // Active session = currently running, OR most recently finished. The
-  // identity card always shows ONE session — we resolve which one to show
-  // by checking active first, then falling back to the latest archive
-  // entry. This way the operator sees their last result without needing
-  // to dig into archive.
-  // Polling cadences are calibrated to ≈ iteration speed (~3-5s per
-  // iteration). Faster polling buys nothing because the data only changes
-  // when an iteration completes, and faster polling burns rate-limit
-  // budget.
+  // Active session = the most recent NON-TERMINAL session (running /
+  // paused / legacy aborted). The server's /active endpoint filters
+  // this for us. Terminal sessions (stopped / error / legacy done)
+  // are hidden from the Live tab and live in History.
+  // Polling cadence ≈ iteration speed so the UI updates as soon as a
+  // new iteration completes. Polling stops when there's no active
+  // session — no need to burn rate limit on an idle Live tab.
   const activeQuery = useQuery<ARSession | null>({
     queryKey: ["/api/autoresearch/active"],
     refetchInterval: 5_000,
   });
-  const archiveQuery = useQuery<ARSession[]>({
-    queryKey: ["/api/autoresearch/sessions"],
-    refetchInterval: activeQuery.data?.status === "running" ? 5_000 : false,
-  });
-
-  const focusedSession =
-    activeQuery.data ?? (archiveQuery.data?.[0] ?? null);
+  const focusedSession = activeQuery.data ?? null;
 
   // Iterations for the focused session, polled while running
   const iterationsQuery = useQuery<ARIteration[]>({
@@ -1075,9 +1083,10 @@ function AutoresearchSurface({
     refetchInterval: focusedSession?.status === "running" ? 5_000 : false,
   });
 
-  const stopMutation = useMutation({
+  // Pause mutation: interrupts a running session, transitions to paused.
+  const pauseMutation = useMutation({
     mutationFn: async (sessionId: string) => {
-      const r = await apiRequest(`/api/autoresearch/sessions/${sessionId}/stop`, {
+      const r = await apiRequest(`/api/autoresearch/sessions/${sessionId}/pause`, {
         method: "POST",
       });
       return r.json();
@@ -1085,30 +1094,87 @@ function AutoresearchSurface({
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["/api/autoresearch/active"] });
     },
-    onError: (e) => alert(`Stop failed: ${(e as Error).message}`),
+    onError: (e) => alert(`Pause failed: ${(e as Error).message}`),
   });
 
-  const status: "idle" | "running" | "done" | "aborted" | "error" =
+  // Continue mutation: resumes a paused session on the SAME session row.
+  // The orchestrator re-enters its loop, preloading the existing
+  // iterations into the agent's history context.
+  const continueMutation = useMutation({
+    mutationFn: async (sessionId: string) => {
+      const r = await apiRequest(`/api/autoresearch/sessions/${sessionId}/continue`, {
+        method: "POST",
+      });
+      return r.json();
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/autoresearch/active"] });
+      qc.invalidateQueries({ queryKey: ["/api/autoresearch/sessions"] });
+    },
+    onError: (e) => alert(`Continue failed: ${(e as Error).message}`),
+  });
+
+  // Done mutation: terminal transition. Paused → stopped. Moves the
+  // session to History; Live goes back to idle.
+  const doneMutation = useMutation({
+    mutationFn: async (sessionId: string) => {
+      const r = await apiRequest(`/api/autoresearch/sessions/${sessionId}/done`, {
+        method: "POST",
+      });
+      return r.json();
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/autoresearch/active"] });
+      qc.invalidateQueries({ queryKey: ["/api/autoresearch/sessions"] });
+    },
+    onError: (e) => alert(`Done failed: ${(e as Error).message}`),
+  });
+
+  const status: "idle" | "running" | "paused" | "stopped" | "done" | "aborted" | "error" =
     focusedSession?.status ?? "idle";
 
-  // Live-tab actions: only two cases that need a button.
-  //   running  → Stop (graceful)
-  //   idle / done / aborted / error → Start a session (form)
-  // No "View result in History" — the full result is already visible
-  // right here in the sub-tabs below; jumping to History would just
-  // show the same thing twice.
+  // Live-tab actions — three states:
+  //   running                → [Pause]
+  //   paused (or legacy aborted) → [Continue] [Done]
+  //   idle / error / (no session) → [Start a session]
+  // Pause sets the stop flag; the orchestrator exits the loop after
+  // the current iteration and transitions to "paused". Continue
+  // resumes on the same session row. Done is the terminal transition:
+  // the session becomes "stopped" and moves to History.
+  const sessionIsPaused =
+    focusedSession && isContinuable(focusedSession.status);
   const actions = (
     <div className="flex flex-wrap items-center gap-2">
-      {status === "running" && focusedSession ? (
+      {status === "running" && focusedSession && (
         <Button
           size="sm"
           variant="outline"
-          onClick={() => stopMutation.mutate(focusedSession.id)}
-          disabled={stopMutation.isPending}
+          onClick={() => pauseMutation.mutate(focusedSession.id)}
+          disabled={pauseMutation.isPending}
         >
-          {stopMutation.isPending ? "Stopping…" : "Stop"}
+          {pauseMutation.isPending ? "Pausing…" : "Pause"}
         </Button>
-      ) : (
+      )}
+      {sessionIsPaused && focusedSession && (
+        <>
+          <Button
+            size="sm"
+            onClick={() => continueMutation.mutate(focusedSession.id)}
+            disabled={continueMutation.isPending}
+          >
+            {continueMutation.isPending ? "Continuing…" : "Continue"}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => doneMutation.mutate(focusedSession.id)}
+            disabled={doneMutation.isPending}
+          >
+            {doneMutation.isPending ? "Finishing…" : "Done"}
+          </Button>
+        </>
+      )}
+      {(status === "idle" || status === "error") && (
         <StartSessionForm
           prefill={prefill ?? undefined}
           onPrefillConsumed={onPrefillConsumed}
@@ -2637,10 +2703,14 @@ function sessionStatusClass(status: ARSession["status"]): string {
   switch (status) {
     case "running":
       return "border-amber-500/40 text-amber-300";
-    case "done":
-      return "border-emerald-500/40 text-emerald-300";
+    case "paused":
+      return "border-blue-500/40 text-blue-200";
     case "aborted":
-      return "border-border text-muted-foreground";
+      return "border-blue-500/40 text-blue-200"; // legacy = paused
+    case "stopped":
+      return "border-emerald-500/40 text-emerald-300";
+    case "done":
+      return "border-emerald-500/40 text-emerald-300"; // legacy = stopped
     case "error":
       return "border-red-500/40 text-red-300";
   }

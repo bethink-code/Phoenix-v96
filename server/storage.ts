@@ -1,5 +1,5 @@
 import { db } from "./db";
-import { eq, and, desc, gte, sql } from "drizzle-orm";
+import { eq, and, desc, gte, sql, inArray } from "drizzle-orm";
 import {
   users,
   tenants,
@@ -607,8 +607,11 @@ export const storage = {
     return row ?? null;
   },
 
-  // Currently-active session for a tenant. Used by the UI to figure out
-  // whether to show "Start" or "running" state.
+  // Currently-active session for a tenant: the most recent session
+  // whose status is NOT a terminal one. Returns running + paused +
+  // legacy 'aborted' sessions — anything the operator can continue
+  // or resume. Terminal statuses (stopped, error, legacy 'done') are
+  // excluded; those live in History.
   async findRunningAutoresearchSession(tenantId: string): Promise<AutoresearchSession | null> {
     const [row] = await db
       .select()
@@ -616,7 +619,9 @@ export const storage = {
       .where(
         and(
           eq(autoresearchSessions.tenantId, tenantId),
-          eq(autoresearchSessions.status, "running")
+          // Non-terminal statuses. "done" is LEGACY terminal, not
+          // included — it's pre-refactor equivalent to "stopped".
+          inArray(autoresearchSessions.status, ["running", "paused", "aborted"])
         )
       )
       .orderBy(desc(autoresearchSessions.startedAt))
