@@ -1118,6 +1118,9 @@ function StartSessionForm() {
   const [pairId, setPairId] = useState("");
   const [timeframe, setTimeframe] = useState<"15m" | "1h" | "4h" | "12h" | "1d">("1h");
   const [lookbackBars, setLookbackBars] = useState(500);
+  const [regime, setRegime] = useState<
+    "ranging" | "trending" | "breakout" | "high_volatility" | "low_liquidity" | "accumulation_distribution"
+  >("trending");
   const [model, setModel] = useState<"gpt-4o" | "gpt-4o-mini">("gpt-4o-mini");
   const [maxIterations, setMaxIterations] = useState(30);
 
@@ -1130,7 +1133,7 @@ function StartSessionForm() {
           pairId,
           timeframe,
           lookbackBars,
-          regime: "trending", // we'll let the operator pick later if needed
+          regime,
           model,
           maxIterations,
         }),
@@ -1204,6 +1207,21 @@ function StartSessionForm() {
             value={lookbackBars}
             onChange={(e) => setLookbackBars(Number(e.target.value) || 0)}
           />
+        </div>
+        <div>
+          <Label className="text-xs">Regime</Label>
+          <select
+            value={regime}
+            onChange={(e) => setRegime(e.target.value as typeof regime)}
+            className="h-9 w-full rounded-md border border-border bg-card px-3 text-sm"
+          >
+            <option value="trending">Trending — Mode B confirmation only</option>
+            <option value="ranging">Ranging — fade sweeps inside the range</option>
+            <option value="breakout">Breakout — wait for confirmation</option>
+            <option value="high_volatility">High volatility — defensive sizing</option>
+            <option value="low_liquidity">Low liquidity — careful entries</option>
+            <option value="accumulation_distribution">Accumulation / distribution</option>
+          </select>
         </div>
         <div>
           <Label className="text-xs">Model</Label>
