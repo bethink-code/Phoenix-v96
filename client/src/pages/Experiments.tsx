@@ -964,6 +964,29 @@ export function SessionDetailView({
   const bestScore = session?.bestScore ? Number(session.bestScore) : null;
   const spentUsd = session?.totalCostUsd ? Number(session.totalCostUsd) : 0;
 
+  // Market lookup for the pair label. The session row only stores
+  // pairId (uuid); the display symbol lives on the market_pairs row.
+  // This query is already in the TanStack cache from other pages
+  // (StartSessionForm uses it too) so there's no extra network cost.
+  const marketsQuery = useQuery<MarketPair[]>({ queryKey: ["/api/markets"] });
+  const pair = session?.pairId
+    ? marketsQuery.data?.find((m) => m.id === session.pairId) ?? null
+    : null;
+  const pairLabel = pair ? `${pair.baseAsset}${pair.quoteAsset}` : "—";
+
+  // Successes and best P&L — computed from the iterations using the
+  // same rule as the Successes sub-tab: trades > baseline.trades AND
+  // netPnl > 0. Best P&L is the max netPnl among successes.
+  const baselineTrades = iterations.find((i) => i.idx === 0)?.trades ?? 0;
+  const successes = iterations.filter(
+    (i) => i.trades > baselineTrades && Number(i.netPnl) > 0
+  );
+  const successCount = successes.length;
+  const bestPnl =
+    successes.length > 0
+      ? Math.max(...successes.map((i) => Number(i.netPnl)))
+      : null;
+
   return (
     <div className="space-y-4">
       <ResearcherIdentityCard
@@ -974,15 +997,24 @@ export function SessionDetailView({
         spentUsd={spentUsd}
         goal={session?.goal}
         stats={
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
             <StatBlock label="Status" value={status.toUpperCase()} />
+            <StatBlock label="Pair" value={pairLabel} />
             <StatBlock
               label="Iteration"
               value={session ? `${iterationsRun} / ${maxIterations}` : "—"}
             />
             <StatBlock
-              label="Best score"
-              value={bestScore != null && bestScore > 0 ? bestScore.toFixed(4) : "—"}
+              label="Successes"
+              value={session ? String(successCount) : "—"}
+            />
+            <StatBlock
+              label="Best P&L"
+              value={
+                bestPnl != null
+                  ? `${bestPnl >= 0 ? "+" : ""}$${bestPnl.toFixed(2)}`
+                  : "—"
+              }
             />
             <StatBlock label="Spent" value={`$${spentUsd.toFixed(2)}`} />
           </div>
