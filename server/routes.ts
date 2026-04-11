@@ -244,7 +244,7 @@ export function registerRoutes(app: Express) {
 
     const symbol = `${pair.baseAsset}${pair.quoteAsset}`;
     const timeframe = (expConfig.timeframe as "15m" | "1h" | "4h" | "12h" | "1d") ?? "15m";
-    const lookback = expConfig.lookbackBars ?? 672;
+    const lookback = expConfig.lookbackBars ?? 300;
 
     const candles = await getBinance().fetchCandles({
       symbol,

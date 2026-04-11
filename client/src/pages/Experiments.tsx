@@ -263,7 +263,7 @@ function NewExperimentForm({ onCreated }: { onCreated: () => void }) {
   const [kind, setKind] = useState<ExperimentKind>("diagnostic");
   const [pairId, setPairId] = useState<string>("");
   const [timeframe, setTimeframe] = useState<"15m" | "1h" | "4h" | "12h" | "1d">("15m");
-  const [lookbackBars, setLookbackBars] = useState(672);
+  const [lookbackBars, setLookbackBars] = useState(300);
   const [paramKey, setParamKey] = useState<AppliableParamKey>("minLevelRank");
   const [valuesStr, setValuesStr] = useState("1,2,3,4,5");
 

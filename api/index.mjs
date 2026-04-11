@@ -1557,7 +1557,7 @@ function detectLatestSweep(candles, levels, config = DEFAULT_SWEEP_CONFIG) {
 }
 
 // server/modules/strategy/entries.ts
-function generateProposal(sweep, candles, allLevels, regime) {
+function generateProposal(sweep, allLevels, regime) {
   if (!sweep) return null;
   const profile = getRegimeProfile(regime);
   if (profile.entrySuppressed) return null;
@@ -1692,6 +1692,9 @@ function runBacktest(input) {
       diag.recentRejections.push({ atMs: barTime, reason, detail });
     }
   };
+  const LEVEL_REFRESH_EVERY = 5;
+  let cachedLevels = [];
+  let lastLevelRefreshAt = -Infinity;
   for (let i = warmup; i < input.candles.length; i++) {
     const bar = input.candles[i];
     diag.barsEvaluated++;
@@ -1719,13 +1722,18 @@ function runBacktest(input) {
         openTrades.splice(t, 1);
       }
     }
-    const window = input.candles.slice(0, i + 1);
-    const levels = identifyLevels(window);
+    let levels = cachedLevels;
+    if (i - lastLevelRefreshAt >= LEVEL_REFRESH_EVERY) {
+      const window = input.candles.slice(0, i + 1);
+      levels = identifyLevels(window);
+      cachedLevels = levels;
+      lastLevelRefreshAt = i;
+    }
     if (levels.length === 0) {
       reject(bar.openTime, "no_levels");
       continue;
     }
-    const sweep = detectLatestSweep(window, levels);
+    const sweep = detectLatestSweep([bar], levels);
     if (!sweep) {
       reject(bar.openTime, "no_sweep", { levelCount: levels.length });
       continue;
@@ -1733,7 +1741,7 @@ function runBacktest(input) {
     if (sweep.level.rank > diag.bestLevelRankSeen) {
       diag.bestLevelRankSeen = sweep.level.rank;
     }
-    const proposal = generateProposal(sweep, window, levels, input.regime);
+    const proposal = generateProposal(sweep, levels, input.regime);
     if (!proposal) {
       reject(bar.openTime, "no_proposal", {
         levelType: sweep.level.type,
@@ -2333,7 +2341,7 @@ function registerRoutes(app2) {
     if (!pair) return res.status(404).json({ error: "pair_not_found" });
     const symbol = `${pair.baseAsset}${pair.quoteAsset}`;
     const timeframe = expConfig.timeframe ?? "15m";
-    const lookback = expConfig.lookbackBars ?? 672;
+    const lookback = expConfig.lookbackBars ?? 300;
     const candles = await getBinance().fetchCandles({
       symbol,
       timeframe,

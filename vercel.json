@@ -2,6 +2,11 @@
   "version": 2,
   "buildCommand": "npm run build && npm run build:api",
   "outputDirectory": "dist",
+  "functions": {
+    "api/index.mjs": {
+      "maxDuration": 60
+    }
+  },
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/index.mjs" },
     { "source": "/auth/(.*)", "destination": "/api/index.mjs" },

@@ -1,4 +1,4 @@
-import type { Candle, Level, SweepEvent } from "./types";
+import type { Level, SweepEvent } from "./types";
 import type { Regime } from "../../../shared/schema";
 import { getRegimeProfile } from "../regimeEngine";
 
@@ -29,7 +29,6 @@ export interface TradeProposal {
 //   - there's no suitable next-level target in the opposite direction
 export function generateProposal(
   sweep: SweepEvent | null,
-  candles: Candle[],
   allLevels: Level[],
   regime: Regime
 ): TradeProposal | null {

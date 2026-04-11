@@ -102,6 +102,17 @@ export function runBacktest(input: BacktestInput): BacktestResult {
     }
   };
 
+  // Level identification is the most expensive call in the loop (six O(n)
+  // passes plus O(n²) clustering). Recomputing it every bar gives O(n³)
+  // total, which times out on serverless functions for windows >300 bars.
+  // We refresh levels every LEVEL_REFRESH_EVERY bars and reuse the cached
+  // set in between. Sweep detection still runs every bar against the cached
+  // levels — sweeps are the time-sensitive bit, levels barely shift between
+  // adjacent candles.
+  const LEVEL_REFRESH_EVERY = 5;
+  let cachedLevels: ReturnType<typeof identifyLevels> = [];
+  let lastLevelRefreshAt = -Infinity;
+
   for (let i = warmup; i < input.candles.length; i++) {
     const bar = input.candles[i];
     diag.barsEvaluated++;
@@ -133,13 +144,24 @@ export function runBacktest(input: BacktestInput): BacktestResult {
     }
 
     // ---- Evaluate a new entry using bars up to and including this one ----
-    const window = input.candles.slice(0, i + 1);
-    const levels = identifyLevels(window);
+    // Recompute levels only every LEVEL_REFRESH_EVERY bars; reuse the cache
+    // in between. Massive speedup over the naive O(n²) full recompute.
+    let levels = cachedLevels;
+    if (i - lastLevelRefreshAt >= LEVEL_REFRESH_EVERY) {
+      const window = input.candles.slice(0, i + 1);
+      levels = identifyLevels(window);
+      cachedLevels = levels;
+      lastLevelRefreshAt = i;
+    }
     if (levels.length === 0) {
       reject(bar.openTime, "no_levels");
       continue;
     }
-    const sweep = detectLatestSweep(window, levels);
+    // Sweep detection still runs every bar against cached levels — it's
+    // the cheap part of the pipeline and the time-sensitive one. It only
+    // looks at the latest candle, so pass a 1-element array instead of
+    // slicing the whole history.
+    const sweep = detectLatestSweep([bar], levels);
     if (!sweep) {
       reject(bar.openTime, "no_sweep", { levelCount: levels.length });
       continue;
@@ -150,7 +172,7 @@ export function runBacktest(input: BacktestInput): BacktestResult {
       diag.bestLevelRankSeen = sweep.level.rank;
     }
 
-    const proposal = generateProposal(sweep, window, levels, input.regime);
+    const proposal = generateProposal(sweep, levels, input.regime);
     if (!proposal) {
       reject(bar.openTime, "no_proposal", {
         levelType: sweep.level.type,

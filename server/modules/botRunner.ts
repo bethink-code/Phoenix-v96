@@ -268,7 +268,7 @@ async function tickTenant(tenant: Tenant) {
   // Level identification + sweep detection + proposal
   const levels = identifyLevels(candles);
   const sweep = detectLatestSweep(candles, levels);
-  const proposal = generateProposal(sweep, candles, levels, tenant.activeRegime);
+  const proposal = generateProposal(sweep, levels, tenant.activeRegime);
 
   if (!proposal) {
     return logDecision(tenant.id, "skip", tenant.activeRegime, {
