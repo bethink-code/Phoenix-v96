@@ -710,15 +710,98 @@ function HistoryTab() {
   );
 }
 
-// Rich card for an autoresearch session — fetches its iterations
-// on-demand so we can render the SessionResult inline. This is the
-// "results first" treatment the operator asked for.
+// Collapsible card for an autoresearch session. Default state is
+// collapsed — at 50+ sessions in History, expanded-by-default would
+// make the page unscrollable. Collapsed shows just enough to scan:
+// the goal as the title, the verdict headline as the key finding,
+// a sparkline of score progression, and a metadata strip. Click to
+// expand into the full SessionResult body (chart with axes, params).
 function SessionHistoryCard({ session }: { session: ARSession }) {
+  const [open, setOpen] = useState(false);
   const iterationsQuery = useQuery<ARIteration[]>({
     queryKey: [`/api/autoresearch/sessions/${session.id}/iterations`],
   });
+  const iterations = iterationsQuery.data ?? [];
+  const verdict = computeVerdict(session, iterations);
+  const toneClass = toneToClass(verdict.tone);
+
   return (
-    <SessionResult session={session} iterations={iterationsQuery.data ?? []} />
+    <div className={cn("rounded-lg border", toneClass)}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="block w-full p-4 text-left transition-colors hover:bg-foreground/[0.02]"
+      >
+        {/* Title row: goal + status badge */}
+        <div className="flex items-baseline justify-between gap-3">
+          <h3 className="min-w-0 flex-1 truncate text-base font-semibold text-foreground">
+            {session.goal}
+          </h3>
+          <Badge className={cn("shrink-0 text-[10px]", sessionStatusClass(session.status))}>
+            {session.status}
+          </Badge>
+        </div>
+
+        {/* Key finding — the verdict headline as a single line */}
+        <p className="mt-1 text-sm text-muted-foreground">{verdict.headline}</p>
+
+        {/* Sparkline — visible at-a-glance score-over-iterations shape */}
+        {iterations.length > 0 && (
+          <div className="mt-2">
+            <Sparkline iterations={iterations} />
+          </div>
+        )}
+
+        {/* Metadata strip */}
+        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground/70">
+          <span>{new Date(session.startedAt).toLocaleDateString()}</span>
+          <span>·</span>
+          <span>{session.timeframe} · {session.regime}</span>
+          <span>·</span>
+          <span>{session.iterationsRun}/{session.maxIterations} iters</span>
+          <span>·</span>
+          <span>{session.model}</span>
+          <span>·</span>
+          <span>${Number(session.totalCostUsd).toFixed(2)}</span>
+          <span className="ml-auto text-foreground/60">
+            {open ? "click to collapse ▴" : "click for details ▾"}
+          </span>
+        </div>
+      </button>
+
+      {/* Expanded body — full verdict explanation, full chart, params */}
+      {open && (
+        <div className="border-t border-border/40 p-4">
+          <p className="text-sm leading-relaxed text-muted-foreground">{verdict.body}</p>
+
+          {iterations.length > 0 && (
+            <div className="mt-4">
+              <ScoreChart iterations={iterations} />
+            </div>
+          )}
+
+          {verdict.foundWinner && verdict.bestIter && verdict.baseline && (
+            <div className="mt-4 rounded border border-border/40 bg-background/40 p-3">
+              <div className="mb-2 text-[10px] uppercase tracking-wide text-muted-foreground">
+                What changed
+              </div>
+              <ParamDiffTable
+                baseline={verdict.baseline.params}
+                winner={verdict.bestIter.params}
+              />
+            </div>
+          )}
+          {!verdict.foundWinner && verdict.bestIter && (
+            <div className="mt-4 rounded border border-border/40 bg-background/40 p-3">
+              <div className="mb-2 text-[10px] uppercase tracking-wide text-muted-foreground">
+                Best iteration (#{verdict.bestIter.idx + 1}) — for reference
+              </div>
+              <ParamGrid params={verdict.bestIter.params} />
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1153,41 +1236,46 @@ function StartSessionForm() {
 // (if any improvement happened) so the operator can read off concrete
 // values to copy into Settings if they want.
 
-function SessionResult({
-  session,
-  iterations,
-}: {
-  session: ARSession;
-  iterations: ARIteration[];
-}) {
+// Pure helper — computes the verdict for a session. Shared between the
+// collapsed history card (uses headline + tone) and the expanded body
+// (uses headline + body + bestIter for params).
+interface Verdict {
+  tone: "good" | "neutral" | "bad";
+  headline: string;
+  body: string;
+  foundWinner: boolean;
+  bestIter: ARIteration | null;
+  baseline: ARIteration | null;
+}
+
+function computeVerdict(session: ARSession, iterations: ARIteration[]): Verdict {
   const bestScore = session.bestScore ? Number(session.bestScore) : 0;
   const bestIter = iterations.find((i) => i.id === session.bestIterationId) ?? null;
   const baseline = iterations.find((i) => i.idx === 0) ?? null;
-  const foundWinner = bestScore > 0 && bestIter && bestIter.idx > 0;
-  const noTradesFound = bestScore === 0 || (bestIter && bestIter.trades === 0);
+  const foundWinner = bestScore > 0 && !!bestIter && bestIter.idx > 0;
+  const noTradesFound = bestScore === 0 || (!!bestIter && bestIter.trades === 0);
 
-  // Build the verdict copy based on what actually happened
-  let verdictTone: "good" | "neutral" | "bad" = "neutral";
+  let tone: Verdict["tone"] = "neutral";
   let headline: string;
   let body: string;
 
   if (session.status === "error") {
-    verdictTone = "bad";
+    tone = "bad";
     headline = "Session errored";
     body = session.errorMessage ?? "Unknown error.";
   } else if (foundWinner) {
-    verdictTone = "good";
+    tone = "good";
     const baseScore = baseline ? Number(baseline.score) : 0;
     const delta = bestScore - baseScore;
     headline = `Found a winning config — score ${bestScore.toFixed(4)} (+${delta.toFixed(4)} over baseline).`;
     body = `Iteration #${bestIter!.idx + 1} was the best. ${bestIter!.trades} trades, ${Math.round(Number(bestIter!.winRate) * 100)}% wins, ${Number(bestIter!.netPnl).toFixed(2)} net PnL.`;
   } else if (noTradesFound) {
-    verdictTone = "bad";
+    tone = "bad";
     headline = "No iteration produced any trades.";
     body =
       "Across all iterations the search didn't find a config that opened a single trade. The strategy as currently implemented may not be compatible with this pair/timeframe/regime combination. Try a different timeframe (4h or daily often works better than 1h on lower-cap tokens), a different regime (ranging instead of trending), or a different pair.";
   } else {
-    verdictTone = "neutral";
+    tone = "neutral";
     headline = `No improvement over baseline (best score ${bestScore.toFixed(4)}).`;
     body =
       "The baseline already had the best score. The LLM tried variants but none beat it. You could run another session with more iterations, or change the goal/regime to widen the search.";
@@ -1197,12 +1285,29 @@ function SessionResult({
     headline = `${headline} (stopped early at iteration ${session.iterationsRun}/${session.maxIterations})`;
   }
 
-  const toneClass =
-    verdictTone === "good"
-      ? "border-emerald-500/40 bg-emerald-500/5"
-      : verdictTone === "bad"
-        ? "border-red-500/40 bg-red-500/5"
-        : "border-amber-500/40 bg-amber-500/5";
+  return { tone, headline, body, foundWinner, bestIter, baseline };
+}
+
+function toneToClass(tone: Verdict["tone"]): string {
+  return tone === "good"
+    ? "border-emerald-500/40 bg-emerald-500/5"
+    : tone === "bad"
+      ? "border-red-500/40 bg-red-500/5"
+      : "border-amber-500/40 bg-amber-500/5";
+}
+
+function SessionResult({
+  session,
+  iterations,
+}: {
+  session: ARSession;
+  iterations: ARIteration[];
+}) {
+  const { tone, headline, body, foundWinner, bestIter, baseline } = computeVerdict(
+    session,
+    iterations
+  );
+  const toneClass = toneToClass(tone);
 
   return (
     <div className={cn("rounded-lg border p-6", toneClass)}>
@@ -1450,6 +1555,67 @@ function ScoreChart({ iterations }: { iterations: ARIteration[] }) {
         <span className="ml-auto">— line: best so far</span>
       </div>
     </div>
+  );
+}
+
+// Tiny inline chart for collapsed history cards. ~60px tall, no axes, no
+// labels — just dots and the running-best line in a compact box. Same
+// colour vocabulary as the full ScoreChart so the visual link is obvious
+// when the operator expands the card.
+function Sparkline({ iterations }: { iterations: ARIteration[] }) {
+  if (iterations.length === 0) return null;
+  const sorted = [...iterations].sort((a, b) => a.idx - b.idx);
+  const scores = sorted.map((i) => Number(i.score) || 0);
+  const maxScore = Math.max(...scores, 0.0001);
+  const yMax = maxScore * 1.1;
+  const W = 400;
+  const H = 50;
+  const padX = 4;
+  const padY = 4;
+  const innerW = W - padX * 2;
+  const innerH = H - padY * 2;
+  const xStep = sorted.length > 1 ? innerW / (sorted.length - 1) : 0;
+
+  let bestSoFar = 0;
+  const bestPath: string[] = [];
+  sorted.forEach((it, i) => {
+    const score = Number(it.score) || 0;
+    if (score > bestSoFar) bestSoFar = score;
+    const x = padX + i * xStep;
+    const y = padY + innerH - (bestSoFar / yMax) * innerH;
+    if (i === 0) {
+      bestPath.push(`M ${x} ${y}`);
+    } else {
+      const prevBest = Math.max(...scores.slice(0, i));
+      const prevY = padY + innerH - (prevBest / yMax) * innerH;
+      bestPath.push(`L ${x} ${prevY} L ${x} ${y}`);
+    }
+  });
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="h-12 w-full">
+      <path
+        d={bestPath.join(" ")}
+        fill="none"
+        stroke="rgb(16 185 129)"
+        strokeWidth="1.5"
+        strokeOpacity={0.7}
+      />
+      {sorted.map((it, i) => {
+        const score = Number(it.score) || 0;
+        const x = padX + i * xStep;
+        const y = padY + innerH - (score / yMax) * innerH;
+        return (
+          <circle
+            key={it.id}
+            cx={x}
+            cy={y}
+            r={1.8}
+            fill={dotColor(it.status)}
+          />
+        );
+      })}
+    </svg>
   );
 }
 
