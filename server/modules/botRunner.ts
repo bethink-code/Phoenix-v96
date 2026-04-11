@@ -28,6 +28,41 @@ import {
   detectRegime,
   type Candle,
 } from "./strategy";
+import { DEFAULT_LEVEL_CONFIG } from "./strategy/levels";
+import { DEFAULT_SWEEP_CONFIG } from "./strategy/sweeps";
+import { DEFAULT_PROPOSAL_CONFIG } from "./strategy/entries";
+
+// Pulls strategy params out of tenant_configs.strategy_params and merges
+// them with engine defaults. Tenant overrides take precedence; missing
+// keys fall through to the defaults. Used by the live tick (here) and
+// the autoresearch install endpoint (which writes to the same column).
+function resolveStrategyParams(stored: unknown) {
+  const s = (stored ?? {}) as Record<string, unknown>;
+  const num = (key: string, fallback: number): number => {
+    const v = s[key];
+    return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+  };
+  return {
+    levelConfig: {
+      swingLookback: num("swingLookback", DEFAULT_LEVEL_CONFIG.swingLookback),
+      equalTolerancePct: num("equalTolerancePct", DEFAULT_LEVEL_CONFIG.equalTolerancePct),
+      mergeTolerancePct: num("mergeTolerancePct", DEFAULT_LEVEL_CONFIG.mergeTolerancePct),
+      minTouches: num("minTouches", DEFAULT_LEVEL_CONFIG.minTouches),
+    },
+    sweepConfig: {
+      minWickProtrusionPct: num(
+        "minWickProtrusionPct",
+        DEFAULT_SWEEP_CONFIG.minWickProtrusionPct
+      ),
+    },
+    proposalConfig: {
+      targetDistanceMultiplier: num(
+        "targetDistanceMultiplier",
+        DEFAULT_PROPOSAL_CONFIG.targetDistanceMultiplier
+      ),
+    },
+  };
+}
 
 // PRD §4 decision loop. Runs per tenant on an interval.
 //
@@ -265,10 +300,19 @@ async function tickTenant(tenant: Tenant) {
     });
   }
 
-  // Level identification + sweep detection + proposal
-  const levels = identifyLevels(candles);
-  const sweep = detectLatestSweep(candles, levels);
-  const proposal = generateProposal(sweep, levels, tenant.activeRegime);
+  // Level identification + sweep detection + proposal. All three modules
+  // accept tenant-specific overrides via tenant_configs.strategy_params,
+  // populated by the autoresearch "install this config" button. Falls
+  // back to engine defaults for any missing keys.
+  const stratParams = resolveStrategyParams(config.strategyParams);
+  const levels = identifyLevels(candles, stratParams.levelConfig);
+  const sweep = detectLatestSweep(candles, levels, stratParams.sweepConfig);
+  const proposal = generateProposal(
+    sweep,
+    levels,
+    tenant.activeRegime,
+    stratParams.proposalConfig
+  );
 
   if (!proposal) {
     return logDecision(tenant.id, "skip", tenant.activeRegime, {

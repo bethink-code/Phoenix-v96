@@ -599,6 +599,14 @@ export const storage = {
       .orderBy(autoresearchIterations.idx);
   },
 
+  async getAutoresearchIteration(id: string): Promise<AutoresearchIteration | null> {
+    const [row] = await db
+      .select()
+      .from(autoresearchIterations)
+      .where(eq(autoresearchIterations.id, id));
+    return row ?? null;
+  },
+
   // Currently-active session for a tenant. Used by the UI to figure out
   // whether to show "Start" or "running" state.
   async findRunningAutoresearchSession(tenantId: string): Promise<AutoresearchSession | null> {

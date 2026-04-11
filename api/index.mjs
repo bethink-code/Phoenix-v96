@@ -203,6 +203,17 @@ var tenantConfigs = pgTable("tenant_configs", {
   weeklyDrawdownLimitPct: numeric("weekly_drawdown_limit_pct", { precision: 5, scale: 2 }).notNull().default("6.00"),
   minRiskRewardRatio: numeric("min_risk_reward_ratio", { precision: 4, scale: 2 }).notNull().default("2.00"),
   minLevelRank: integer("min_level_rank").notNull().default(2),
+  // Strategy-internal params that USED to be hardcoded constants in
+  // levels.ts/sweeps.ts/entries.ts. Stored as a jsonb blob so the
+  // schema doesn't need a column-per-param. Falls back to the engine
+  // defaults when keys are missing — see botRunner for the merge.
+  // Shape mirrors ProposedParams in autoresearch/prompt.ts:
+  //   { swingLookback, equalTolerancePct, mergeTolerancePct,
+  //     minTouches, minWickProtrusionPct, targetDistanceMultiplier }
+  // Written by the autoresearch "install this config" button (which
+  // writes all 9 params atomically — the 3 risk params go to their
+  // existing columns above, the 6 strategy-internal ones go here).
+  strategyParams: jsonb("strategy_params").notNull().default({}),
   // Candle timeframe the bot evaluates entries against. Defaults to 15m so
   // existing tenants are unchanged. Operator-controlled via Settings.
   // Strategy logic itself is timeframe-agnostic — only the candle fetch
@@ -860,6 +871,10 @@ var storage = {
   },
   async listAutoresearchIterations(sessionId) {
     return db.select().from(autoresearchIterations).where(eq(autoresearchIterations.sessionId, sessionId)).orderBy(autoresearchIterations.idx);
+  },
+  async getAutoresearchIteration(id) {
+    const [row] = await db.select().from(autoresearchIterations).where(eq(autoresearchIterations.id, id));
+    return row ?? null;
   },
   // Currently-active session for a tenant. Used by the UI to figure out
   // whether to show "Start" or "running" state.
@@ -3280,6 +3295,72 @@ function registerRoutes(app2) {
       }
       const iterations = await storage.listAutoresearchIterations(id);
       res.json(iterations);
+    }
+  );
+  app2.post(
+    "/api/autoresearch/iterations/:id/install",
+    isAuthenticated,
+    async (req, res) => {
+      const id = pid(req, "id");
+      const u = getUser(req);
+      const tenant = await storage.getOrCreateTenantForUser(u.id);
+      const iteration = await storage.getAutoresearchIteration(id);
+      if (!iteration) return res.status(404).json({ error: "not_found" });
+      const session2 = await storage.getAutoresearchSession(iteration.sessionId);
+      if (!session2 || session2.tenantId !== tenant.id) {
+        return res.status(404).json({ error: "not_found" });
+      }
+      const params = iteration.params;
+      const errors = [];
+      const requireRange = (key, lo, hi) => {
+        const v = params[key];
+        if (typeof v !== "number" || !Number.isFinite(v) || v < lo || v > hi) {
+          errors.push(`${key}: ${v} not in [${lo}, ${hi}]`);
+        }
+      };
+      requireRange("minLevelRank", 1, 5);
+      requireRange("minRiskRewardRatio", 0.5, 5);
+      requireRange("maxConcurrentPositions", 1, 10);
+      requireRange("swingLookback", 2, 20);
+      requireRange("equalTolerancePct", 1e-3, 1);
+      requireRange("mergeTolerancePct", 0.01, 1);
+      requireRange("minTouches", 1, 5);
+      requireRange("minWickProtrusionPct", 1e-3, 1);
+      requireRange("targetDistanceMultiplier", 0.5, 5);
+      if (errors.length > 0) {
+        return res.status(400).json({ error: "invalid_params", details: errors });
+      }
+      await storage.updateTenantConfig(tenant.id, {
+        minLevelRank: Math.round(params.minLevelRank),
+        minRiskRewardRatio: String(params.minRiskRewardRatio),
+        maxConcurrentPositions: Math.round(params.maxConcurrentPositions),
+        strategyParams: {
+          swingLookback: Math.round(params.swingLookback),
+          equalTolerancePct: params.equalTolerancePct,
+          mergeTolerancePct: params.mergeTolerancePct,
+          minTouches: Math.round(params.minTouches),
+          minWickProtrusionPct: params.minWickProtrusionPct,
+          targetDistanceMultiplier: params.targetDistanceMultiplier
+        },
+        // Switch portfolio_tier to manual so the auto-tier logic doesn't
+        // overwrite the operator's choice on next capital change.
+        portfolioTier: "manual"
+      });
+      audit({
+        userId: u.id,
+        tenantId: tenant.id,
+        action: "install_autoresearch_iteration",
+        resourceType: "autoresearch_iteration",
+        resourceId: iteration.id,
+        outcome: "success",
+        detail: {
+          sessionId: iteration.sessionId,
+          iterationIdx: iteration.idx,
+          params
+        },
+        ipAddress: getIp(req)
+      });
+      res.json({ ok: true, iterationId: iteration.id });
     }
   );
   app2.get("/api/tenant/costs", isAuthenticated, async (req, res) => {

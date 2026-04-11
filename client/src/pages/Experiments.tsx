@@ -2070,8 +2070,29 @@ function iterationMoodClass(status: ARIteration["status"]): string {
 }
 
 // ---- Iterations table ----------------------------------------------------
+//
+// Each row has an "Install" button that writes the iteration's full
+// 9-param config to the operator's tenant_configs. The next bot tick
+// uses the new params. Disabled for crashed iterations.
 
 function IterationsTable({ iterations }: { iterations: ARIteration[] }) {
+  const qc = useQueryClient();
+  const installMutation = useMutation({
+    mutationFn: async (iterationId: string) => {
+      const r = await apiRequest(
+        `/api/autoresearch/iterations/${iterationId}/install`,
+        { method: "POST" }
+      );
+      return r.json();
+    },
+    onSuccess: () => {
+      // Tenant config changed — invalidate the dashboard's view of it
+      qc.invalidateQueries({ queryKey: ["/api/tenant"] });
+      alert("Installed. The next bot tick will use these params.");
+    },
+    onError: (e) => alert(`Install failed: ${(e as Error).message}`),
+  });
+
   if (iterations.length === 0) {
     return <div className="p-6 text-xs text-muted-foreground">No iterations yet.</div>;
   }
@@ -2084,11 +2105,13 @@ function IterationsTable({ iterations }: { iterations: ARIteration[] }) {
         <div className="col-span-1 text-right">trades</div>
         <div className="col-span-2 text-right">win / pnl</div>
         <div className="col-span-1">status</div>
-        <div className="col-span-5">narration</div>
+        <div className="col-span-3">narration</div>
+        <div className="col-span-2 text-right">install</div>
       </div>
       {[...iterations].reverse().map((it) => {
         const score = Number(it.score) || 0;
         const widthPct = (score / maxScore) * 100;
+        const canInstall = it.status !== "crash";
         return (
           <div
             key={it.id}
@@ -2114,8 +2137,28 @@ function IterationsTable({ iterations }: { iterations: ARIteration[] }) {
                   {it.status}
                 </Badge>
               </div>
-              <div className="col-span-5 truncate text-muted-foreground" title={it.narration}>
+              <div className="col-span-3 truncate text-muted-foreground" title={it.narration}>
                 {it.narration}
+              </div>
+              <div className="col-span-2 text-right">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!canInstall || installMutation.isPending}
+                  onClick={() => {
+                    if (
+                      confirm(
+                        `Install iteration #${it.idx + 1} as the live config?\n\n` +
+                          `This will overwrite your current strategy params and the next bot tick will use:\n\n` +
+                          formatParamsForConfirm(it.params)
+                      )
+                    ) {
+                      installMutation.mutate(it.id);
+                    }
+                  }}
+                >
+                  Install
+                </Button>
               </div>
             </div>
           </div>
@@ -2123,6 +2166,12 @@ function IterationsTable({ iterations }: { iterations: ARIteration[] }) {
       })}
     </div>
   );
+}
+
+function formatParamsForConfirm(params: Record<string, number>): string {
+  return Object.entries(params)
+    .map(([k, v]) => `  ${k}: ${v}`)
+    .join("\n");
 }
 
 function iterationStatusClass(status: ARIteration["status"]): string {

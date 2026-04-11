@@ -569,6 +569,93 @@ export function registerRoutes(app: Express) {
     }
   );
 
+  // Install an autoresearch iteration's params as the tenant's live
+  // config. Writes all 9 params atomically:
+  //   - minLevelRank, minRiskRewardRatio, maxConcurrentPositions go to
+  //     their existing tenant_configs columns
+  //   - swingLookback, equalTolerancePct, mergeTolerancePct, minTouches,
+  //     minWickProtrusionPct, targetDistanceMultiplier go to the
+  //     tenant_configs.strategy_params jsonb blob (read by botRunner
+  //     on every tick)
+  // Audit-logged. The next bot tick will use the new params.
+  app.post(
+    "/api/autoresearch/iterations/:id/install",
+    isAuthenticated,
+    async (req, res) => {
+      const id = pid(req, "id");
+      const u = getUser(req);
+      const tenant = await storage.getOrCreateTenantForUser(u.id);
+      const iteration = await storage.getAutoresearchIteration(id);
+      if (!iteration) return res.status(404).json({ error: "not_found" });
+      // Verify the iteration belongs to a session this tenant owns
+      const session = await storage.getAutoresearchSession(iteration.sessionId);
+      if (!session || session.tenantId !== tenant.id) {
+        return res.status(404).json({ error: "not_found" });
+      }
+
+      const params = iteration.params as Record<string, number>;
+      // Validate ranges defensively. The agent's clampParams already
+      // enforces these but we re-check at the install boundary because
+      // a malformed iteration row shouldn't be able to corrupt live
+      // config.
+      const errors: string[] = [];
+      const requireRange = (key: string, lo: number, hi: number) => {
+        const v = params[key];
+        if (typeof v !== "number" || !Number.isFinite(v) || v < lo || v > hi) {
+          errors.push(`${key}: ${v} not in [${lo}, ${hi}]`);
+        }
+      };
+      requireRange("minLevelRank", 1, 5);
+      requireRange("minRiskRewardRatio", 0.5, 5.0);
+      requireRange("maxConcurrentPositions", 1, 10);
+      requireRange("swingLookback", 2, 20);
+      requireRange("equalTolerancePct", 0.001, 1.0);
+      requireRange("mergeTolerancePct", 0.01, 1.0);
+      requireRange("minTouches", 1, 5);
+      requireRange("minWickProtrusionPct", 0.001, 1.0);
+      requireRange("targetDistanceMultiplier", 0.5, 5.0);
+      if (errors.length > 0) {
+        return res.status(400).json({ error: "invalid_params", details: errors });
+      }
+
+      // Write the 3 risk params to their dedicated columns + the 6
+      // strategy-internal params to the jsonb blob.
+      await storage.updateTenantConfig(tenant.id, {
+        minLevelRank: Math.round(params.minLevelRank),
+        minRiskRewardRatio: String(params.minRiskRewardRatio),
+        maxConcurrentPositions: Math.round(params.maxConcurrentPositions),
+        strategyParams: {
+          swingLookback: Math.round(params.swingLookback),
+          equalTolerancePct: params.equalTolerancePct,
+          mergeTolerancePct: params.mergeTolerancePct,
+          minTouches: Math.round(params.minTouches),
+          minWickProtrusionPct: params.minWickProtrusionPct,
+          targetDistanceMultiplier: params.targetDistanceMultiplier,
+        },
+        // Switch portfolio_tier to manual so the auto-tier logic doesn't
+        // overwrite the operator's choice on next capital change.
+        portfolioTier: "manual",
+      });
+
+      audit({
+        userId: u.id,
+        tenantId: tenant.id,
+        action: "install_autoresearch_iteration",
+        resourceType: "autoresearch_iteration",
+        resourceId: iteration.id,
+        outcome: "success",
+        detail: {
+          sessionId: iteration.sessionId,
+          iterationIdx: iteration.idx,
+          params,
+        },
+        ipAddress: getIp(req),
+      });
+
+      res.json({ ok: true, iterationId: iteration.id });
+    }
+  );
+
   app.get("/api/tenant/costs", isAuthenticated, async (req, res) => {
     const u = getUser(req);
     const tenant = await storage.getOrCreateTenantForUser(u.id);

@@ -189,6 +189,17 @@ export const tenantConfigs = pgTable("tenant_configs", {
     .notNull()
     .default("2.00"),
   minLevelRank: integer("min_level_rank").notNull().default(2),
+  // Strategy-internal params that USED to be hardcoded constants in
+  // levels.ts/sweeps.ts/entries.ts. Stored as a jsonb blob so the
+  // schema doesn't need a column-per-param. Falls back to the engine
+  // defaults when keys are missing — see botRunner for the merge.
+  // Shape mirrors ProposedParams in autoresearch/prompt.ts:
+  //   { swingLookback, equalTolerancePct, mergeTolerancePct,
+  //     minTouches, minWickProtrusionPct, targetDistanceMultiplier }
+  // Written by the autoresearch "install this config" button (which
+  // writes all 9 params atomically — the 3 risk params go to their
+  // existing columns above, the 6 strategy-internal ones go here).
+  strategyParams: jsonb("strategy_params").notNull().default({}),
   // Candle timeframe the bot evaluates entries against. Defaults to 15m so
   // existing tenants are unchanged. Operator-controlled via Settings.
   // Strategy logic itself is timeframe-agnostic — only the candle fetch
