@@ -1533,7 +1533,15 @@ function computeVerdict(session: ARSession, iterations: ARIteration[]): Verdict 
     const pnls = iterations.map((i) => Number(i.netPnl) || 0);
     const drawdowns = iterations.map((i) => Number(i.maxDrawdownPct) || 0);
     const tradesNonZero = iterations.filter((i) => i.trades > 0).length;
-    const action = `${session.iterationsRun} configurations sampled. ${tradesNonZero} of them produced any trades.`;
+    const total = session.iterationsRun;
+    let action: string;
+    if (tradesNonZero === 0) {
+      action = `${total} configurations sampled. None produced any trades.`;
+    } else if (tradesNonZero === total) {
+      action = `${total} configurations sampled. All of them produced trades.`;
+    } else {
+      action = `${total} configurations sampled. ${tradesNonZero} produced trades, ${total - tradesNonZero} didn't.`;
+    }
     const ranges: string[] = [];
     if (trades.length > 0) {
       ranges.push(`Trades ${Math.min(...trades)}–${Math.max(...trades)}`);
