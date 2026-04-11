@@ -133,7 +133,9 @@ export default function Experiments() {
             {tab === "library" && <LibraryTab />}
             {tab === "recommendations" && <RecommendationsTab />}
             {tab === "history" && <HistoryTab />}
-            {tab === "autoresearch" && autoresearchAvailable && <AutoresearchTab />}
+            {tab === "autoresearch" && autoresearchAvailable && (
+              <AutoresearchTab onViewHistory={() => setTab("history")} />
+            )}
           </div>
         </Card>
       </main>
@@ -622,68 +624,141 @@ function VariantsTable({ variants }: { variants: ScoredVariant[] }) {
 }
 
 // ---------------------------------------------------------------------------
-// HISTORY TAB — every run, every verdict, for audit
+// HISTORY TAB — unified timeline of past research activity
 // ---------------------------------------------------------------------------
+//
+// Two sources merged into one chronological list:
+//   1. Autoresearch sessions  → rich cards with verdict + chart + params
+//   2. Manual experiment runs → smaller expandable cards (existing behaviour)
+//
+// Most important info first: results-led headlines, supporting detail
+// underneath. The richest cards (autoresearch sessions) lead because
+// they carry the most useful insights.
+
+interface SessionWithIterations {
+  session: ARSession;
+  iterations: ARIteration[];
+}
 
 function HistoryTab() {
+  // Light refetch so a session that finishes while you're on this tab
+  // appears without a manual refresh. 10s is plenty — sessions take
+  // minutes, this isn't a live screen.
+  const sessions = useQuery<ARSession[]>({
+    queryKey: ["/api/autoresearch/sessions"],
+    refetchInterval: 10_000,
+  });
   const runs = useQuery<RunRow[]>({ queryKey: ["/api/tenant/experiment-runs"] });
-  const [expanded, setExpanded] = useState<string | null>(null);
-  const rows = runs.data ?? [];
-  if (rows.length === 0) {
-    return <div className="p-6 text-sm text-muted-foreground">No runs yet.</div>;
+
+  // Running sessions live on the Autoresearch tab. History only shows
+  // finished ones (done/aborted/error) so the "View result in History"
+  // button always lands on a row that has a verdict to render.
+  const sessionRows = (sessions.data ?? []).filter(
+    (s) => s.status !== "running"
+  );
+  const runRows = runs.data ?? [];
+
+  if (sessionRows.length === 0 && runRows.length === 0) {
+    return (
+      <div className="p-6 text-sm text-muted-foreground">
+        No history yet. Run an autoresearch session or a manual experiment to get started.
+      </div>
+    );
   }
+
+  // Merge by date, newest first. Each entry knows its kind so we render
+  // it with the right component.
+  type TimelineItem =
+    | { kind: "session"; at: number; row: ARSession }
+    | { kind: "run"; at: number; row: RunRow };
+  const timeline: TimelineItem[] = [
+    ...sessionRows.map((s) => ({
+      kind: "session" as const,
+      at: new Date(s.startedAt).getTime(),
+      row: s,
+    })),
+    ...runRows.map((r) => ({
+      kind: "run" as const,
+      at: new Date(r.createdAt).getTime(),
+      row: r,
+    })),
+  ].sort((a, b) => b.at - a.at);
+
   return (
-    <div className="space-y-2 p-6">
-      {rows.map((r) => {
-        const isOpen = expanded === r.id;
-        return (
-          <div key={r.id} className="rounded border border-border/50 bg-card/30">
-            <button
-              type="button"
-              onClick={() => setExpanded(isOpen ? null : r.id)}
-              className="flex w-full items-baseline justify-between gap-3 p-3 text-left hover:bg-card/50"
-            >
-              <div className="min-w-0 flex-1">
-                <div className="text-sm">
-                  {r.recommendation?.summary ?? "(no recommendation)"}
-                </div>
-                <div className="text-[11px] text-muted-foreground">
-                  {new Date(r.createdAt).toLocaleString()} ·{" "}
-                  {isOpen ? "click to collapse" : "click for details"}
-                </div>
-              </div>
-              <Badge className={cn("shrink-0 text-xs", verdictClass(r.verdict))}>
-                {r.verdict}
-              </Badge>
-            </button>
-            {isOpen && r.recommendation && (
-              <div className="border-t border-border/50 p-3">
-                <ul className="list-disc space-y-0.5 pl-5 text-xs text-muted-foreground">
-                  {r.recommendation.findings.map((f, i) => (
-                    <li key={i}>{f}</li>
-                  ))}
-                </ul>
-                {r.recommendation.diff && (
-                  <div className="mt-2 rounded border border-amber-500/40 bg-amber-500/5 p-2 text-xs">
-                    <div className="font-mono text-amber-200">
-                      {r.recommendation.diff.paramKey}: {r.recommendation.diff.fromValue} →{" "}
-                      {r.recommendation.diff.toValue}
-                    </div>
-                    <div className="mt-1 text-muted-foreground">
-                      {r.recommendation.diff.rationale}
-                    </div>
-                  </div>
-                )}
-                {r.recommendation.variants && r.recommendation.variants.length > 0 && (
-                  <div className="mt-2">
-                    <VariantsTable variants={r.recommendation.variants} />
-                  </div>
-                )}
-              </div>
-            )}
+    <div className="space-y-4 p-6">
+      {timeline.map((item, i) =>
+        item.kind === "session" ? (
+          <SessionHistoryCard key={`s-${item.row.id}`} session={item.row} />
+        ) : (
+          <ManualRunHistoryCard key={`r-${item.row.id}`} run={item.row} />
+        )
+      )}
+    </div>
+  );
+}
+
+// Rich card for an autoresearch session — fetches its iterations
+// on-demand so we can render the SessionResult inline. This is the
+// "results first" treatment the operator asked for.
+function SessionHistoryCard({ session }: { session: ARSession }) {
+  const iterationsQuery = useQuery<ARIteration[]>({
+    queryKey: [`/api/autoresearch/sessions/${session.id}/iterations`],
+  });
+  return (
+    <SessionResult session={session} iterations={iterationsQuery.data ?? []} />
+  );
+}
+
+// Compact card for a manual experiment run — same expandable behaviour
+// as before. These are smaller because they carry less rich data than
+// an autoresearch session (no iterations, no chart).
+function ManualRunHistoryCard({ run }: { run: RunRow }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="rounded border border-border/50 bg-card/30">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-baseline justify-between gap-3 p-3 text-left hover:bg-card/50"
+      >
+        <div className="min-w-0 flex-1">
+          <div className="text-sm">
+            {run.recommendation?.summary ?? "(no recommendation)"}
           </div>
-        );
-      })}
+          <div className="text-[11px] text-muted-foreground">
+            manual experiment · {new Date(run.createdAt).toLocaleString()} ·{" "}
+            {open ? "click to collapse" : "click for details"}
+          </div>
+        </div>
+        <Badge className={cn("shrink-0 text-xs", verdictClass(run.verdict))}>
+          {run.verdict}
+        </Badge>
+      </button>
+      {open && run.recommendation && (
+        <div className="border-t border-border/50 p-3">
+          <ul className="list-disc space-y-0.5 pl-5 text-xs text-muted-foreground">
+            {run.recommendation.findings.map((f, i) => (
+              <li key={i}>{f}</li>
+            ))}
+          </ul>
+          {run.recommendation.diff && (
+            <div className="mt-2 rounded border border-amber-500/40 bg-amber-500/5 p-2 text-xs">
+              <div className="font-mono text-amber-200">
+                {run.recommendation.diff.paramKey}: {run.recommendation.diff.fromValue} →{" "}
+                {run.recommendation.diff.toValue}
+              </div>
+              <div className="mt-1 text-muted-foreground">
+                {run.recommendation.diff.rationale}
+              </div>
+            </div>
+          )}
+          {run.recommendation.variants && run.recommendation.variants.length > 0 && (
+            <div className="mt-2">
+              <VariantsTable variants={run.recommendation.variants} />
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -755,9 +830,9 @@ interface ARIteration {
   createdAt: string;
 }
 
-function AutoresearchTab() {
+function AutoresearchTab({ onViewHistory }: { onViewHistory: () => void }) {
   const qc = useQueryClient();
-  const [innerTab, setInnerTab] = useState<"live" | "iterations" | "archive">("live");
+  const [innerTab, setInnerTab] = useState<"live" | "iterations">("live");
 
   // Active session = currently running, OR most recently finished. The
   // identity card always shows ONE session — we resolve which one to show
@@ -845,8 +920,18 @@ function AutoresearchTab() {
               >
                 {stopMutation.isPending ? "Stopping…" : "Stop"}
               </Button>
-            ) : (
+            ) : status === "idle" ? (
               <StartSessionForm />
+            ) : (
+              // Session is done/aborted/errored — give a clear path to
+              // the rich result card without blocking the operator from
+              // starting another session right away.
+              <>
+                <Button size="sm" onClick={onViewHistory}>
+                  View result in History →
+                </Button>
+                <StartSessionForm />
+              </>
             )}
             {focusedSession && focusedSession.errorMessage && (
               <span className="text-xs text-red-300">{focusedSession.errorMessage}</span>
@@ -855,26 +940,14 @@ function AutoresearchTab() {
         }
       />
 
-      {/* Result panel — shows a clear verdict + best params when the
-          session has finished. Hidden while idle or running. */}
-      {focusedSession &&
-        (focusedSession.status === "done" ||
-          focusedSession.status === "aborted" ||
-          focusedSession.status === "error") && (
-          <SessionResult
-            session={focusedSession}
-            iterations={iterationsQuery.data ?? []}
-          />
-        )}
-
-      {/* Inner tabs */}
+      {/* Inner tabs — Live (heartbeat narration) + Iterations (table).
+          Past sessions live in the outer History tab now. */}
       <div className="rounded-md border border-border bg-card/40">
         <div className="flex shrink-0 gap-1 border-b border-border px-4">
           {(
             [
               { key: "live", label: "Live" },
               { key: "iterations", label: "Iterations" },
-              { key: "archive", label: "Archive" },
             ] as const
           ).map((t) => (
             <button
@@ -900,12 +973,6 @@ function AutoresearchTab() {
           )}
           {innerTab === "iterations" && (
             <IterationsTable iterations={iterationsQuery.data ?? []} />
-          )}
-          {innerTab === "archive" && (
-            <ArchiveList
-              sessions={archiveQuery.data ?? []}
-              activeId={focusedSession?.id ?? null}
-            />
           )}
         </div>
       </div>
@@ -1125,40 +1192,49 @@ function SessionResult({
         : "border-amber-500/40 bg-amber-500/5";
 
   return (
-    <div className={cn("rounded-md border p-4", toneClass)}>
-      <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
-        Session result
-      </div>
-      <h3 className="text-base font-semibold">{headline}</h3>
-      <p className="mt-1 text-xs text-muted-foreground">{body}</p>
+    <div className={cn("rounded-lg border p-6", toneClass)}>
+      {/* RESULT — verdict headline + explanation. This is the gold.
+          Everything else is supporting evidence. */}
+      <h2 className="text-xl font-semibold leading-tight text-foreground">
+        {headline}
+      </h2>
+      <p className="mt-3 text-sm leading-relaxed text-muted-foreground">{body}</p>
 
-      {/* Score-over-iterations chart — single visual telling the whole
-          search story at a glance */}
+      {/* Tiny metadata footer line so the operator can scan when/what */}
+      <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground/70">
+        <span>{new Date(session.startedAt).toLocaleString()}</span>
+        <span>·</span>
+        <span>{session.timeframe} · {session.lookbackBars} bars · {session.regime}</span>
+        <span>·</span>
+        <span>{session.iterationsRun}/{session.maxIterations} iterations</span>
+        <span>·</span>
+        <span>{session.model}</span>
+        <span>·</span>
+        <span>${Number(session.totalCostUsd).toFixed(2)}</span>
+      </div>
+
+      {/* GRAPH — single visual telling the search story at a glance.
+          Second in importance, after the verdict itself. */}
       {iterations.length > 0 && (
-        <div className="mt-3">
+        <div className="mt-5">
           <ScoreChart iterations={iterations} />
         </div>
       )}
 
-      {/* Side-by-side params: baseline vs best, only when we have a winner */}
+      {/* PARAMS — third in importance. The actual values for reference.
+          Side-by-side diff when there's a winner; flat grid otherwise. */}
       {foundWinner && bestIter && baseline && (
-        <div className="mt-3 rounded border border-border/40 bg-background/40 p-3">
+        <div className="mt-5 rounded border border-border/40 bg-background/40 p-3">
           <div className="mb-2 text-[10px] uppercase tracking-wide text-muted-foreground">
             What changed
           </div>
-          <ParamDiffTable
-            baseline={baseline.params}
-            winner={bestIter.params}
-          />
+          <ParamDiffTable baseline={baseline.params} winner={bestIter.params} />
         </div>
       )}
-
-      {/* When there's no winner but the operator might still want to see
-          the params it tried, surface the best iteration's params anyway */}
       {!foundWinner && bestIter && (
-        <div className="mt-3 rounded border border-border/40 bg-background/40 p-3">
+        <div className="mt-5 rounded border border-border/40 bg-background/40 p-3">
           <div className="mb-2 text-[10px] uppercase tracking-wide text-muted-foreground">
-            Best iteration ({`#${bestIter.idx + 1}`}) — for reference
+            Best iteration (#{bestIter.idx + 1}) — for reference
           </div>
           <ParamGrid params={bestIter.params} />
         </div>
@@ -1525,56 +1601,6 @@ function iterationStatusClass(status: ARIteration["status"]): string {
     case "crash":
       return "border-red-500/40 text-red-300";
   }
-}
-
-// ---- Archive list --------------------------------------------------------
-
-function ArchiveList({
-  sessions,
-  activeId,
-}: {
-  sessions: ARSession[];
-  activeId: string | null;
-}) {
-  if (sessions.length === 0) {
-    return (
-      <div className="p-6 text-xs text-muted-foreground">
-        No past sessions yet. Once you've run a session it'll appear here.
-      </div>
-    );
-  }
-  return (
-    <div className="space-y-2 p-6">
-      {sessions.map((s) => (
-        <div
-          key={s.id}
-          className={cn(
-            "rounded border bg-card/30 p-3",
-            s.id === activeId ? "border-primary/40" : "border-border/40"
-          )}
-        >
-          <div className="flex items-baseline justify-between gap-3">
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-sm">{s.goal}</div>
-              <div className="text-[11px] text-muted-foreground">
-                {new Date(s.startedAt).toLocaleString()} · {s.timeframe} ·{" "}
-                {s.iterationsRun}/{s.maxIterations} iters · {s.model} · $
-                {Number(s.totalCostUsd).toFixed(2)}
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="font-mono text-sm">
-                {s.bestScore ? Number(s.bestScore).toFixed(4) : "—"}
-              </span>
-              <Badge className={cn("text-[10px]", sessionStatusClass(s.status))}>
-                {s.status}
-              </Badge>
-            </div>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
 }
 
 function sessionStatusClass(status: ARSession["status"]): string {
