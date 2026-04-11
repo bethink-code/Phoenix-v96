@@ -86,26 +86,19 @@ export default function SessionDetail() {
 
   return (
     <div className="min-h-screen bg-background">
-      {/* Sticky header — same visual language as the Experiments page,
-          but the title is the session goal so each open tab is
-          identifiable in the browser tab strip. */}
+      {/* Minimal sticky header — just the back button on the left.
+          The title lives in the main content area below, not in the
+          header, so it doesn't compete with the SessionDetailView's
+          own identity card and can wrap freely. */}
       <header className="sticky top-0 z-20 border-b border-border bg-background">
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-6 py-4">
-          <div className="min-w-0 flex-1">
-            <h1 className="truncate text-lg font-semibold">
-              {sessionQuery.data?.goal ?? "Session"}
-            </h1>
-            <p className="text-xs text-muted-foreground">
-              Past session view · read-only
-            </p>
-          </div>
+        <div className="mx-auto flex max-w-6xl items-center gap-4 px-6 py-4">
           <Link href="/experiments">
             <Button variant="outline" size="sm">← Experiments</Button>
           </Link>
         </div>
       </header>
 
-      <main className="mx-auto max-w-6xl px-6 py-6">
+      <main className="mx-auto max-w-6xl space-y-4 px-6 py-6">
         {sessionQuery.isLoading && (
           <div className="text-sm text-muted-foreground">Loading session…</div>
         )}
@@ -113,14 +106,27 @@ export default function SessionDetail() {
           <div className="text-sm text-red-300">Failed to load session.</div>
         )}
         {sessionQuery.data && (
-          // No actions slot — this is a viewer, not a controller.
-          // Stopping a running session and starting new ones happen
-          // on the Live tab, not from a session-detail tab opened
-          // for comparison.
-          <SessionDetailView
-            session={sessionQuery.data}
-            iterations={iterationsQuery.data ?? []}
-          />
+          <>
+            {/* Title lives in the content, above the identity card.
+                Goal is the primary identifier, subtitle marks this as
+                a historical view. */}
+            <div>
+              <h1 className="text-lg font-semibold">
+                {sessionQuery.data.goal}
+              </h1>
+              <p className="text-xs text-muted-foreground">
+                Past session view · read-only
+              </p>
+            </div>
+            {/* No actions slot — this is a viewer, not a controller.
+                Stopping a running session and starting new ones happen
+                on the Live tab, not from a session-detail tab opened
+                for comparison. */}
+            <SessionDetailView
+              session={sessionQuery.data}
+              iterations={iterationsQuery.data ?? []}
+            />
+          </>
         )}
       </main>
     </div>

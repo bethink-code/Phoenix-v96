@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { Link } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -164,14 +163,7 @@ export default function Experiments() {
             }}
           />
         )}
-        {tab === "history" && (
-          <HistoryTab
-            onContinueFromIteration={(p) => {
-              setStartPrefill(p);
-              setTab("live");
-            }}
-          />
-        )}
+        {tab === "history" && <HistoryTab />}
         {tab === "library" && <LibraryTab />}
         {tab === "recommendations" && <RecommendationsTab />}
       </main>
@@ -671,20 +663,7 @@ function VariantsTable({ variants }: { variants: ScoredVariant[] }) {
 // underneath. The richest cards (autoresearch sessions) lead because
 // they carry the most useful insights.
 
-interface SessionWithIterations {
-  session: ARSession;
-  iterations: ARIteration[];
-}
-
-function HistoryTab({
-  onContinueFromIteration,
-}: {
-  // Forwarded to SessionHistoryCard so each session's iterations
-  // table (in the Iterations / Successes sub-tabs of an expanded
-  // card) can emit "continue from this iteration" all the way up
-  // to the parent Experiments component.
-  onContinueFromIteration?: (p: StartFormPrefill) => void;
-} = {}) {
+function HistoryTab() {
   // Light refetch so a session that finishes while you're on this tab
   // appears without a manual refresh. 10s is plenty — sessions take
   // minutes, this isn't a live screen.
@@ -1080,8 +1059,12 @@ function AutoresearchSurface({
   const status: "idle" | "running" | "done" | "aborted" | "error" =
     focusedSession?.status ?? "idle";
 
-  // Live-tab actions: Start form when idle, Stop when running,
-  // View-result link + Start form when done/aborted/error.
+  // Live-tab actions: only two cases that need a button.
+  //   running  → Stop (graceful)
+  //   idle / done / aborted / error → Start a session (form)
+  // No "View result in History" — the full result is already visible
+  // right here in the sub-tabs below; jumping to History would just
+  // show the same thing twice.
   const actions = (
     <div className="flex flex-wrap items-center gap-2">
       {status === "running" && focusedSession ? (
@@ -1093,21 +1076,11 @@ function AutoresearchSurface({
         >
           {stopMutation.isPending ? "Stopping…" : "Stop"}
         </Button>
-      ) : status === "idle" ? (
+      ) : (
         <StartSessionForm
           prefill={prefill ?? undefined}
           onPrefillConsumed={onPrefillConsumed}
         />
-      ) : (
-        <>
-          <Button size="sm" onClick={onViewHistory}>
-            View result in History →
-          </Button>
-          <StartSessionForm
-            prefill={prefill ?? undefined}
-            onPrefillConsumed={onPrefillConsumed}
-          />
-        </>
       )}
       {focusedSession && focusedSession.errorMessage && (
         <span className="text-xs text-red-300">{focusedSession.errorMessage}</span>
