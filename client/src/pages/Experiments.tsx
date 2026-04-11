@@ -953,7 +953,7 @@ interface ARIteration {
   createdAt: string;
 }
 
-export type SessionView = "trades" | "score" | "iterations" | "successes";
+export type SessionView = "trades" | "score" | "iterations" | "successes" | "convergence";
 
 // Shared layout used by both the live AutoresearchSurface and the
 // dedicated SessionDetail page. Takes a session + iterations and renders
@@ -1212,6 +1212,7 @@ function SessionViewTabs({
     { key: "score", label: "Score" },
     { key: "iterations", label: "Iterations" },
     { key: "successes", label: "Successes" },
+    { key: "convergence", label: "Convergence" },
   ];
   return (
     <div className="flex gap-1 border-b border-border">
@@ -1304,6 +1305,9 @@ function SessionViewContent({
       />
     );
   }
+  if (view === "convergence") {
+    return <ConvergenceView iterations={iterations} />;
+  }
   return null;
 }
 
@@ -1340,6 +1344,122 @@ function SuccessesView({
         iterations={successes}
         onContinueFromIteration={onContinueFromIteration}
       />
+    </div>
+  );
+}
+
+// "Convergence" — pure stats over the winning iterations. For each
+// param the LLM proposed, computes how tightly the top performers
+// agree on its value. Tight = the search found a ridge worth
+// installing. Scattered = the wins were independent flukes.
+//
+// No LLM, no opinion: variance, range, and a coefficient of variation
+// (CV = stdev / |mean|) that's comparable across params with different
+// scales. CV bands chosen by reading what the operator actually wants
+// to know — "is this number basically the same across winners?"
+//   < 0.10 → Tight     (essentially the same value across winners)
+//   < 0.30 → Loose     (same neighbourhood)
+//   ≥ 0.30 → Scattered (no agreement, treat as noise)
+// Mean = 0 edge case: if every winner picked exactly the same value
+// (stdev = 0), it's Tight regardless; otherwise CV is undefined and
+// we fall back to Scattered.
+function ConvergenceView({ iterations }: { iterations: ARIteration[] }) {
+  const successes = iterations.filter((i) => i.trades > 0 && Number(i.netPnl) > 0);
+
+  if (successes.length < 3) {
+    return (
+      <div className="rounded border border-border/40 bg-card/30 p-4 text-xs text-muted-foreground">
+        Need at least 3 profitable iterations to look for convergence. Currently have {successes.length}.
+      </div>
+    );
+  }
+
+  const paramNames = Array.from(
+    new Set(successes.flatMap((i) => Object.keys(i.params)))
+  ).sort();
+
+  const stats = paramNames.map((name) => {
+    const values = successes
+      .map((i) => i.params[name])
+      .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+    if (values.length === 0) {
+      return { name, count: 0, mean: 0, min: 0, max: 0, stdev: 0, cv: null as number | null, band: "scattered" as const };
+    }
+    const mean = values.reduce((a, b) => a + b, 0) / values.length;
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const variance = values.reduce((a, b) => a + (b - mean) ** 2, 0) / values.length;
+    const stdev = Math.sqrt(variance);
+    let cv: number | null;
+    if (stdev === 0) cv = 0;
+    else if (mean === 0) cv = null;
+    else cv = stdev / Math.abs(mean);
+    const band: "tight" | "loose" | "scattered" =
+      cv === null ? "scattered" : cv < 0.1 ? "tight" : cv < 0.3 ? "loose" : "scattered";
+    return { name, count: values.length, mean, min, max, stdev, cv, band };
+  });
+
+  const tightCount = stats.filter((s) => s.band === "tight").length;
+  const looseCount = stats.filter((s) => s.band === "loose").length;
+  const scatteredCount = stats.filter((s) => s.band === "scattered").length;
+
+  const fmt = (n: number) => {
+    if (!Number.isFinite(n)) return "—";
+    if (Math.abs(n) >= 100) return n.toFixed(0);
+    if (Math.abs(n) >= 10) return n.toFixed(1);
+    return n.toFixed(3);
+  };
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-muted-foreground">
+        Convergence across {successes.length} profitable iterations.{" "}
+        <span className="text-emerald-400">{tightCount} tight</span>,{" "}
+        <span className="text-amber-400">{looseCount} loose</span>,{" "}
+        <span className="text-muted-foreground">{scatteredCount} scattered</span>.
+        Tight params are the ridge — winners agreed on them. Scattered params didn't matter or didn't converge.
+      </p>
+      <div className="overflow-x-auto rounded border border-border/40">
+        <table className="w-full text-xs">
+          <thead className="bg-card/40 text-[10px] uppercase tracking-wide text-muted-foreground">
+            <tr>
+              <th className="px-3 py-2 text-left">Param</th>
+              <th className="px-3 py-2 text-right">Mean</th>
+              <th className="px-3 py-2 text-right">Min</th>
+              <th className="px-3 py-2 text-right">Max</th>
+              <th className="px-3 py-2 text-right">Stdev</th>
+              <th className="px-3 py-2 text-right">CV</th>
+              <th className="px-3 py-2 text-left">Band</th>
+            </tr>
+          </thead>
+          <tbody>
+            {stats.map((s) => (
+              <tr key={s.name} className="border-t border-border/40">
+                <td className="px-3 py-2 font-mono">{s.name}</td>
+                <td className="px-3 py-2 text-right font-mono">{fmt(s.mean)}</td>
+                <td className="px-3 py-2 text-right font-mono">{fmt(s.min)}</td>
+                <td className="px-3 py-2 text-right font-mono">{fmt(s.max)}</td>
+                <td className="px-3 py-2 text-right font-mono">{fmt(s.stdev)}</td>
+                <td className="px-3 py-2 text-right font-mono">
+                  {s.cv === null ? "—" : s.cv.toFixed(3)}
+                </td>
+                <td className="px-3 py-2">
+                  <span
+                    className={cn(
+                      "rounded px-2 py-0.5 text-[10px] uppercase tracking-wide",
+                      s.band === "tight" && "bg-emerald-500/15 text-emerald-400",
+                      s.band === "loose" && "bg-amber-500/15 text-amber-400",
+                      s.band === "scattered" && "bg-muted text-muted-foreground"
+                    )}
+                  >
+                    {s.band}
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
