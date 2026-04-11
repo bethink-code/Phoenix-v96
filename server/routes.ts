@@ -31,6 +31,7 @@ import { eq } from "drizzle-orm";
 import { isOpenAIConfigured } from "./modules/autoresearch/openai";
 import { identifyLevels } from "./modules/strategy/levels";
 import { DEFAULT_PARAMS } from "./modules/autoresearch/prompt";
+import { runBacktest } from "./modules/backtestEngine";
 import {
   DEFAULT_SYSTEM_PROMPT,
   DEFAULT_DISCOVER_PROMPT,
@@ -698,7 +699,60 @@ export function registerRoutes(app: Express) {
         mergeTolerancePct: seeded.mergeTolerancePct,
         minTouches: seeded.minTouches,
       });
-      res.json({ candles, levels });
+
+      // Replay the BEST iteration's backtest so the chart can plot
+      // where the strategy actually fired. "Best" = highest netPnl
+      // among iterations that traded. If none, no overlay.
+      const iterations = await storage.listAutoresearchIterations(id);
+      const bestIteration = iterations
+        .filter((i) => i.trades > 0 && Number(i.netPnl) > 0)
+        .sort((a, b) => Number(b.netPnl) - Number(a.netPnl))[0];
+      let trades: Array<{
+        openedAt: number;
+        closedAt: number;
+        side: "long" | "short";
+        entry: number;
+        realisedPnl: number;
+        outcome: "target" | "stop" | "timeout";
+      }> = [];
+      if (bestIteration) {
+        const p = {
+          ...DEFAULT_PARAMS,
+          ...(bestIteration.params as Partial<typeof DEFAULT_PARAMS>),
+        };
+        const result = runBacktest({
+          candles,
+          regime: session.regime as Parameters<typeof runBacktest>[0]["regime"],
+          startingCapital: 10_000,
+          warmupCandles: 100,
+          config: {
+            riskPercentPerTrade: 1.0,
+            minRiskRewardRatio: p.minRiskRewardRatio,
+            minLevelRank: p.minLevelRank,
+            maxConcurrentPositions: p.maxConcurrentPositions,
+            dailyDrawdownLimitPct: 3.0,
+            weeklyDrawdownLimitPct: 6.0,
+          },
+          levelConfig: {
+            swingLookback: p.swingLookback,
+            equalTolerancePct: p.equalTolerancePct,
+            mergeTolerancePct: p.mergeTolerancePct,
+            minTouches: p.minTouches,
+          },
+          sweepConfig: { minWickProtrusionPct: p.minWickProtrusionPct },
+          proposalConfig: { targetDistanceMultiplier: p.targetDistanceMultiplier },
+        });
+        trades = result.tradeLog.map((t) => ({
+          openedAt: t.openedAt,
+          closedAt: t.closedAt,
+          side: t.side,
+          entry: t.entry,
+          realisedPnl: t.realisedPnl,
+          outcome: t.outcome,
+        }));
+      }
+
+      res.json({ candles, levels, trades });
     }
   );
 

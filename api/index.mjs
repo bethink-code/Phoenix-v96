@@ -3506,7 +3506,46 @@ function registerRoutes(app2) {
         mergeTolerancePct: seeded.mergeTolerancePct,
         minTouches: seeded.minTouches
       });
-      res.json({ candles, levels });
+      const iterations = await storage.listAutoresearchIterations(id);
+      const bestIteration = iterations.filter((i) => i.trades > 0 && Number(i.netPnl) > 0).sort((a, b) => Number(b.netPnl) - Number(a.netPnl))[0];
+      let trades2 = [];
+      if (bestIteration) {
+        const p = {
+          ...DEFAULT_PARAMS,
+          ...bestIteration.params
+        };
+        const result = runBacktest({
+          candles,
+          regime: session2.regime,
+          startingCapital: 1e4,
+          warmupCandles: 100,
+          config: {
+            riskPercentPerTrade: 1,
+            minRiskRewardRatio: p.minRiskRewardRatio,
+            minLevelRank: p.minLevelRank,
+            maxConcurrentPositions: p.maxConcurrentPositions,
+            dailyDrawdownLimitPct: 3,
+            weeklyDrawdownLimitPct: 6
+          },
+          levelConfig: {
+            swingLookback: p.swingLookback,
+            equalTolerancePct: p.equalTolerancePct,
+            mergeTolerancePct: p.mergeTolerancePct,
+            minTouches: p.minTouches
+          },
+          sweepConfig: { minWickProtrusionPct: p.minWickProtrusionPct },
+          proposalConfig: { targetDistanceMultiplier: p.targetDistanceMultiplier }
+        });
+        trades2 = result.tradeLog.map((t) => ({
+          openedAt: t.openedAt,
+          closedAt: t.closedAt,
+          side: t.side,
+          entry: t.entry,
+          realisedPnl: t.realisedPnl,
+          outcome: t.outcome
+        }));
+      }
+      res.json({ candles, levels, trades: trades2 });
     }
   );
   app2.post(

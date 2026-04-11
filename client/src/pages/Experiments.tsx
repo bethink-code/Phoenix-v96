@@ -1392,8 +1392,16 @@ interface ChartLevel {
   firstSeenAt: number;
   lastSeenAt: number;
 }
+interface ChartTrade {
+  openedAt: number;
+  closedAt: number;
+  side: "long" | "short";
+  entry: number;
+  realisedPnl: number;
+  outcome: "target" | "stop" | "timeout";
+}
 function ChartView({ sessionId }: { sessionId: string }) {
-  const q = useQuery<{ candles: ChartCandle[]; levels: ChartLevel[] }>({
+  const q = useQuery<{ candles: ChartCandle[]; levels: ChartLevel[]; trades: ChartTrade[] }>({
     queryKey: [`/api/autoresearch/sessions/${sessionId}/candles`],
   });
 
@@ -1408,7 +1416,8 @@ function ChartView({ sessionId }: { sessionId: string }) {
       </div>
     );
   }
-  const { candles, levels } = q.data;
+  const { candles, levels, trades } = q.data;
+  const winningTrades = trades.filter((t) => t.realisedPnl > 0);
   if (candles.length === 0) {
     return <div className="text-xs text-muted-foreground">No candles in window.</div>;
   }
@@ -1538,10 +1547,11 @@ function ChartView({ sessionId }: { sessionId: string }) {
   return (
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground">
-        {candles.length} candles · {pools.length} liquidity pools ({pools.filter((p) => p.sweepIdx === null).length} live, {pools.filter((p) => p.sweepIdx !== null).length} swept).
+        {candles.length} candles · {pools.length} liquidity pools ({pools.filter((p) => p.sweepIdx === null).length} live, {pools.filter((p) => p.sweepIdx !== null).length} swept) · {winningTrades.length} winning trades from best iteration.
         Each box anchors at the candle that formed the pool and extends forward
         until price sweeps through it. Open boxes are still-live targets;
-        faded boxes have already been taken.
+        faded boxes have already been taken. White dots mark profitable
+        entries from the highest-P&L iteration.
       </p>
       <div className="overflow-hidden rounded border border-border/40 bg-card/30">
         <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full">
@@ -1620,6 +1630,26 @@ function ChartView({ sessionId }: { sessionId: string }) {
                   fill={color}
                 />
               </g>
+            );
+          })}
+          {/* Winning trades from the best iteration — white dots at
+              the entry candle. Sits on top of everything so the
+              operator can see exactly where the strategy fired. */}
+          {winningTrades.map((t, i) => {
+            const idx = candleByTime.get(t.openedAt);
+            if (idx === undefined) return null;
+            const x = xFor(idx);
+            const y = yFor(t.entry);
+            return (
+              <circle
+                key={`trade-${i}`}
+                cx={x}
+                cy={y}
+                r={3}
+                fill="#ffffff"
+                stroke="#000000"
+                strokeWidth={0.5}
+              />
             );
           })}
         </svg>
