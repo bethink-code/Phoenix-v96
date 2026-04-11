@@ -974,12 +974,12 @@ export function SessionDetailView({
     : null;
   const pairLabel = pair ? `${pair.baseAsset}${pair.quoteAsset}` : "—";
 
-  // Successes and best P&L — computed from the iterations using the
-  // same rule as the Successes sub-tab: trades > baseline.trades AND
-  // netPnl > 0. Best P&L is the max netPnl among successes.
-  const baselineTrades = iterations.find((i) => i.idx === 0)?.trades ?? 0;
+  // Successes and best P&L — any iteration that actually traded AND
+  // was profitable counts. Same rule used by the Successes sub-tab
+  // and by the top-25% highlight on iteration rows, so all three
+  // surfaces agree on what "worth looking at" means.
   const successes = iterations.filter(
-    (i) => i.trades > baselineTrades && Number(i.netPnl) > 0
+    (i) => i.trades > 0 && Number(i.netPnl) > 0
   );
   const successCount = successes.length;
   const bestPnl =
@@ -1239,10 +1239,12 @@ function SessionViewContent({
   return null;
 }
 
-// "Successes" — filtered iteration list. A success is an iteration
-// that produced MORE trades than the baseline AND made money. Sorted
-// by net P&L descending so the strongest candidates lead. Pure data
-// filter, no opinion.
+// "Successes" — filtered iteration list. A success is any iteration
+// that actually traded AND was profitable (trades > 0 AND netPnl > 0).
+// Sorted by net P&L descending so the strongest candidates lead.
+// Pure data filter, no opinion. Matches the rule in SessionDetailView's
+// stats counter and the top-25% highlight on iteration rows so all
+// three surfaces agree on what "worth looking at" means.
 function SuccessesView({
   iterations,
   onContinueFromIteration,
@@ -1250,23 +1252,21 @@ function SuccessesView({
   iterations: ARIteration[];
   onContinueFromIteration?: (it: ARIteration) => void;
 }) {
-  const baseline = iterations.find((i) => i.idx === 0);
-  const baselineTrades = baseline ? baseline.trades : 0;
   const successes = iterations
-    .filter((i) => i.trades > baselineTrades && Number(i.netPnl) > 0)
+    .filter((i) => i.trades > 0 && Number(i.netPnl) > 0)
     .sort((a, b) => Number(b.netPnl) - Number(a.netPnl));
 
   if (successes.length === 0) {
     return (
       <div className="rounded border border-border/40 bg-card/30 p-4 text-xs text-muted-foreground">
-        No successes yet. A success is an iteration that produced more trades than the baseline ({baselineTrades}) AND made money. None of the {iterations.length} iterations met both criteria.
+        No successes yet. A success is an iteration that actually traded AND was profitable. None of the {iterations.length} iterations met both criteria.
       </div>
     );
   }
   return (
     <div className="space-y-2">
       <p className="text-xs text-muted-foreground">
-        {successes.length} of {iterations.length} iterations did more trades than baseline ({baselineTrades}) AND were profitable. Sorted by net P&L descending.
+        {successes.length} of {iterations.length} iterations traded profitably. Sorted by net P&L descending.
       </p>
       <IterationsTable
         iterations={successes}
