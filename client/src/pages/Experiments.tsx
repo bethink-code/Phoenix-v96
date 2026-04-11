@@ -1389,6 +1389,8 @@ interface ChartLevel {
   price: number;
   rank: number;
   touches: number;
+  firstSeenAt: number;
+  lastSeenAt: number;
 }
 function ChartView({ sessionId }: { sessionId: string }) {
   const q = useQuery<{ candles: ChartCandle[]; levels: ChartLevel[] }>({
@@ -1437,53 +1439,67 @@ function ChartView({ sessionId }: { sessionId: string }) {
   // Filter out unreachable levels — nothing to draw if it's off-screen
   const visibleLevels = levels.filter((l) => l.price >= yMin && l.price <= yMax);
 
-  // Liquidity pools — clusters of nearby levels. A pool is where stops
-  // pile up: multiple levels (swing high + equal high + prev day high)
-  // landing within ~0.3% of each other means real liquidity, not a
-  // single random swing. Drawn as semi-transparent filled bands behind
-  // the level lines so the operator sees the *zone* the strategy is
-  // hunting, not just isolated ticks.
-  const POOL_TOLERANCE_PCT = 0.003; // 0.3%
-  const sortedLevels = [...visibleLevels].sort((a, b) => a.price - b.price);
-  type Pool = { low: number; high: number; side: "support" | "resistance" | "mixed"; size: number; rank: number };
-  const pools: Pool[] = [];
-  let cluster: typeof sortedLevels = [];
-  const flushCluster = () => {
-    if (cluster.length < 2) {
-      // 1-level "clusters" only count if the level itself is strong
-      if (cluster.length === 1 && cluster[0].rank >= 4) {
-        const l = cluster[0];
-        const pad = l.price * POOL_TOLERANCE_PCT * 0.5;
-        pools.push({ low: l.price - pad, high: l.price + pad, side: l.side, size: 1, rank: l.rank });
-      }
-      cluster = [];
-      return;
-    }
-    const lows = cluster.map((l) => l.price);
-    const sides = new Set(cluster.map((l) => l.side));
-    pools.push({
-      low: Math.min(...lows),
-      high: Math.max(...lows),
-      side: sides.size === 1 ? (cluster[0].side as "support" | "resistance") : "mixed",
-      size: cluster.length,
-      rank: Math.max(...cluster.map((l) => l.rank)),
-    });
-    cluster = [];
+  // Liquidity pools, LuxAlgo style. Each level becomes a time-anchored
+  // box: starts at the candle that created the swing (firstSeenAt),
+  // extends forward through time, closes at the candle that swept it
+  // (price wicked through), or remains open to the right edge if
+  // untouched. Resistance pools sweep when a candle high crosses the
+  // level; support pools sweep when a candle low crosses it.
+  //
+  // This shows the operator three things at once:
+  //   - WHEN liquidity formed
+  //   - WHETHER it got taken
+  //   - WHICH pools are still live (open boxes = unfilled targets)
+  const candleByTime = new Map<number, number>();
+  candles.forEach((c, i) => candleByTime.set(c.openTime, i));
+  type Pool = {
+    levelId: string;
+    side: "support" | "resistance";
+    price: number;
+    rank: number;
+    anchorIdx: number;
+    sweepIdx: number | null;
   };
-  for (const lvl of sortedLevels) {
-    if (cluster.length === 0) {
-      cluster.push(lvl);
-      continue;
+  const POOL_THICKNESS_PCT = 0.0015; // 0.15% half-thickness for visibility
+  const findAnchorIdx = (firstSeenAt: number): number => {
+    // Exact match first; fall back to nearest candle if the level's
+    // anchor lies between bars (can happen with prev-day/prev-week levels).
+    const exact = candleByTime.get(firstSeenAt);
+    if (exact !== undefined) return exact;
+    let best = 0;
+    let bestDelta = Infinity;
+    for (let i = 0; i < candles.length; i++) {
+      const d = Math.abs(candles[i].openTime - firstSeenAt);
+      if (d < bestDelta) {
+        bestDelta = d;
+        best = i;
+      }
     }
-    const last = cluster[cluster.length - 1];
-    if ((lvl.price - last.price) / last.price <= POOL_TOLERANCE_PCT) {
-      cluster.push(lvl);
-    } else {
-      flushCluster();
-      cluster.push(lvl);
+    return best;
+  };
+  const pools: Pool[] = visibleLevels.map((l) => {
+    const anchorIdx = findAnchorIdx(l.firstSeenAt);
+    let sweepIdx: number | null = null;
+    for (let i = anchorIdx + 1; i < candles.length; i++) {
+      const c = candles[i];
+      if (l.side === "resistance" && c.high >= l.price) {
+        sweepIdx = i;
+        break;
+      }
+      if (l.side === "support" && c.low <= l.price) {
+        sweepIdx = i;
+        break;
+      }
     }
-  }
-  flushCluster();
+    return {
+      levelId: l.id,
+      side: l.side,
+      price: l.price,
+      rank: l.rank,
+      anchorIdx,
+      sweepIdx,
+    };
+  });
 
   const xFor = (i: number) => padL + (i / Math.max(candles.length - 1, 1)) * innerW;
   const yFor = (price: number) => padT + ((yMax - price) / ySpan) * innerH;
@@ -1498,61 +1514,61 @@ function ChartView({ sessionId }: { sessionId: string }) {
   return (
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground">
-        {candles.length} candles · {pools.length} liquidity pools (from {visibleLevels.length} levels).
-        Shaded bands are pools — clusters of nearby levels where stops
-        pile up, the actual zones the strategy hunts. Stronger fill =
-        more levels confluencing in that zone.
+        {candles.length} candles · {pools.length} liquidity pools ({pools.filter((p) => p.sweepIdx === null).length} live, {pools.filter((p) => p.sweepIdx !== null).length} swept).
+        Each box anchors at the candle that formed the pool and extends forward
+        until price sweeps through it. Open boxes are still-live targets;
+        faded boxes have already been taken.
       </p>
       <div className="overflow-hidden rounded border border-border/40 bg-card/30">
         <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full">
-          {/* Liquidity pools — drawn first as the deepest layer so
-              level lines and candles sit on top */}
-          {pools.map((p, i) => {
-            const yTop = yFor(p.high);
-            const yBot = yFor(p.low);
-            // Min visible thickness so single-level pools are still readable
+          {/* Liquidity pool boxes — each anchored to the swing candle
+              that formed it, extending right until swept (or to chart
+              edge if still live) */}
+          {pools.map((p) => {
+            const xLeft = xFor(p.anchorIdx);
+            const xRight = p.sweepIdx !== null ? xFor(p.sweepIdx) : padL + innerW;
+            const w = Math.max(1, xRight - xLeft);
+            const halfThickness = p.price * POOL_THICKNESS_PCT;
+            const yTop = yFor(p.price + halfThickness);
+            const yBot = yFor(p.price - halfThickness);
             const h = Math.max(2, yBot - yTop);
-            const fill =
-              p.side === "resistance"
-                ? "#f87171"
-                : p.side === "support"
-                ? "#34d399"
-                : "#fbbf24";
-            // Fill opacity scales with cluster size — bigger pool = more obvious
-            const fillOpacity = Math.min(0.32, 0.1 + p.size * 0.05);
+            const color = p.side === "resistance" ? "#f87171" : "#34d399";
+            // Live pools fully visible, swept pools faded
+            const isLive = p.sweepIdx === null;
+            const fillOpacity = isLive ? 0.22 : 0.08;
+            const strokeOpacity = isLive ? 0.7 : 0.25;
             return (
-              <rect
-                key={`pool-${i}`}
-                x={padL}
-                y={yTop}
-                width={innerW}
-                height={h}
-                fill={fill}
-                opacity={fillOpacity}
-              />
-            );
-          })}
-          {/* Pool price labels — one per pool on the right edge */}
-          {pools.map((p, i) => {
-            const yMid = yFor((p.high + p.low) / 2);
-            const color =
-              p.side === "resistance"
-                ? "#f87171"
-                : p.side === "support"
-                ? "#34d399"
-                : "#fbbf24";
-            return (
-              <text
-                key={`label-${i}`}
-                x={padL + innerW + 4}
-                y={yMid + 3}
-                fontSize={9}
-                fill={color}
-                opacity={0.8}
-                fontFamily="monospace"
-              >
-                {fmtPrice((p.high + p.low) / 2)}
-              </text>
+              <g key={p.levelId}>
+                <rect
+                  x={xLeft}
+                  y={yTop}
+                  width={w}
+                  height={h}
+                  fill={color}
+                  opacity={fillOpacity}
+                />
+                <line
+                  x1={xLeft}
+                  x2={xRight}
+                  y1={yFor(p.price)}
+                  y2={yFor(p.price)}
+                  stroke={color}
+                  strokeWidth={1}
+                  opacity={strokeOpacity}
+                />
+                {isLive && (
+                  <text
+                    x={padL + innerW + 4}
+                    y={yFor(p.price) + 3}
+                    fontSize={9}
+                    fill={color}
+                    opacity={0.85}
+                    fontFamily="monospace"
+                  >
+                    {fmtPrice(p.price)}
+                  </text>
+                )}
+              </g>
             );
           })}
           {/* Candles */}
