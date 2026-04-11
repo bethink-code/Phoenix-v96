@@ -1421,15 +1421,21 @@ function ChartView({ sessionId }: { sessionId: string }) {
   const innerW = W - padL - padR;
   const innerH = H - padT - padB;
 
+  // Y scale is driven by candle range only — never by levels. Levels
+  // outside the candle range are just noise (price can't reach them
+  // in this window so the strategy can't trade them) and including
+  // them squashes the actual price action into a thin band.
   const lows = candles.map((c) => c.low);
   const highs = candles.map((c) => c.high);
-  const minPrice = Math.min(...lows, ...levels.map((l) => l.price));
-  const maxPrice = Math.max(...highs, ...levels.map((l) => l.price));
+  const minPrice = Math.min(...lows);
+  const maxPrice = Math.max(...highs);
   const priceRange = maxPrice - minPrice || 1;
-  // 2% headroom so wicks don't kiss the edge
-  const yMin = minPrice - priceRange * 0.02;
-  const yMax = maxPrice + priceRange * 0.02;
+  // 5% headroom so wicks don't kiss the edge
+  const yMin = minPrice - priceRange * 0.05;
+  const yMax = maxPrice + priceRange * 0.05;
   const ySpan = yMax - yMin;
+  // Filter out unreachable levels — nothing to draw if it's off-screen
+  const visibleLevels = levels.filter((l) => l.price >= yMin && l.price <= yMax);
 
   const xFor = (i: number) => padL + (i / Math.max(candles.length - 1, 1)) * innerW;
   const yFor = (price: number) => padT + ((yMax - price) / ySpan) * innerH;
@@ -1447,15 +1453,16 @@ function ChartView({ sessionId }: { sessionId: string }) {
   return (
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground">
-        {candles.length} candles · {levels.length} liquidity levels identified.
+        {candles.length} candles · {visibleLevels.length} of {levels.length} liquidity levels in price range.
         Horizontal lines mark where the strategy sees liquidity. Stronger
         lines = higher confluence (more touches / multiple level types
-        agreeing on the same price).
+        agreeing on the same price). Levels outside the candle range are
+        hidden — price can't reach them in this window.
       </p>
       <div className="overflow-hidden rounded border border-border/40 bg-card/30">
         <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full">
           {/* Liquidity level lines, drawn first so candles sit on top */}
-          {levels.map((lvl) => {
+          {visibleLevels.map((lvl) => {
             const y = yFor(lvl.price);
             const color = lvl.side === "resistance" ? "#f87171" : "#34d399";
             return (
