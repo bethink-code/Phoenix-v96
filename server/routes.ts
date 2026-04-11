@@ -29,6 +29,8 @@ import { db } from "./db";
 import { autoresearchSessions } from "../shared/schema";
 import { eq } from "drizzle-orm";
 import { isOpenAIConfigured } from "./modules/autoresearch/openai";
+import { identifyLevels } from "./modules/strategy/levels";
+import { DEFAULT_PARAMS } from "./modules/autoresearch/prompt";
 import {
   DEFAULT_SYSTEM_PROMPT,
   DEFAULT_DISCOVER_PROMPT,
@@ -658,6 +660,45 @@ export function registerRoutes(app: Express) {
       }
       const iterations = await storage.listAutoresearchIterations(id);
       res.json(iterations);
+    }
+  );
+
+  // Candles + identified liquidity levels for a session. Same dataset
+  // the orchestrator ran the LLM against, so the operator can eyeball
+  // whether there are real liquidity pools to trade or just a one-way
+  // ramp. Levels are computed with the session's seed params (or
+  // DEFAULT_PARAMS) so the picture matches what the strategy actually
+  // sees, not a generic config.
+  app.get(
+    "/api/autoresearch/sessions/:id/candles",
+    isAuthenticated,
+    async (req, res) => {
+      const id = pid(req, "id");
+      const u = getUser(req);
+      const tenant = await storage.getOrCreateTenantForUser(u.id);
+      const session = await storage.getAutoresearchSession(id);
+      if (!session || session.tenantId !== tenant.id) {
+        return res.status(404).json({ error: "not_found" });
+      }
+      const pair = await storage.getMarketPair(session.pairId);
+      if (!pair) return res.status(404).json({ error: "pair_not_found" });
+      const symbol = `${pair.baseAsset}${pair.quoteAsset}`;
+      const candles = await getBinance().fetchCandles({
+        symbol,
+        timeframe: session.timeframe as Timeframe,
+        limit: session.lookbackBars,
+      });
+      const seeded = {
+        ...DEFAULT_PARAMS,
+        ...((session.seedParams as Partial<typeof DEFAULT_PARAMS>) ?? {}),
+      };
+      const levels = identifyLevels(candles, {
+        swingLookback: seeded.swingLookback,
+        equalTolerancePct: seeded.equalTolerancePct,
+        mergeTolerancePct: seeded.mergeTolerancePct,
+        minTouches: seeded.minTouches,
+      });
+      res.json({ candles, levels });
     }
   );
 

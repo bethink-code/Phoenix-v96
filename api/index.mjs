@@ -3477,6 +3477,38 @@ function registerRoutes(app2) {
       res.json(iterations);
     }
   );
+  app2.get(
+    "/api/autoresearch/sessions/:id/candles",
+    isAuthenticated,
+    async (req, res) => {
+      const id = pid(req, "id");
+      const u = getUser(req);
+      const tenant = await storage.getOrCreateTenantForUser(u.id);
+      const session2 = await storage.getAutoresearchSession(id);
+      if (!session2 || session2.tenantId !== tenant.id) {
+        return res.status(404).json({ error: "not_found" });
+      }
+      const pair = await storage.getMarketPair(session2.pairId);
+      if (!pair) return res.status(404).json({ error: "pair_not_found" });
+      const symbol = `${pair.baseAsset}${pair.quoteAsset}`;
+      const candles = await getBinance().fetchCandles({
+        symbol,
+        timeframe: session2.timeframe,
+        limit: session2.lookbackBars
+      });
+      const seeded = {
+        ...DEFAULT_PARAMS,
+        ...session2.seedParams ?? {}
+      };
+      const levels = identifyLevels(candles, {
+        swingLookback: seeded.swingLookback,
+        equalTolerancePct: seeded.equalTolerancePct,
+        mergeTolerancePct: seeded.mergeTolerancePct,
+        minTouches: seeded.minTouches
+      });
+      res.json({ candles, levels });
+    }
+  );
   app2.post(
     "/api/autoresearch/iterations/:id/install",
     isAuthenticated,

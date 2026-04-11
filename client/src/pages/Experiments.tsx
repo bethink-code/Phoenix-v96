@@ -953,7 +953,7 @@ interface ARIteration {
   createdAt: string;
 }
 
-export type SessionView = "trades" | "score" | "iterations" | "successes" | "convergence";
+export type SessionView = "trades" | "score" | "iterations" | "successes" | "convergence" | "chart";
 
 // Shared layout used by both the live AutoresearchSurface and the
 // dedicated SessionDetail page. Takes a session + iterations and renders
@@ -1228,6 +1228,7 @@ function SessionViewTabs({
     { key: "iterations", label: "Iterations" },
     { key: "successes", label: "Successes" },
     { key: "convergence", label: "Convergence" },
+    { key: "chart", label: "Chart" },
   ];
   return (
     <div className="flex gap-1 border-b border-border">
@@ -1323,6 +1324,9 @@ function SessionViewContent({
   if (view === "convergence") {
     return <ConvergenceView iterations={iterations} />;
   }
+  if (view === "chart") {
+    return <ChartView sessionId={session.id} />;
+  }
   return null;
 }
 
@@ -1359,6 +1363,151 @@ function SuccessesView({
         iterations={successes}
         onContinueFromIteration={onContinueFromIteration}
       />
+    </div>
+  );
+}
+
+// Chart sub-tab — candles + identified liquidity levels for the
+// session's data window. Deliberately minimal: wicks + bodies + the
+// horizontal lines the strategy thinks are liquidity. No volume, no
+// MAs, no indicators. The whole point is "do real liquidity pools
+// exist on this pair/window, or is this a one-way ramp where the
+// strategy has nothing to trade?"
+interface ChartCandle {
+  openTime: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  closeTime: number;
+}
+interface ChartLevel {
+  id: string;
+  type: string;
+  side: "support" | "resistance";
+  price: number;
+  rank: number;
+  touches: number;
+}
+function ChartView({ sessionId }: { sessionId: string }) {
+  const q = useQuery<{ candles: ChartCandle[]; levels: ChartLevel[] }>({
+    queryKey: [`/api/autoresearch/sessions/${sessionId}/candles`],
+  });
+
+  if (q.isLoading) {
+    return <div className="text-xs text-muted-foreground">Loading candles…</div>;
+  }
+  if (q.isError || !q.data) {
+    return <div className="text-xs text-red-400">Failed to load chart data.</div>;
+  }
+  const { candles, levels } = q.data;
+  if (candles.length === 0) {
+    return <div className="text-xs text-muted-foreground">No candles in window.</div>;
+  }
+
+  // Layout — fixed viewBox, scales to container width via CSS.
+  const W = 1200;
+  const H = 480;
+  const padL = 8;
+  const padR = 64; // room for the price label on the right
+  const padT = 12;
+  const padB = 24;
+  const innerW = W - padL - padR;
+  const innerH = H - padT - padB;
+
+  const lows = candles.map((c) => c.low);
+  const highs = candles.map((c) => c.high);
+  const minPrice = Math.min(...lows, ...levels.map((l) => l.price));
+  const maxPrice = Math.max(...highs, ...levels.map((l) => l.price));
+  const priceRange = maxPrice - minPrice || 1;
+  // 2% headroom so wicks don't kiss the edge
+  const yMin = minPrice - priceRange * 0.02;
+  const yMax = maxPrice + priceRange * 0.02;
+  const ySpan = yMax - yMin;
+
+  const xFor = (i: number) => padL + (i / Math.max(candles.length - 1, 1)) * innerW;
+  const yFor = (price: number) => padT + ((yMax - price) / ySpan) * innerH;
+  const candleW = Math.max(1, (innerW / candles.length) * 0.6);
+
+  const fmtPrice = (n: number) => {
+    if (n >= 1000) return n.toFixed(0);
+    if (n >= 1) return n.toFixed(2);
+    return n.toFixed(4);
+  };
+
+  // Rank → opacity. Higher rank = more confluence = stronger pool.
+  const opacityForRank = (r: number) => Math.min(0.85, 0.25 + r * 0.15);
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-muted-foreground">
+        {candles.length} candles · {levels.length} liquidity levels identified.
+        Horizontal lines mark where the strategy sees liquidity. Stronger
+        lines = higher confluence (more touches / multiple level types
+        agreeing on the same price).
+      </p>
+      <div className="overflow-hidden rounded border border-border/40 bg-card/30">
+        <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full">
+          {/* Liquidity level lines, drawn first so candles sit on top */}
+          {levels.map((lvl) => {
+            const y = yFor(lvl.price);
+            const color = lvl.side === "resistance" ? "#f87171" : "#34d399";
+            return (
+              <g key={lvl.id}>
+                <line
+                  x1={padL}
+                  x2={padL + innerW}
+                  y1={y}
+                  y2={y}
+                  stroke={color}
+                  strokeWidth={1}
+                  strokeDasharray="3 3"
+                  opacity={opacityForRank(lvl.rank)}
+                />
+                <text
+                  x={padL + innerW + 4}
+                  y={y + 3}
+                  fontSize={9}
+                  fill={color}
+                  opacity={opacityForRank(lvl.rank)}
+                  fontFamily="monospace"
+                >
+                  {fmtPrice(lvl.price)}
+                </text>
+              </g>
+            );
+          })}
+          {/* Candles */}
+          {candles.map((c, i) => {
+            const x = xFor(i);
+            const isUp = c.close >= c.open;
+            const color = isUp ? "#10b981" : "#ef4444";
+            const bodyTop = yFor(Math.max(c.open, c.close));
+            const bodyBottom = yFor(Math.min(c.open, c.close));
+            const bodyHeight = Math.max(1, bodyBottom - bodyTop);
+            return (
+              <g key={i}>
+                <line
+                  x1={x}
+                  x2={x}
+                  y1={yFor(c.high)}
+                  y2={yFor(c.low)}
+                  stroke={color}
+                  strokeWidth={1}
+                />
+                <rect
+                  x={x - candleW / 2}
+                  y={bodyTop}
+                  width={candleW}
+                  height={bodyHeight}
+                  fill={color}
+                />
+              </g>
+            );
+          })}
+        </svg>
+      </div>
     </div>
   );
 }
