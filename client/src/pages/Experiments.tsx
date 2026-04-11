@@ -730,36 +730,45 @@ function SessionHistoryCard({ session }: { session: ARSession }) {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="block w-full p-4 text-left transition-colors hover:bg-foreground/[0.02]"
+        className="block w-full p-5 text-left transition-colors hover:bg-foreground/[0.02]"
       >
-        {/* Title row: goal + status badge */}
-        <div className="flex items-baseline justify-between gap-3">
-          <h3 className="min-w-0 flex-1 truncate text-base font-semibold text-foreground">
-            {session.goal}
+        {/* ACTION — biggest text on the card. Plain language, combines
+            outcome + recommendation. This is what the operator needs to
+            read; everything else is supporting context. */}
+        <div className="flex items-start justify-between gap-3">
+          <h3 className="min-w-0 flex-1 text-lg font-semibold leading-snug text-foreground">
+            {verdict.action}
           </h3>
           <Badge className={cn("shrink-0 text-[10px]", sessionStatusClass(session.status))}>
             {session.status}
           </Badge>
         </div>
 
-        {/* Key finding — headline first, then the actionable body. The
-            body carries the recommendation ("Try a different timeframe…")
-            which is the part the operator actually needs to read, so it
-            stays visible even in the collapsed state. The expanded body
-            below shows only supporting data (chart + params), no duplicate
-            verdict text. */}
-        <p className="mt-2 text-sm font-medium text-foreground">{verdict.headline}</p>
-        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{verdict.body}</p>
+        {/* Optional supporting detail — smaller, grey */}
+        {verdict.detail && (
+          <p className="mt-1 text-xs text-muted-foreground">{verdict.detail}</p>
+        )}
 
-        {/* Sparkline — visible at-a-glance score-over-iterations shape */}
+        {/* Sparkline — visible at-a-glance trade-count-over-iterations
+            shape. Trades is the more informative metric than score for
+            diagnostic experiments (score is 0 unless trades >= 3, so a
+            score sparkline is a flat line by definition for "no trades"
+            sessions). */}
         {iterations.length > 0 && (
-          <div className="mt-2">
-            <Sparkline iterations={iterations} />
+          <div className="mt-3">
+            <Sparkline iterations={iterations} metric="trades" />
           </div>
         )}
 
+        {/* Goal — context, not headline. Small and grey because the
+            operator already knows what they asked; the answer is what
+            they care about. */}
+        <p className="mt-3 text-[11px] text-muted-foreground/70">
+          Goal: {session.goal}
+        </p>
+
         {/* Metadata strip */}
-        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground/70">
+        <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground/70">
           <span>{new Date(session.startedAt).toLocaleDateString()}</span>
           <span>·</span>
           <span>{session.timeframe} · {session.regime}</span>
@@ -777,11 +786,17 @@ function SessionHistoryCard({ session }: { session: ARSession }) {
 
       {/* Expanded body — supporting data only. The verdict text is
           already visible in the collapsed header above; expanding adds
-          the full chart with axes and the params. */}
+          both charts (trades + score) and the params.
+          Trades chart first because it's the more useful signal for
+          diagnostic experiments. Score second for sessions where the
+          goal is profit-based. */}
       {open && (
-        <div className="border-t border-border/40 p-4">
+        <div className="space-y-4 border-t border-border/40 p-4">
           {iterations.length > 0 && (
-            <ScoreChart iterations={iterations} />
+            <>
+              <IterationChart iterations={iterations} metric="trades" />
+              <IterationChart iterations={iterations} metric="score" />
+            </>
           )}
 
           {verdict.foundWinner && verdict.bestIter && verdict.baseline && (
@@ -1240,13 +1255,14 @@ function StartSessionForm() {
 // (if any improvement happened) so the operator can read off concrete
 // values to copy into Settings if they want.
 
-// Pure helper — computes the verdict for a session. Shared between the
-// collapsed history card (uses headline + tone) and the expanded body
-// (uses headline + body + bestIter for params).
+// Pure helper — computes the verdict for a session. Returns a plain-language
+// `action` sentence that's the headline of every history card. The action
+// is what the operator can DO with the result. Everything else (goal text,
+// metadata, charts) is supporting context.
 interface Verdict {
   tone: "good" | "neutral" | "bad";
-  headline: string;
-  body: string;
+  action: string; // BIG plain-language sentence — outcome + recommendation
+  detail?: string; // optional supporting line, smaller
   foundWinner: boolean;
   bestIter: ARIteration | null;
   baseline: ARIteration | null;
@@ -1257,39 +1273,40 @@ function computeVerdict(session: ARSession, iterations: ARIteration[]): Verdict 
   const bestIter = iterations.find((i) => i.id === session.bestIterationId) ?? null;
   const baseline = iterations.find((i) => i.idx === 0) ?? null;
   const foundWinner = bestScore > 0 && !!bestIter && bestIter.idx > 0;
-  const noTradesFound = bestScore === 0 || (!!bestIter && bestIter.trades === 0);
+  const maxTrades = Math.max(0, ...iterations.map((i) => i.trades));
+  const noTradesFound = maxTrades === 0;
 
   let tone: Verdict["tone"] = "neutral";
-  let headline: string;
-  let body: string;
+  let action: string;
+  let detail: string | undefined;
 
   if (session.status === "error") {
     tone = "bad";
-    headline = "Session errored";
-    body = session.errorMessage ?? "Unknown error.";
+    action = "Session crashed before it could finish. Check the error and re-run.";
+    detail = session.errorMessage ?? undefined;
   } else if (foundWinner) {
     tone = "good";
-    const baseScore = baseline ? Number(baseline.score) : 0;
-    const delta = bestScore - baseScore;
-    headline = `Found a winning config — score ${bestScore.toFixed(4)} (+${delta.toFixed(4)} over baseline).`;
-    body = `Iteration #${bestIter!.idx + 1} was the best. ${bestIter!.trades} trades, ${Math.round(Number(bestIter!.winRate) * 100)}% wins, ${Number(bestIter!.netPnl).toFixed(2)} net PnL.`;
+    const t = bestIter!.trades;
+    const wr = Math.round(Number(bestIter!.winRate) * 100);
+    const pnl = Number(bestIter!.netPnl);
+    action = `Use the config from iteration #${bestIter!.idx + 1}. ${t} trades, ${wr}% wins, ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} net PnL.`;
+    detail = `Score ${bestScore.toFixed(4)} vs baseline ${(baseline ? Number(baseline.score) : 0).toFixed(4)}.`;
   } else if (noTradesFound) {
     tone = "bad";
-    headline = "No iteration produced any trades.";
-    body =
-      "Across all iterations the search didn't find a config that opened a single trade. The strategy as currently implemented may not be compatible with this pair/timeframe/regime combination. Try a different timeframe (4h or daily often works better than 1h on lower-cap tokens), a different regime (ranging instead of trending), or a different pair.";
+    action = `This pair doesn't trade on ${session.timeframe} ${session.regime}. Try 4h or daily, switch regime to ranging, or pick a different pair.`;
+    detail = "Across all iterations, not a single setup made it through the strategy pipeline.";
   } else {
+    // Some trades happened but score never beat baseline.
     tone = "neutral";
-    headline = `No improvement over baseline (best score ${bestScore.toFixed(4)}).`;
-    body =
-      "The baseline already had the best score. The LLM tried variants but none beat it. You could run another session with more iterations, or change the goal/regime to widen the search.";
+    action = `Best you can do here is the current default (${maxTrades} trades, score ${bestScore.toFixed(4)}). Try another regime or widen the search.`;
+    detail = "The LLM tried variants but none scored higher than the baseline.";
   }
 
   if (session.status === "aborted") {
-    headline = `${headline} (stopped early at iteration ${session.iterationsRun}/${session.maxIterations})`;
+    detail = `${detail ?? ""}${detail ? " " : ""}Stopped early at iteration ${session.iterationsRun}/${session.maxIterations}.`;
   }
 
-  return { tone, headline, body, foundWinner, bestIter, baseline };
+  return { tone, action, detail, foundWinner, bestIter, baseline };
 }
 
 function toneToClass(tone: Verdict["tone"]): string {
@@ -1298,71 +1315,6 @@ function toneToClass(tone: Verdict["tone"]): string {
     : tone === "bad"
       ? "border-red-500/40 bg-red-500/5"
       : "border-amber-500/40 bg-amber-500/5";
-}
-
-function SessionResult({
-  session,
-  iterations,
-}: {
-  session: ARSession;
-  iterations: ARIteration[];
-}) {
-  const { tone, headline, body, foundWinner, bestIter, baseline } = computeVerdict(
-    session,
-    iterations
-  );
-  const toneClass = toneToClass(tone);
-
-  return (
-    <div className={cn("rounded-lg border p-6", toneClass)}>
-      {/* RESULT — verdict headline + explanation. This is the gold.
-          Everything else is supporting evidence. */}
-      <h2 className="text-xl font-semibold leading-tight text-foreground">
-        {headline}
-      </h2>
-      <p className="mt-3 text-sm leading-relaxed text-muted-foreground">{body}</p>
-
-      {/* Tiny metadata footer line so the operator can scan when/what */}
-      <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground/70">
-        <span>{new Date(session.startedAt).toLocaleString()}</span>
-        <span>·</span>
-        <span>{session.timeframe} · {session.lookbackBars} bars · {session.regime}</span>
-        <span>·</span>
-        <span>{session.iterationsRun}/{session.maxIterations} iterations</span>
-        <span>·</span>
-        <span>{session.model}</span>
-        <span>·</span>
-        <span>${Number(session.totalCostUsd).toFixed(2)}</span>
-      </div>
-
-      {/* GRAPH — single visual telling the search story at a glance.
-          Second in importance, after the verdict itself. */}
-      {iterations.length > 0 && (
-        <div className="mt-5">
-          <ScoreChart iterations={iterations} />
-        </div>
-      )}
-
-      {/* PARAMS — third in importance. The actual values for reference.
-          Side-by-side diff when there's a winner; flat grid otherwise. */}
-      {foundWinner && bestIter && baseline && (
-        <div className="mt-5 rounded border border-border/40 bg-background/40 p-3">
-          <div className="mb-2 text-[10px] uppercase tracking-wide text-muted-foreground">
-            What changed
-          </div>
-          <ParamDiffTable baseline={baseline.params} winner={bestIter.params} />
-        </div>
-      )}
-      {!foundWinner && bestIter && (
-        <div className="mt-5 rounded border border-border/40 bg-background/40 p-3">
-          <div className="mb-2 text-[10px] uppercase tracking-wide text-muted-foreground">
-            Best iteration (#{bestIter.idx + 1}) — for reference
-          </div>
-          <ParamGrid params={bestIter.params} />
-        </div>
-      )}
-    </div>
-  );
 }
 
 function ParamDiffTable({
@@ -1418,21 +1370,43 @@ function fmt(v: number): string {
   return v.toFixed(3);
 }
 
-// ---- Score chart ---------------------------------------------------------
+// ---- Iteration chart -----------------------------------------------------
 //
 // Inline SVG, zero dependencies. X axis is iteration number, Y axis is
-// score. Shows two series:
+// the chosen metric (score or trades). Shows two series:
 //   1. Each iteration as a dot (colour by status: baseline / keep / discard / crash)
 //   2. Running best as a step line — only goes up, shows convergence at a glance
 //
-// Drawn at a fixed aspect ratio, scales to container width via viewBox.
+// `metric` defaults to "score" but for diagnostic experiments where the
+// goal is "find a config that trades", trades is the more informative
+// signal because score is 0 by definition until trades >= 3.
 
-function ScoreChart({ iterations }: { iterations: ARIteration[] }) {
+type Metric = "score" | "trades";
+
+function getMetricValue(it: ARIteration, metric: Metric): number {
+  return metric === "score" ? Number(it.score) || 0 : it.trades;
+}
+
+function metricLabel(metric: Metric): string {
+  return metric === "score" ? "Score over iterations" : "Trades over iterations";
+}
+
+function metricFormat(metric: Metric, v: number): string {
+  return metric === "score" ? v.toFixed(4) : v.toFixed(0);
+}
+
+function IterationChart({
+  iterations,
+  metric,
+}: {
+  iterations: ARIteration[];
+  metric: Metric;
+}) {
   if (iterations.length === 0) return null;
   const sorted = [...iterations].sort((a, b) => a.idx - b.idx);
-  const scores = sorted.map((i) => Number(i.score) || 0);
-  const maxScore = Math.max(...scores, 0.0001);
-  const yMax = maxScore * 1.1; // a bit of headroom
+  const values = sorted.map((i) => getMetricValue(i, metric));
+  const maxValue = Math.max(...values, metric === "score" ? 0.0001 : 1);
+  const yMax = maxValue * 1.1; // a bit of headroom
   const W = 600;
   const H = 200;
   const padL = 40;
@@ -1447,32 +1421,30 @@ function ScoreChart({ iterations }: { iterations: ARIteration[] }) {
   let bestSoFar = 0;
   const bestPath: string[] = [];
   sorted.forEach((it, i) => {
-    const score = Number(it.score) || 0;
-    if (score > bestSoFar) bestSoFar = score;
+    const v = getMetricValue(it, metric);
+    if (v > bestSoFar) bestSoFar = v;
     const x = padL + i * xStep;
     const y = padT + innerH - (bestSoFar / yMax) * innerH;
     if (i === 0) {
       bestPath.push(`M ${x} ${y}`);
     } else {
-      // Step up: horizontal then vertical
-      const prevY = padT + innerH - (Math.max(...scores.slice(0, i)) / yMax) * innerH;
+      const prevBest = Math.max(...values.slice(0, i));
+      const prevY = padT + innerH - (prevBest / yMax) * innerH;
       bestPath.push(`L ${x} ${prevY} L ${x} ${y}`);
     }
   });
 
-  // Y axis ticks at 0, 50%, 100% of max
   const yTicks = [0, yMax * 0.5, yMax];
 
   return (
     <div className="rounded border border-border/40 bg-background/40 p-3">
       <div className="mb-2 flex items-baseline justify-between gap-3 text-[10px] uppercase tracking-wide text-muted-foreground">
-        <span>Score over iterations</span>
+        <span>{metricLabel(metric)}</span>
         <span>
-          {sorted.length} iterations · best {maxScore.toFixed(4)}
+          {sorted.length} iterations · best {metricFormat(metric, maxValue)}
         </span>
       </div>
       <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full">
-        {/* Y grid + labels */}
         {yTicks.map((v, i) => {
           const y = padT + innerH - (v / yMax) * innerH;
           return (
@@ -1494,13 +1466,12 @@ function ScoreChart({ iterations }: { iterations: ARIteration[] }) {
                 fill="currentColor"
                 fillOpacity={0.5}
               >
-                {v.toFixed(2)}
+                {metricFormat(metric, v)}
               </text>
             </g>
           );
         })}
 
-        {/* X axis labels: 1, midpoint, last */}
         {[0, Math.floor(sorted.length / 2), sorted.length - 1].map((i) => {
           if (i < 0 || i >= sorted.length) return null;
           const x = padL + i * xStep;
@@ -1519,7 +1490,6 @@ function ScoreChart({ iterations }: { iterations: ARIteration[] }) {
           );
         })}
 
-        {/* Running best step line */}
         <path
           d={bestPath.join(" ")}
           fill="none"
@@ -1528,11 +1498,10 @@ function ScoreChart({ iterations }: { iterations: ARIteration[] }) {
           strokeOpacity={0.8}
         />
 
-        {/* Per-iteration dots */}
         {sorted.map((it, i) => {
-          const score = Number(it.score) || 0;
+          const v = getMetricValue(it, metric);
           const x = padL + i * xStep;
-          const y = padT + innerH - (score / yMax) * innerH;
+          const y = padT + innerH - (v / yMax) * innerH;
           const color = dotColor(it.status);
           return (
             <circle
@@ -1545,7 +1514,7 @@ function ScoreChart({ iterations }: { iterations: ARIteration[] }) {
               strokeWidth={0.5}
             >
               <title>
-                #{it.idx + 1} · score {score.toFixed(4)} · {it.trades} trades · {it.status}
+                #{it.idx + 1} · score {Number(it.score).toFixed(4)} · {it.trades} trades · {it.status}
               </title>
             </circle>
           );
@@ -1564,14 +1533,25 @@ function ScoreChart({ iterations }: { iterations: ARIteration[] }) {
 
 // Tiny inline chart for collapsed history cards. ~60px tall, no axes, no
 // labels — just dots and the running-best line in a compact box. Same
-// colour vocabulary as the full ScoreChart so the visual link is obvious
-// when the operator expands the card.
-function Sparkline({ iterations }: { iterations: ARIteration[] }) {
+// colour vocabulary as the full IterationChart so the visual link is
+// obvious when the operator expands the card.
+//
+// `metric` defaults to "trades" because it's the most informative single
+// signal for diagnostic experiments — score is 0 by definition until
+// trades >= 3, so a score sparkline is a flat line for any session that
+// didn't find a trading config.
+function Sparkline({
+  iterations,
+  metric = "trades",
+}: {
+  iterations: ARIteration[];
+  metric?: Metric;
+}) {
   if (iterations.length === 0) return null;
   const sorted = [...iterations].sort((a, b) => a.idx - b.idx);
-  const scores = sorted.map((i) => Number(i.score) || 0);
-  const maxScore = Math.max(...scores, 0.0001);
-  const yMax = maxScore * 1.1;
+  const values = sorted.map((i) => getMetricValue(i, metric));
+  const maxValue = Math.max(...values, metric === "score" ? 0.0001 : 1);
+  const yMax = maxValue * 1.1;
   const W = 400;
   const H = 50;
   const padX = 4;
@@ -1583,14 +1563,14 @@ function Sparkline({ iterations }: { iterations: ARIteration[] }) {
   let bestSoFar = 0;
   const bestPath: string[] = [];
   sorted.forEach((it, i) => {
-    const score = Number(it.score) || 0;
-    if (score > bestSoFar) bestSoFar = score;
+    const v = getMetricValue(it, metric);
+    if (v > bestSoFar) bestSoFar = v;
     const x = padX + i * xStep;
     const y = padY + innerH - (bestSoFar / yMax) * innerH;
     if (i === 0) {
       bestPath.push(`M ${x} ${y}`);
     } else {
-      const prevBest = Math.max(...scores.slice(0, i));
+      const prevBest = Math.max(...values.slice(0, i));
       const prevY = padY + innerH - (prevBest / yMax) * innerH;
       bestPath.push(`L ${x} ${prevY} L ${x} ${y}`);
     }
@@ -1606,9 +1586,9 @@ function Sparkline({ iterations }: { iterations: ARIteration[] }) {
         strokeOpacity={0.7}
       />
       {sorted.map((it, i) => {
-        const score = Number(it.score) || 0;
+        const v = getMetricValue(it, metric);
         const x = padX + i * xStep;
-        const y = padY + innerH - (score / yMax) * innerH;
+        const y = padY + innerH - (v / yMax) * innerH;
         return (
           <circle
             key={it.id}
@@ -1678,9 +1658,15 @@ function LiveResearchFeed({
   const reversed = [...iterations].reverse();
   return (
     <div className="space-y-3 p-6">
-      {/* Live chart at top of feed so the operator can watch the search
-          climb (or flatline) as iterations land. */}
-      <ScoreChart iterations={iterations} />
+      {/* Live charts at top of feed so the operator can watch the search
+          climb (or flatline) as iterations land. Trades chart first
+          because it's the more useful signal — score is 0 until
+          trades >= 3, so the trades chart catches partial progress
+          that score completely hides. */}
+      <div className="space-y-3">
+        <IterationChart iterations={iterations} metric="trades" />
+        <IterationChart iterations={iterations} metric="score" />
+      </div>
       {reversed.map((it) => (
         <div
           key={it.id}
