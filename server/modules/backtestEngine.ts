@@ -195,15 +195,16 @@ export function runBacktest(input: BacktestInput): BacktestResult {
       diag.bestLevelRankSeen = sweep.level.rank;
     }
 
-    const proposal = generateProposal(sweep, levels, input.regime, proposalConfig);
-    if (!proposal) {
-      reject(bar.openTime, "no_proposal", {
+    const proposalResult = generateProposal(sweep, levels, input.regime, proposalConfig);
+    if (!proposalResult.ok) {
+      reject(bar.openTime, `no_proposal:${proposalResult.reason}`, {
         levelType: sweep.level.type,
         sweepDirection: sweep.direction,
         closedBack: sweep.closedBack,
       });
       continue;
     }
+    const proposal = proposalResult.proposal;
 
     // Track best R:R seen on any generated proposal
     const proposalRisk = Math.abs(proposal.entryPrice - proposal.stopPrice);

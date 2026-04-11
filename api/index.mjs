@@ -1720,18 +1720,20 @@ var DEFAULT_PROPOSAL_CONFIG = {
   targetDistanceMultiplier: 1.5
 };
 function generateProposal(sweep, allLevels, regime, config = DEFAULT_PROPOSAL_CONFIG) {
-  if (!sweep) return null;
+  if (!sweep) return { ok: false, reason: "no_sweep" };
   const profile = getRegimeProfile(regime);
-  if (profile.entrySuppressed) return null;
+  if (profile.entrySuppressed) return { ok: false, reason: "entry_suppressed" };
   const mode = sweep.closedBack ? "mode_b" : "mode_a";
-  if (!profile.permittedModes.includes(mode)) return null;
+  if (!profile.permittedModes.includes(mode)) {
+    return { ok: false, reason: "mode_not_permitted" };
+  }
   const side = sweep.direction === "up" ? "short" : "long";
   const entryPrice = sweep.level.price;
   const stopPrice = side === "short" ? sweep.wickExtreme * 1.0005 : sweep.wickExtreme * 0.9995;
   const riskPerUnit = Math.abs(entryPrice - stopPrice);
   const minTargetDistance = riskPerUnit * config.targetDistanceMultiplier;
   const target = findTargetLevel(allLevels, entryPrice, side, minTargetDistance);
-  if (!target) return null;
+  if (!target) return { ok: false, reason: "no_target" };
   const reasoning = [
     `sweep_${sweep.direction}`,
     `level:${sweep.level.type}@${sweep.level.price.toFixed(2)}`,
@@ -1740,14 +1742,17 @@ function generateProposal(sweep, allLevels, regime, config = DEFAULT_PROPOSAL_CO
     `target:${target.type}@${target.price.toFixed(2)}`
   ].join(" ");
   return {
-    side,
-    setupMode: mode,
-    entryPrice,
-    stopPrice,
-    targetPrice: target.price,
-    levelId: sweep.level.id,
-    sweepCandleIndex: sweep.candleIndex,
-    reasoning
+    ok: true,
+    proposal: {
+      side,
+      setupMode: mode,
+      entryPrice,
+      stopPrice,
+      targetPrice: target.price,
+      levelId: sweep.level.id,
+      sweepCandleIndex: sweep.candleIndex,
+      reasoning
+    }
   };
 }
 function findTargetLevel(levels, entry, side, minDistance) {
@@ -1900,15 +1905,16 @@ function runBacktest(input) {
     if (sweep.level.rank > diag.bestLevelRankSeen) {
       diag.bestLevelRankSeen = sweep.level.rank;
     }
-    const proposal = generateProposal(sweep, levels, input.regime, proposalConfig);
-    if (!proposal) {
-      reject(bar.openTime, "no_proposal", {
+    const proposalResult = generateProposal(sweep, levels, input.regime, proposalConfig);
+    if (!proposalResult.ok) {
+      reject(bar.openTime, `no_proposal:${proposalResult.reason}`, {
         levelType: sweep.level.type,
         sweepDirection: sweep.direction,
         closedBack: sweep.closedBack
       });
       continue;
     }
+    const proposal = proposalResult.proposal;
     const proposalRisk = Math.abs(proposal.entryPrice - proposal.stopPrice);
     const proposalReward = Math.abs(proposal.targetPrice - proposal.entryPrice);
     const proposalRR = proposalRisk > 0 ? proposalReward / proposalRisk : 0;

@@ -307,19 +307,20 @@ async function tickTenant(tenant: Tenant) {
   const stratParams = resolveStrategyParams(config.strategyParams);
   const levels = identifyLevels(candles, stratParams.levelConfig);
   const sweep = detectLatestSweep(candles, levels, stratParams.sweepConfig);
-  const proposal = generateProposal(
+  const proposalResult = generateProposal(
     sweep,
     levels,
     tenant.activeRegime,
     stratParams.proposalConfig
   );
 
-  if (!proposal) {
+  if (!proposalResult.ok) {
     return logDecision(tenant.id, "skip", tenant.activeRegime, {
-      reason: sweep ? "no_valid_proposal" : "no_sweep",
+      reason: `no_valid_proposal:${proposalResult.reason}`,
       levelCount: levels.length,
     });
   }
+  const proposal = proposalResult.proposal;
 
   // Risk manager — gate the proposal against drawdown, concurrency, R:R
   const allTrades = await db

@@ -39,21 +39,40 @@ export interface TradeProposal {
 //   - no sweep happened
 //   - the regime blocks this kind of setup (Mode A vs B gating)
 //   - there's no suitable next-level target in the opposite direction
+// Discriminated union so callers can surface *why* a proposal was
+// rejected, not just that it was. Previously returned null for all
+// failure cases and the backtest engine lumped everything into
+// `no_proposal` — which hid the fact that 95% of bars were failing
+// for one specific sub-reason. The reason field is machine-readable
+// (used as a rejection-bucket key) so keep it stable.
+export type ProposalResult =
+  | { ok: true; proposal: TradeProposal }
+  | {
+      ok: false;
+      reason:
+        | "no_sweep"
+        | "entry_suppressed"
+        | "mode_not_permitted"
+        | "no_target";
+    };
+
 export function generateProposal(
   sweep: SweepEvent | null,
   allLevels: Level[],
   regime: Regime,
   config: ProposalConfig = DEFAULT_PROPOSAL_CONFIG
-): TradeProposal | null {
-  if (!sweep) return null;
+): ProposalResult {
+  if (!sweep) return { ok: false, reason: "no_sweep" };
   const profile = getRegimeProfile(regime);
-  if (profile.entrySuppressed) return null;
+  if (profile.entrySuppressed) return { ok: false, reason: "entry_suppressed" };
 
   // Mode selection based on whether the sweep closed back inside.
   // Mode B (confirmation) requires closedBack; Mode A enters at the level
   // regardless but gets its stop beyond the wick.
   const mode: SetupMode = sweep.closedBack ? "mode_b" : "mode_a";
-  if (!profile.permittedModes.includes(mode)) return null;
+  if (!profile.permittedModes.includes(mode)) {
+    return { ok: false, reason: "mode_not_permitted" };
+  }
 
   // Direction: up-sweep against resistance → short, down-sweep against
   // support → long. PRD liquidity sweep reversal logic.
@@ -75,7 +94,7 @@ export function generateProposal(
   // Multiplier is configurable so autoresearch can sweep it.
   const minTargetDistance = riskPerUnit * config.targetDistanceMultiplier;
   const target = findTargetLevel(allLevels, entryPrice, side, minTargetDistance);
-  if (!target) return null;
+  if (!target) return { ok: false, reason: "no_target" };
 
   const reasoning = [
     `sweep_${sweep.direction}`,
@@ -86,14 +105,17 @@ export function generateProposal(
   ].join(" ");
 
   return {
-    side,
-    setupMode: mode,
-    entryPrice,
-    stopPrice,
-    targetPrice: target.price,
-    levelId: sweep.level.id,
-    sweepCandleIndex: sweep.candleIndex,
-    reasoning,
+    ok: true,
+    proposal: {
+      side,
+      setupMode: mode,
+      entryPrice,
+      stopPrice,
+      targetPrice: target.price,
+      levelId: sweep.level.id,
+      sweepCandleIndex: sweep.candleIndex,
+      reasoning,
+    },
   };
 }
 
