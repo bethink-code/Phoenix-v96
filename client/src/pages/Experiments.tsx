@@ -2266,25 +2266,24 @@ function LegendDot({ color, label }: { color: string; label: string }) {
 
 // ---- Iterations table ----------------------------------------------------
 //
-// Each row has an "Install" button that writes the iteration's full
-// 9-param config to the operator's tenant_configs. The next bot tick
-// uses the new params. Disabled for crashed iterations.
+// Rows are clickable. Clicking any row opens the IterationDetailModal
+// with the full context for that iteration: param diff vs baseline,
+// aggregate stats, rejection breakdown, the agent's rationale, and
+// Install / Continue / Close actions. The modal is where the decision
+// is made — the table is just a scannable list.
 
 function IterationsTable({
   iterations,
   onContinueFromIteration,
 }: {
   iterations: ARIteration[];
-  // When provided, each row gets a "Continue" button that pre-fills the
-  // start form with this iteration's params and jumps to the Autoresearch
-  // tab. The caller is responsible for the navigation; this component
-  // just emits the click.
+  // When provided, the detail modal shows a "Continue" button that
+  // pre-fills the start form with this iteration's params and jumps
+  // to the Live tab.
   onContinueFromIteration?: (it: ARIteration) => void;
 }) {
   const qc = useQueryClient();
-  // Lift confirm state up: track which iteration is being confirmed for
-  // install. Drives the ConfirmModal at the bottom of the table.
-  const [installTarget, setInstallTarget] = useState<ARIteration | null>(null);
+  const [selected, setSelected] = useState<ARIteration | null>(null);
 
   const installMutation = useMutation({
     mutationFn: async (iterationId: string) => {
@@ -2296,17 +2295,17 @@ function IterationsTable({
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["/api/tenant"] });
-      setInstallTarget(null);
+      setSelected(null);
     },
-    onError: (e) => {
-      alert(`Install failed: ${(e as Error).message}`);
-      setInstallTarget(null);
-    },
+    onError: (e) => alert(`Install failed: ${(e as Error).message}`),
   });
 
   if (iterations.length === 0) {
     return <div className="text-xs text-muted-foreground">No iterations yet.</div>;
   }
+
+  // Baseline for param diff computation inside the modal
+  const baseline = iterations.find((i) => i.idx === 0) ?? null;
 
   // Compute the "top 25% by net PnL among iterations that traded" set.
   // Pure ranking, no opinion — flagged iterations get a subtle emerald
@@ -2329,22 +2328,26 @@ function IterationsTable({
         <div className="col-span-1 text-right">trades</div>
         <div className="col-span-2 text-right">win / pnl</div>
         <div className="col-span-1">status</div>
-        <div className="col-span-2">narration</div>
-        <div className="col-span-3 text-right">actions</div>
+        <div className="col-span-5">narration</div>
       </div>
       {[...iterations].reverse().map((it) => {
         const score = Number(it.score) || 0;
         const widthPct = (score / maxScore) * 100;
-        const canInstall = it.status !== "crash";
         const isTopPnl = topPnlIds.has(it.id);
         return (
-          <div
+          <button
             key={it.id}
+            type="button"
+            onClick={() => setSelected(it)}
             className={cn(
-              "relative overflow-hidden rounded border bg-card/30",
+              "relative block w-full overflow-hidden rounded border bg-card/30 text-left transition-colors hover:bg-card/50",
               isTopPnl ? "border-emerald-500/50 bg-emerald-500/5" : "border-border/40"
             )}
-            title={isTopPnl ? "Top 25% by net P&L (among iterations that traded)" : undefined}
+            title={
+              isTopPnl
+                ? "Top 25% by net P&L. Click to open details."
+                : "Click to open details."
+            }
           >
             {score > 0 && (
               <div
@@ -2366,58 +2369,253 @@ function IterationsTable({
                   {it.status}
                 </Badge>
               </div>
-              <div className="col-span-2 truncate text-muted-foreground" title={it.narration}>
+              <div className="col-span-5 truncate text-muted-foreground" title={it.narration}>
                 {it.narration}
               </div>
-              <div className="col-span-3 flex items-center justify-end gap-1.5">
-                {onContinueFromIteration && canInstall && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => onContinueFromIteration(it)}
-                    title="Start a new autoresearch session seeded with this iteration's params"
-                  >
-                    Continue
-                  </Button>
-                )}
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={!canInstall || installMutation.isPending}
-                  onClick={() => setInstallTarget(it)}
-                >
-                  Install
-                </Button>
-              </div>
             </div>
-          </div>
+          </button>
         );
       })}
 
-      {/* Install confirm modal — uses the project's reusable ConfirmModal
-          pattern instead of native confirm() */}
-      <ConfirmModal
-        open={installTarget !== null}
-        title={
-          installTarget
-            ? `Install iteration #${installTarget.idx + 1} as live config?`
-            : ""
+      <IterationDetailModal
+        iteration={selected}
+        baseline={baseline}
+        onClose={() => setSelected(null)}
+        onInstall={() => selected && installMutation.mutate(selected.id)}
+        installPending={installMutation.isPending}
+        onContinue={
+          onContinueFromIteration && selected
+            ? () => {
+                onContinueFromIteration(selected);
+                setSelected(null);
+              }
+            : undefined
         }
-        description="These params become your tenant's live strategy. The next bot tick (within 60s) will use them."
-        consequences={
-          installTarget
-            ? Object.entries(installTarget.params).map(
-                ([k, v]) => `${k}: ${typeof v === "number" && !Number.isInteger(v) ? v.toFixed(4) : v}`
-              )
-            : []
-        }
-        confirmLabel="Install"
-        pending={installMutation.isPending}
-        onConfirm={() => installTarget && installMutation.mutate(installTarget.id)}
-        onCancel={() => setInstallTarget(null)}
       />
     </div>
   );
+}
+
+// ---- Iteration detail modal ----------------------------------------------
+//
+// Everything the operator needs to decide "is this a pattern worth
+// implementing or a lucky one-shot?" The row-level summary isn't enough;
+// this modal shows the full context of a single iteration:
+//   - Aggregate stats (trades, win rate, P&L, drawdown, bars, entries)
+//   - The agent's rationale (why it tried these params)
+//   - The generated narration line
+//   - Param diff vs baseline — WHAT CHANGED, side by side, highlighted
+//   - Full params (all 9 values, for reference)
+//   - Rejection breakdown — why the OTHER bars in this iteration didn't
+//     trade. Helps judge whether the single profitable trade is a pattern
+//     or noise.
+// Actions at the bottom: Install / Continue / Close.
+
+function IterationDetailModal({
+  iteration,
+  baseline,
+  onClose,
+  onInstall,
+  onContinue,
+  installPending,
+}: {
+  iteration: ARIteration | null;
+  baseline: ARIteration | null;
+  onClose: () => void;
+  onInstall: () => void;
+  onContinue?: () => void;
+  installPending: boolean;
+}) {
+  if (!iteration) return null;
+
+  const trades = iteration.trades;
+  const winRate = Math.round(Number(iteration.winRate) * 100);
+  const netPnl = Number(iteration.netPnl);
+  const drawdown = Number(iteration.maxDrawdownPct);
+  const score = Number(iteration.score);
+  const canInstall = iteration.status !== "crash";
+
+  // Param diff: compare iteration.params to baseline.params. Any key
+  // that differs is "changed". Show all keys either way so the operator
+  // can see the full config, not just the delta.
+  const paramKeys = Object.keys(iteration.params);
+  const diffs = paramKeys.map((k) => {
+    const before = baseline ? baseline.params[k] : undefined;
+    const after = iteration.params[k];
+    return { key: k, before, after, changed: before !== after };
+  });
+  const changedCount = diffs.filter((d) => d.changed).length;
+
+  // Rejection breakdown rendering
+  const rejections = iteration.rejectionTop
+    ? Object.entries(iteration.rejectionTop).sort((a, b) => b[1] - a[1])
+    : [];
+  const totalRejected = rejections.reduce((s, [, v]) => s + v, 0);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-lg border border-border bg-card p-6 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header: iteration number + status */}
+        <div className="mb-4 flex items-baseline justify-between gap-3">
+          <h2 className="text-xl font-semibold">Iteration #{iteration.idx + 1}</h2>
+          <Badge className={cn("text-[10px]", iterationStatusClass(iteration.status))}>
+            {iteration.status}
+          </Badge>
+        </div>
+
+        {/* Aggregate stats — the headline numbers at a glance */}
+        <div className="mb-5 grid grid-cols-2 gap-x-6 gap-y-3 rounded border border-border/40 bg-background/40 p-4 text-sm sm:grid-cols-3">
+          <ModalStat label="Trades" value={trades.toString()} />
+          <ModalStat label="Win rate" value={`${winRate}%`} />
+          <ModalStat
+            label="Net P&L"
+            value={`${netPnl >= 0 ? "+" : ""}$${netPnl.toFixed(2)}`}
+            tone={netPnl > 0 ? "good" : netPnl < 0 ? "bad" : "neutral"}
+          />
+          <ModalStat label="Max drawdown" value={`${drawdown.toFixed(2)}%`} />
+          <ModalStat label="Score" value={score.toFixed(4)} />
+          <ModalStat
+            label="Bars evaluated"
+            value={iteration.barsEvaluated.toString()}
+          />
+        </div>
+
+        {/* Rationale — what the agent was TRYING to do with these params */}
+        {iteration.rationale && (
+          <div className="mb-5">
+            <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+              Agent's rationale
+            </div>
+            <p className="text-sm italic text-muted-foreground">"{iteration.rationale}"</p>
+          </div>
+        )}
+
+        {/* Narration — what the system said about this iteration */}
+        <div className="mb-5">
+          <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+            Outcome
+          </div>
+          <p className="text-sm">{iteration.narration}</p>
+        </div>
+
+        {/* Param diff — WHAT CHANGED vs baseline. The most useful signal
+            for deciding whether a result is a pattern worth implementing. */}
+        <div className="mb-5">
+          <div className="mb-2 text-[10px] uppercase tracking-wide text-muted-foreground">
+            {baseline
+              ? `Params vs baseline (${changedCount} changed)`
+              : "Params"}
+          </div>
+          <div className="space-y-1 rounded border border-border/40 bg-background/40 p-3 text-xs">
+            {diffs.map((d) => (
+              <div
+                key={d.key}
+                className={cn(
+                  "flex items-center justify-between gap-3",
+                  d.changed ? "text-foreground" : "text-muted-foreground/60"
+                )}
+              >
+                <span className="font-mono">{d.key}</span>
+                <span className="font-mono">
+                  {d.before != null && d.changed && (
+                    <span className="text-muted-foreground/60">{fmtParamValue(d.before)} → </span>
+                  )}
+                  <span className={d.changed ? "text-emerald-300" : ""}>
+                    {fmtParamValue(d.after)}
+                  </span>
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Rejection breakdown — why the OTHER bars in this iteration's
+            backtest didn't produce trades. If rejections are spread
+            evenly, this iteration's profitable trade was probably a
+            fluke. If one reason dominates and that reason was different
+            from other iterations, there might be a real pattern here. */}
+        {rejections.length > 0 && (
+          <div className="mb-5">
+            <div className="mb-2 text-[10px] uppercase tracking-wide text-muted-foreground">
+              Why other bars didn't trade ({totalRejected} rejections)
+            </div>
+            <div className="space-y-1 text-xs">
+              {rejections.map(([reason, count]) => {
+                const pct = totalRejected > 0 ? Math.round((count / totalRejected) * 100) : 0;
+                return (
+                  <div
+                    key={reason}
+                    className="flex items-center justify-between gap-3"
+                  >
+                    <span className="text-muted-foreground">{humanReason(reason)}</span>
+                    <span className="font-mono text-muted-foreground">
+                      {count} · {pct}%
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Actions */}
+        <div className="mt-6 flex flex-wrap items-center justify-end gap-2">
+          <Button variant="ghost" onClick={onClose} disabled={installPending}>
+            Close
+          </Button>
+          {onContinue && canInstall && (
+            <Button
+              variant="outline"
+              onClick={onContinue}
+              disabled={installPending}
+              title="Start a new autoresearch session with these params as the baseline"
+            >
+              Continue from this
+            </Button>
+          )}
+          <Button onClick={onInstall} disabled={!canInstall || installPending}>
+            {installPending ? "Installing…" : "Install as live config"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ModalStat({
+  label,
+  value,
+  tone = "neutral",
+}: {
+  label: string;
+  value: string;
+  tone?: "good" | "bad" | "neutral";
+}) {
+  const valueClass =
+    tone === "good"
+      ? "text-emerald-300"
+      : tone === "bad"
+        ? "text-red-300"
+        : "text-foreground";
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+        {label}
+      </div>
+      <div className={cn("mt-0.5 text-base font-semibold", valueClass)}>{value}</div>
+    </div>
+  );
+}
+
+function fmtParamValue(v: unknown): string {
+  if (typeof v !== "number") return String(v ?? "—");
+  return Number.isInteger(v) ? v.toString() : v.toFixed(3);
 }
 
 function iterationStatusClass(status: ARIteration["status"]): string {
