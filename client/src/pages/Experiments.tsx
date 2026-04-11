@@ -1423,20 +1423,23 @@ function ChartView({ sessionId }: { sessionId: string }) {
   // Bigger dot = more winning configs spotted the same entry. Clusters
   // are robust edge; one-off dots are noise.
   const winningTrades = trades.filter((t) => t.realisedPnl > 0);
-  const tradeClusters = new Map<
-    string,
-    { openedAt: number; entry: number; count: number; iterations: Set<number> }
-  >();
+  type Cluster = {
+    openedAt: number;
+    entry: number;
+    count: number;
+    iterations: Set<number>;
+    side: "long" | "short" | "mixed";
+  };
+  const tradeClusters = new Map<string, Cluster>();
   for (const t of winningTrades) {
-    // Bucket by entry candle time. Same candle + different price would
-    // still be one event — averaging the price on stacked hits.
-    const key = String(t.openedAt);
+    // Bucket by entry candle time + side so longs and shorts at the
+    // same candle render as separate markers (mixing them in one dot
+    // would be misleading).
+    const key = `${t.openedAt}:${t.side}`;
     const existing = tradeClusters.get(key);
     if (existing) {
       existing.iterations.add(t.iterationIdx);
       existing.count = existing.iterations.size;
-      // Weighted average entry (useful if two different iterations'
-      // exact fill prices differ by a tick)
       existing.entry = (existing.entry * (existing.count - 1) + t.entry) / existing.count;
     } else {
       tradeClusters.set(key, {
@@ -1444,6 +1447,7 @@ function ChartView({ sessionId }: { sessionId: string }) {
         entry: t.entry,
         count: 1,
         iterations: new Set([t.iterationIdx]),
+        side: t.side,
       });
     }
   }
@@ -1579,10 +1583,11 @@ function ChartView({ sessionId }: { sessionId: string }) {
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground">
         {candles.length} candles · {pools.length} liquidity pools ({pools.filter((p) => p.sweepIdx === null).length} live, {pools.filter((p) => p.sweepIdx !== null).length} swept) · {clusters.length} winning entry points across {winningTrades.length} trades from {new Set(winningTrades.map((t) => t.iterationIdx)).size} profitable iterations.
-        White dots mark entries where at least one winning config fired.
-        Dot size scales with how many different iterations agreed there
-        was a trade at that candle — big dots are robust edges, single
-        dots are coincidence.
+        Triangles mark entries where at least one winning config fired —
+        up for longs, down for shorts. Apex of the triangle sits on the
+        entry price. Size scales with how many different iterations agreed
+        there was a trade at that candle — big triangles are robust edges,
+        small ones are coincidence.
       </p>
       <div className="overflow-hidden rounded border border-border/40 bg-card/30">
         <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full">
@@ -1663,27 +1668,33 @@ function ChartView({ sessionId }: { sessionId: string }) {
               </g>
             );
           })}
-          {/* Winning entry points — white dots at each candle where
-              at least one profitable iteration opened a trade. Radius
-              scales with how many distinct iterations agreed on the
-              entry (clustering = robust edge). */}
+          {/* Winning entry points — triangles at each candle where at
+              least one profitable iteration opened a trade. Triangle
+              points up for longs, down for shorts. Size scales with
+              how many distinct iterations agreed on the entry. */}
           {clusters.map((c, i) => {
             const idx = candleByTime.get(c.openedAt);
             if (idx === undefined) return null;
             const x = xFor(idx);
             const y = yFor(c.entry);
-            // Scale radius from 3 (single iteration) up to 9 (all winners agree)
-            const r = 3 + (c.count / maxCluster) * 6;
+            // Size scales 5 → 14 with density
+            const size = 5 + (c.count / maxCluster) * 9;
+            const h = size; // triangle height
+            const w = size * 0.9; // triangle base width
+            const points =
+              c.side === "long"
+                ? // Point up, base below (entry at the apex)
+                  `${x},${y} ${x - w / 2},${y + h} ${x + w / 2},${y + h}`
+                : // Point down, base above (entry at the apex)
+                  `${x},${y} ${x - w / 2},${y - h} ${x + w / 2},${y - h}`;
             return (
-              <circle
+              <polygon
                 key={`cluster-${i}`}
-                cx={x}
-                cy={y}
-                r={r}
+                points={points}
                 fill="#ffffff"
                 stroke="#000000"
                 strokeWidth={0.75}
-                opacity={0.9}
+                opacity={0.95}
               />
             );
           })}
