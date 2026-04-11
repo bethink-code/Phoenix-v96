@@ -448,6 +448,12 @@ export function registerRoutes(app: Express) {
       // /api/autoresearch/default-system-prompt and editable). Capped
       // at 20k chars so a runaway paste can't blow the column.
       systemPrompt: z.string().min(50).max(20_000),
+      // Optional seed params for the baseline iteration. Used by the
+      // "Continue from this iteration" flow. Must be a JSON object of
+      // numeric values; missing keys fall back to DEFAULT_PARAMS in the
+      // orchestrator. We don't strictly validate the shape here because
+      // the orchestrator clamps + merges defensively.
+      seedParams: z.record(z.string(), z.number()).optional(),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
@@ -482,6 +488,7 @@ export function registerRoutes(app: Express) {
         maxIterations: parsed.data.maxIterations,
         systemPrompt: parsed.data.systemPrompt,
         mode: parsed.data.mode,
+        seedParams: parsed.data.seedParams,
       });
       audit({
         userId: u.id,

@@ -70,6 +70,11 @@ export interface StartArgs {
   // tune     — agent hill-climbs to maximise score (default)
   // discover — agent samples diversely, no winner, output is a survey
   mode: "tune" | "discover";
+  // Optional seed params. When set, the baseline iteration uses these
+  // values instead of the engine defaults — used by the "Continue from
+  // this iteration" flow so the agent refines from a known starting
+  // point. Missing keys fall back to DEFAULT_PARAMS.
+  seedParams?: Partial<ProposedParams>;
 }
 
 export async function startSession(args: StartArgs): Promise<AutoresearchSession> {
@@ -92,6 +97,7 @@ export async function startSession(args: StartArgs): Promise<AutoresearchSession
       mode: args.mode,
       maxIterations: args.maxIterations,
       systemPrompt: args.systemPrompt,
+      seedParams: (args.seedParams ?? {}) as object,
       status: "running",
       createdByUserId: args.userId,
     })
@@ -135,8 +141,17 @@ async function runLoop(session: AutoresearchSession, args: StartArgs) {
     throw new Error(`exchange returned only ${candles.length} candles, need at least 50`);
   }
 
-  let currentParams: ProposedParams = { ...DEFAULT_PARAMS };
-  let bestParams: ProposedParams = { ...DEFAULT_PARAMS };
+  // Baseline starts from seedParams (if any) merged over DEFAULT_PARAMS.
+  // For "Continue from this iteration" flows, the operator-supplied
+  // seed becomes the baseline iteration's params and the agent refines
+  // from there. For fresh sessions, seedParams is empty and we get the
+  // historical behaviour (start from DEFAULT_PARAMS).
+  const seeded: ProposedParams = {
+    ...DEFAULT_PARAMS,
+    ...((session.seedParams as Partial<ProposedParams>) ?? {}),
+  };
+  let currentParams: ProposedParams = { ...seeded };
+  let bestParams: ProposedParams = { ...seeded };
   let bestScore = -Infinity;
   let bestIterationId: string | null = null;
   let totalCostUsd = 0;

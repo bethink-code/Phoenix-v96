@@ -387,6 +387,14 @@ var autoresearchSessions = pgTable(
     // the operator's edits applied). Source of truth at runtime — the
     // orchestrator reads this column, not any module-level constant.
     systemPrompt: text("system_prompt").notNull().default(""),
+    // Optional starting params for the baseline iteration. When the
+    // operator clicks "Continue from this iteration" on a previous
+    // session's row, we copy that iteration's params here so the new
+    // session begins where the previous one's interesting result was —
+    // not from DEFAULT_PARAMS. The agent then refines from that point.
+    // Empty object means "use DEFAULT_PARAMS as baseline" (the
+    // historical behaviour).
+    seedParams: jsonb("seed_params").notNull().default({}),
     status: varchar("status", { length: 16 }).notNull().default("running"),
     // running | done | aborted | error | idle
     iterationsRun: integer("iterations_run").notNull().default(0),
@@ -2572,6 +2580,7 @@ async function startSession(args) {
     mode: args.mode,
     maxIterations: args.maxIterations,
     systemPrompt: args.systemPrompt,
+    seedParams: args.seedParams ?? {},
     status: "running",
     createdByUserId: args.userId
   }).returning();
@@ -2601,8 +2610,12 @@ async function runLoop(session2, args) {
   if (candles.length < 50) {
     throw new Error(`exchange returned only ${candles.length} candles, need at least 50`);
   }
-  let currentParams = { ...DEFAULT_PARAMS };
-  let bestParams = { ...DEFAULT_PARAMS };
+  const seeded = {
+    ...DEFAULT_PARAMS,
+    ...session2.seedParams ?? {}
+  };
+  let currentParams = { ...seeded };
+  let bestParams = { ...seeded };
   let bestScore = -Infinity;
   let bestIterationId = null;
   let totalCostUsd = 0;
@@ -3185,7 +3198,13 @@ function registerRoutes(app2) {
       // submits the textarea contents (pre-populated from
       // /api/autoresearch/default-system-prompt and editable). Capped
       // at 20k chars so a runaway paste can't blow the column.
-      systemPrompt: z2.string().min(50).max(2e4)
+      systemPrompt: z2.string().min(50).max(2e4),
+      // Optional seed params for the baseline iteration. Used by the
+      // "Continue from this iteration" flow. Must be a JSON object of
+      // numeric values; missing keys fall back to DEFAULT_PARAMS in the
+      // orchestrator. We don't strictly validate the shape here because
+      // the orchestrator clamps + merges defensively.
+      seedParams: z2.record(z2.string(), z2.number()).optional()
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
@@ -3215,7 +3234,8 @@ function registerRoutes(app2) {
         model: parsed.data.model,
         maxIterations: parsed.data.maxIterations,
         systemPrompt: parsed.data.systemPrompt,
-        mode: parsed.data.mode
+        mode: parsed.data.mode,
+        seedParams: parsed.data.seedParams
       });
       audit({
         userId: u.id,

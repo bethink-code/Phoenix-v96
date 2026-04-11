@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import ResearcherIdentityCard from "@/components/ResearcherIdentityCard";
+import ConfirmModal from "@/components/ConfirmModal";
 import { apiRequest } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
 import type {
@@ -54,17 +55,23 @@ interface MarketPair {
   displayName: string;
 }
 
-type TabKey = "library" | "recommendations" | "history" | "autoresearch";
+type TabKey = "live" | "iterations" | "history" | "library" | "recommendations";
 
 interface AutoresearchCapabilities {
   available: boolean;
 }
 
 export default function Experiments() {
-  // Default landing tab is Autoresearch when it's available (i.e. local
-  // dev with OPENAI_API_KEY). On prd it's hidden so we land on History
-  // instead, which is the only useful surface there.
-  const [tab, setTab] = useState<TabKey>("autoresearch");
+  // Default landing tab is Live (the active autoresearch session view)
+  // when autoresearch is available. On prd it's hidden so we land on
+  // History instead.
+  const [tab, setTab] = useState<TabKey>("live");
+  // Prefill payload for the start form. Set when the operator clicks
+  // "Continue from this iteration" anywhere in the page; the start form
+  // consumes it (auto-opens, applies values) and clears it via the
+  // onPrefillConsumed callback. Lifted to the top-level so it survives
+  // tab switches.
+  const [startPrefill, setStartPrefill] = useState<StartFormPrefill | null>(null);
   const pendingQuery = useQuery<RunRow[]>({
     queryKey: ["/api/tenant/recommendations/pending"],
   });
@@ -80,32 +87,36 @@ export default function Experiments() {
   });
   const autoresearchAvailable = capabilities.data?.available ?? false;
 
-  // Tab order is intentional: Autoresearch first (when available, on
-  // local dev), History second (the archive of past results — useful
-  // on both local and prd). The Library/Recommendations manual
-  // framework comes last because it predates autoresearch and is
-  // largely superseded by it. The page header reflects the same
-  // priority — "Autoresearch" leads.
+  // Flat tab structure — no nesting. Live/Iterations are the two views
+  // of the active autoresearch session, History is the archive of past
+  // sessions, Library/Recommendations are the legacy manual framework.
+  // Live and Iterations are only present when autoresearch is available
+  // (i.e. local dev with OPENAI_API_KEY); on prd they're hidden.
   const tabs: Array<{ key: TabKey; label: string; count: number | null }> = [];
   if (autoresearchAvailable) {
-    tabs.push({ key: "autoresearch", label: "Autoresearch", count: null });
+    tabs.push({ key: "live", label: "Live", count: null });
+    tabs.push({ key: "iterations", label: "Iterations", count: null });
   }
   tabs.push({ key: "history", label: "History", count: null });
   tabs.push({ key: "library", label: "Library", count: null });
   tabs.push({ key: "recommendations", label: "Recommendations", count: pendingCount });
 
-  // If autoresearch isn't available (prd), redirect the default tab
-  // to History since that's the only meaningful surface there.
-  // useEffect avoids the "setState during render" anti-pattern.
+  // If autoresearch isn't available (prd), redirect Live/Iterations to
+  // History since those tabs are hidden there. useEffect avoids the
+  // "setState during render" anti-pattern.
   useEffect(() => {
-    if (!autoresearchAvailable && tab === "autoresearch") {
+    if (!autoresearchAvailable && (tab === "live" || tab === "iterations")) {
       setTab("history");
     }
   }, [autoresearchAvailable, tab]);
 
   return (
-    <div className="flex h-screen flex-col bg-background">
-      <header className="shrink-0 border-b border-border">
+    <div className="min-h-screen bg-background">
+      {/* Header is sticky so the tabs stay reachable when the page is
+          scrolled. NO h-screen / flex-col / overflow-hidden anywhere in
+          the layout — the rule is: scroll the window, not elements
+          inside it. */}
+      <header className="sticky top-0 z-20 border-b border-border bg-background">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-6 py-4">
           <div>
             <h1 className="text-lg font-semibold">Autoresearch</h1>
@@ -117,40 +128,57 @@ export default function Experiments() {
             <Button variant="outline" size="sm">← Dashboard</Button>
           </Link>
         </div>
+        {/* Tabs join the sticky header so they're always visible */}
+        <div className="mx-auto flex max-w-6xl gap-1 px-6">
+          {tabs.map((t) => (
+            <button
+              key={t.key}
+              onClick={() => setTab(t.key)}
+              className={cn(
+                "-mb-px border-b-2 px-4 py-3 text-sm transition-colors",
+                tab === t.key
+                  ? "border-primary text-primary"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
+              )}
+            >
+              {t.label}
+              {t.count != null && t.count > 0 && (
+                <span className="ml-2 rounded-full bg-primary/20 px-1.5 py-0.5 text-xs text-primary">
+                  {t.count}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
       </header>
 
-      <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-4 overflow-hidden p-6">
-        <Card className="flex flex-1 flex-col overflow-hidden">
-          <div className="flex shrink-0 gap-1 border-b border-border px-4">
-            {tabs.map((t) => (
-              <button
-                key={t.key}
-                onClick={() => setTab(t.key)}
-                className={cn(
-                  "-mb-px border-b-2 px-4 py-3 text-sm transition-colors",
-                  tab === t.key
-                    ? "border-primary text-primary"
-                    : "border-transparent text-muted-foreground hover:text-foreground"
-                )}
-              >
-                {t.label}
-                {t.count != null && t.count > 0 && (
-                  <span className="ml-2 rounded-full bg-primary/20 px-1.5 py-0.5 text-xs text-primary">
-                    {t.count}
-                  </span>
-                )}
-              </button>
-            ))}
-          </div>
-          <div className="flex-1 overflow-y-auto">
-            {tab === "library" && <LibraryTab />}
-            {tab === "recommendations" && <RecommendationsTab />}
-            {tab === "history" && <HistoryTab />}
-            {tab === "autoresearch" && autoresearchAvailable && (
-              <AutoresearchTab onViewHistory={() => setTab("history")} />
-            )}
-          </div>
-        </Card>
+      <main className="mx-auto max-w-6xl px-6 py-6">
+        {/* Live and Iterations both render the AutoresearchSurface
+            component, which owns the identity card + start form +
+            session queries. The `view` prop tells it which sub-content
+            to show below the identity card. */}
+        {(tab === "live" || tab === "iterations") && autoresearchAvailable && (
+          <AutoresearchSurface
+            view={tab}
+            onViewHistory={() => setTab("history")}
+            prefill={startPrefill}
+            onPrefillConsumed={() => setStartPrefill(null)}
+            onContinueFromIteration={(p) => {
+              setStartPrefill(p);
+              setTab("live");
+            }}
+          />
+        )}
+        {tab === "history" && (
+          <HistoryTab
+            onContinueFromIteration={(p) => {
+              setStartPrefill(p);
+              setTab("live");
+            }}
+          />
+        )}
+        {tab === "library" && <LibraryTab />}
+        {tab === "recommendations" && <RecommendationsTab />}
       </main>
     </div>
   );
@@ -521,14 +549,14 @@ function RecommendationsTab() {
   const rows = pending.data ?? [];
   if (rows.length === 0) {
     return (
-      <div className="p-6 text-sm text-muted-foreground">
+      <div className="text-sm text-muted-foreground">
         No pending recommendations. Run an experiment from the Library tab.
       </div>
     );
   }
 
   return (
-    <div className="space-y-3 p-6">
+    <div className="space-y-3">
       {rows.map((run) => (
         <RecommendationCard
           key={run.id}
@@ -653,7 +681,17 @@ interface SessionWithIterations {
   iterations: ARIteration[];
 }
 
-function HistoryTab() {
+function HistoryTab({
+  onContinueFromIteration: _onContinueFromIteration,
+}: {
+  // Reserved for when SessionHistoryCard's expanded body gets the
+  // IterationsTable embedded — at that point each iteration row will
+  // emit "continue from this" up through the card to here, and we'll
+  // forward to the parent. Currently unused (history cards don't
+  // expose the iterations table inline) but the prop is in place so
+  // the parent can wire it without another refactor.
+  onContinueFromIteration?: (p: StartFormPrefill) => void;
+} = {}) {
   // Light refetch so a session that finishes while you're on this tab
   // appears without a manual refresh. 10s is plenty — sessions take
   // minutes, this isn't a live screen.
@@ -673,7 +711,7 @@ function HistoryTab() {
 
   if (sessionRows.length === 0 && runRows.length === 0) {
     return (
-      <div className="p-6 text-sm text-muted-foreground">
+      <div className="text-sm text-muted-foreground">
         No history yet. Run an autoresearch session or a manual experiment to get started.
       </div>
     );
@@ -959,9 +997,20 @@ interface ARIteration {
   createdAt: string;
 }
 
-function AutoresearchTab({ onViewHistory }: { onViewHistory: () => void }) {
+function AutoresearchSurface({
+  view,
+  onViewHistory,
+  prefill,
+  onPrefillConsumed,
+  onContinueFromIteration,
+}: {
+  view: "live" | "iterations";
+  onViewHistory: () => void;
+  prefill: StartFormPrefill | null;
+  onPrefillConsumed: () => void;
+  onContinueFromIteration: (p: StartFormPrefill) => void;
+}) {
   const qc = useQueryClient();
-  const [innerTab, setInnerTab] = useState<"live" | "iterations">("live");
 
   // Active session = currently running, OR most recently finished. The
   // identity card always shows ONE session — we resolve which one to show
@@ -1014,7 +1063,7 @@ function AutoresearchTab({ onViewHistory }: { onViewHistory: () => void }) {
   const spentUsd = focusedSession?.totalCostUsd ? Number(focusedSession.totalCostUsd) : 0;
 
   return (
-    <div className="space-y-4 p-6">
+    <div className="space-y-4">
       <ResearcherIdentityCard
         status={status}
         iterationsRun={iterationsRun}
@@ -1050,7 +1099,10 @@ function AutoresearchTab({ onViewHistory }: { onViewHistory: () => void }) {
                 {stopMutation.isPending ? "Stopping…" : "Stop"}
               </Button>
             ) : status === "idle" ? (
-              <StartSessionForm />
+              <StartSessionForm
+                prefill={prefill ?? undefined}
+                onPrefillConsumed={onPrefillConsumed}
+              />
             ) : (
               // Session is done/aborted/errored — give a clear path to
               // the rich result card without blocking the operator from
@@ -1059,7 +1111,10 @@ function AutoresearchTab({ onViewHistory }: { onViewHistory: () => void }) {
                 <Button size="sm" onClick={onViewHistory}>
                   View result in History →
                 </Button>
-                <StartSessionForm />
+                <StartSessionForm
+                prefill={prefill ?? undefined}
+                onPrefillConsumed={onPrefillConsumed}
+              />
               </>
             )}
             {focusedSession && focusedSession.errorMessage && (
@@ -1069,42 +1124,34 @@ function AutoresearchTab({ onViewHistory }: { onViewHistory: () => void }) {
         }
       />
 
-      {/* Inner tabs — Live (heartbeat narration) + Iterations (table).
-          Past sessions live in the outer History tab now. */}
-      <div className="rounded-md border border-border bg-card/40">
-        <div className="flex shrink-0 gap-1 border-b border-border px-4">
-          {(
-            [
-              { key: "live", label: "Live" },
-              { key: "iterations", label: "Iterations" },
-            ] as const
-          ).map((t) => (
-            <button
-              key={t.key}
-              onClick={() => setInnerTab(t.key)}
-              className={cn(
-                "-mb-px border-b-2 px-3 py-2 text-xs transition-colors",
-                innerTab === t.key
-                  ? "border-primary text-primary"
-                  : "border-transparent text-muted-foreground hover:text-foreground"
-              )}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
-        <div className="max-h-[480px] overflow-y-auto">
-          {innerTab === "live" && (
-            <LiveResearchFeed
-              session={focusedSession}
-              iterations={iterationsQuery.data ?? []}
-            />
-          )}
-          {innerTab === "iterations" && (
-            <IterationsTable iterations={iterationsQuery.data ?? []} />
-          )}
-        </div>
-      </div>
+      {/* Sub-content driven by the top-level tab (Live or Iterations).
+          No inner tab bar — the parent's tab menu IS the navigation. */}
+      {view === "live" && (
+        <LiveResearchFeed
+          session={focusedSession}
+          iterations={iterationsQuery.data ?? []}
+        />
+      )}
+      {view === "iterations" && (
+        <IterationsTable
+          iterations={iterationsQuery.data ?? []}
+          onContinueFromIteration={
+            focusedSession
+              ? (it) =>
+                  onContinueFromIteration({
+                    seedParams: it.params,
+                    pairId: focusedSession.pairId,
+                    timeframe: focusedSession.timeframe as StartFormPrefill["timeframe"],
+                    regime: focusedSession.regime as StartFormPrefill["regime"],
+                    lookbackBars: focusedSession.lookbackBars,
+                    model: focusedSession.model as StartFormPrefill["model"],
+                    mode: focusedSession.mode,
+                    sourceLabel: `iteration #${it.idx + 1}`,
+                  })
+              : undefined
+          }
+        />
+      )}
     </div>
   );
 }
@@ -1122,7 +1169,36 @@ function StatBlock({ label, value }: { label: string; value: string }) {
 
 // ---- Start session form ---------------------------------------------------
 
-function StartSessionForm() {
+// Prefill payload an external caller (e.g. an iteration row's "Continue
+// from this" button) can pass in to pre-populate the form. When set,
+// the form auto-opens, applies the values, and the seedParams banner
+// becomes visible. consumed by the form via onPrefillConsumed.
+interface StartFormPrefill {
+  seedParams?: Record<string, number>;
+  pairId?: string;
+  timeframe?: "15m" | "1h" | "4h" | "12h" | "1d";
+  regime?:
+    | "ranging"
+    | "trending"
+    | "breakout"
+    | "high_volatility"
+    | "low_liquidity"
+    | "accumulation_distribution";
+  lookbackBars?: number;
+  model?: "gpt-4o" | "gpt-4o-mini";
+  maxIterations?: number;
+  mode?: "tune" | "discover";
+  // Source iteration label, for the banner ("Continuing from session X iter Y")
+  sourceLabel?: string;
+}
+
+function StartSessionForm({
+  prefill,
+  onPrefillConsumed,
+}: {
+  prefill?: StartFormPrefill;
+  onPrefillConsumed?: () => void;
+}) {
   const qc = useQueryClient();
   const pairs = useQuery<MarketPair[]>({ queryKey: ["/api/markets"] });
   const [open, setOpen] = useState(false);
@@ -1140,6 +1216,31 @@ function StartSessionForm() {
   const [maxIterations, setMaxIterations] = useState(30);
   const [systemPrompt, setSystemPrompt] = useState("");
   const [promptOpen, setPromptOpen] = useState(false);
+  // Seed params live in form state, populated either by prefill (Continue
+  // from this iteration) or empty (fresh session). Empty object means
+  // the orchestrator uses DEFAULT_PARAMS for the baseline.
+  const [seedParams, setSeedParams] = useState<Record<string, number> | null>(null);
+  const [seedSourceLabel, setSeedSourceLabel] = useState<string | null>(null);
+
+  // Apply prefill when it changes. This is the entry point for the
+  // "Continue from this iteration" flow — the parent passes prefill,
+  // we apply, then call onPrefillConsumed so the parent clears it
+  // and we don't loop.
+  useEffect(() => {
+    if (!prefill) return;
+    if (prefill.seedParams) setSeedParams(prefill.seedParams);
+    if (prefill.sourceLabel) setSeedSourceLabel(prefill.sourceLabel);
+    if (prefill.pairId) setPairId(prefill.pairId);
+    if (prefill.timeframe) setTimeframe(prefill.timeframe);
+    if (prefill.regime) setRegime(prefill.regime);
+    if (prefill.lookbackBars) setLookbackBars(prefill.lookbackBars);
+    if (prefill.model) setModel(prefill.model);
+    if (prefill.maxIterations) setMaxIterations(prefill.maxIterations);
+    if (prefill.mode) setMode(prefill.mode);
+    setOpen(true);
+    onPrefillConsumed?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefill]);
   // When the form opens or the mode toggles, refetch the default prompt
   // for that mode. We track which mode the current textarea contents
   // came from so toggling mode → refetches → replaces. If the operator
@@ -1187,12 +1288,20 @@ function StartSessionForm() {
           maxIterations,
           mode,
           systemPrompt,
+          // Only include seedParams when set — when null/empty we omit
+          // the field entirely so the server falls through to the
+          // historical "start from DEFAULT_PARAMS" behaviour.
+          ...(seedParams ? { seedParams } : {}),
         }),
       });
       return r.json();
     },
     onSuccess: () => {
       setOpen(false);
+      // Clear seed state after a successful start so the next session
+      // doesn't accidentally inherit the previous seed.
+      setSeedParams(null);
+      setSeedSourceLabel(null);
       qc.invalidateQueries({ queryKey: ["/api/autoresearch/active"] });
       qc.invalidateQueries({ queryKey: ["/api/autoresearch/sessions"] });
     },
@@ -1217,6 +1326,41 @@ function StartSessionForm() {
   return (
     <div className="w-full rounded-md border border-primary/40 bg-primary/5 p-4">
       <h3 className="mb-3 text-sm font-semibold">New autoresearch session</h3>
+
+      {/* Seed banner — visible only when the form was opened via
+          "Continue from this iteration". Tells the operator the agent
+          will start from a non-default baseline, and lets them clear
+          the seed if they change their mind. */}
+      {seedParams && (
+        <div className="mb-4 flex items-start justify-between gap-3 rounded border border-emerald-500/40 bg-emerald-500/5 p-3 text-xs">
+          <div className="min-w-0 flex-1">
+            <div className="font-semibold text-emerald-200">
+              Continuing from {seedSourceLabel ?? "previous iteration"}
+            </div>
+            <div className="mt-1 text-muted-foreground">
+              The baseline iteration will use these params instead of the engine defaults. The agent refines from this starting point.
+            </div>
+            <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-0.5 font-mono text-[10px] text-muted-foreground/80">
+              {Object.entries(seedParams).map(([k, v]) => (
+                <div key={k} className="flex justify-between">
+                  <span>{k}</span>
+                  <span>{Number.isInteger(v) ? v : v.toFixed(3)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setSeedParams(null);
+              setSeedSourceLabel(null);
+            }}
+            className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground hover:text-foreground"
+          >
+            clear seed
+          </button>
+        </div>
+      )}
 
       {/* Mode toggle — top of form because it changes everything below
           (default goal text, default system prompt, agent behaviour, and
@@ -2024,12 +2168,12 @@ function LiveResearchFeed({
     );
   }
   if (iterations.length === 0) {
-    return <div className="p-6 text-xs text-muted-foreground">No iterations yet.</div>;
+    return <div className="text-xs text-muted-foreground">No iterations yet.</div>;
   }
   // Newest at top — same as the bot's HeartbeatFeed
   const reversed = [...iterations].reverse();
   return (
-    <div className="space-y-3 p-6">
+    <div className="space-y-3">
       {/* Live charts at top of feed so the operator can watch the search
           climb (or flatline) as iterations land. Trades chart first
           because it's the more useful signal — score is 0 until
@@ -2083,8 +2227,22 @@ function iterationMoodClass(status: ARIteration["status"]): string {
 // 9-param config to the operator's tenant_configs. The next bot tick
 // uses the new params. Disabled for crashed iterations.
 
-function IterationsTable({ iterations }: { iterations: ARIteration[] }) {
+function IterationsTable({
+  iterations,
+  onContinueFromIteration,
+}: {
+  iterations: ARIteration[];
+  // When provided, each row gets a "Continue" button that pre-fills the
+  // start form with this iteration's params and jumps to the Autoresearch
+  // tab. The caller is responsible for the navigation; this component
+  // just emits the click.
+  onContinueFromIteration?: (it: ARIteration) => void;
+}) {
   const qc = useQueryClient();
+  // Lift confirm state up: track which iteration is being confirmed for
+  // install. Drives the ConfirmModal at the bottom of the table.
+  const [installTarget, setInstallTarget] = useState<ARIteration | null>(null);
+
   const installMutation = useMutation({
     mutationFn: async (iterationId: string) => {
       const r = await apiRequest(
@@ -2094,36 +2252,56 @@ function IterationsTable({ iterations }: { iterations: ARIteration[] }) {
       return r.json();
     },
     onSuccess: () => {
-      // Tenant config changed — invalidate the dashboard's view of it
       qc.invalidateQueries({ queryKey: ["/api/tenant"] });
-      alert("Installed. The next bot tick will use these params.");
+      setInstallTarget(null);
     },
-    onError: (e) => alert(`Install failed: ${(e as Error).message}`),
+    onError: (e) => {
+      alert(`Install failed: ${(e as Error).message}`);
+      setInstallTarget(null);
+    },
   });
 
   if (iterations.length === 0) {
-    return <div className="p-6 text-xs text-muted-foreground">No iterations yet.</div>;
+    return <div className="text-xs text-muted-foreground">No iterations yet.</div>;
   }
+
+  // Compute the "top 25% by net PnL among iterations that traded" set.
+  // Pure ranking, no opinion — flagged iterations get a subtle emerald
+  // border so the operator can scan for the best candidates without
+  // sorting manually.
+  const tradingIters = iterations.filter((i) => i.trades > 0);
+  const sortedByPnl = [...tradingIters].sort(
+    (a, b) => Number(b.netPnl) - Number(a.netPnl)
+  );
+  const topQuartileCount = Math.max(1, Math.ceil(sortedByPnl.length / 4));
+  const topPnlIds = new Set(sortedByPnl.slice(0, topQuartileCount).map((i) => i.id));
+
   const maxScore = Math.max(...iterations.map((i) => Number(i.score) || 0), 0.0001);
+
   return (
-    <div className="space-y-1 p-6">
+    <div className="space-y-1">
       <div className="grid grid-cols-12 gap-2 px-3 py-1 text-[10px] uppercase tracking-wide text-muted-foreground">
         <div className="col-span-1">#</div>
         <div className="col-span-2 text-right">score</div>
         <div className="col-span-1 text-right">trades</div>
         <div className="col-span-2 text-right">win / pnl</div>
         <div className="col-span-1">status</div>
-        <div className="col-span-3">narration</div>
-        <div className="col-span-2 text-right">install</div>
+        <div className="col-span-2">narration</div>
+        <div className="col-span-3 text-right">actions</div>
       </div>
       {[...iterations].reverse().map((it) => {
         const score = Number(it.score) || 0;
         const widthPct = (score / maxScore) * 100;
         const canInstall = it.status !== "crash";
+        const isTopPnl = topPnlIds.has(it.id);
         return (
           <div
             key={it.id}
-            className="relative overflow-hidden rounded border border-border/40 bg-card/30"
+            className={cn(
+              "relative overflow-hidden rounded border bg-card/30",
+              isTopPnl ? "border-emerald-500/50 bg-emerald-500/5" : "border-border/40"
+            )}
+            title={isTopPnl ? "Top 25% by net P&L (among iterations that traded)" : undefined}
           >
             {score > 0 && (
               <div
@@ -2145,25 +2323,25 @@ function IterationsTable({ iterations }: { iterations: ARIteration[] }) {
                   {it.status}
                 </Badge>
               </div>
-              <div className="col-span-3 truncate text-muted-foreground" title={it.narration}>
+              <div className="col-span-2 truncate text-muted-foreground" title={it.narration}>
                 {it.narration}
               </div>
-              <div className="col-span-2 text-right">
+              <div className="col-span-3 flex items-center justify-end gap-1.5">
+                {onContinueFromIteration && canInstall && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => onContinueFromIteration(it)}
+                    title="Start a new autoresearch session seeded with this iteration's params"
+                  >
+                    Continue
+                  </Button>
+                )}
                 <Button
                   size="sm"
                   variant="outline"
                   disabled={!canInstall || installMutation.isPending}
-                  onClick={() => {
-                    if (
-                      confirm(
-                        `Install iteration #${it.idx + 1} as the live config?\n\n` +
-                          `This will overwrite your current strategy params and the next bot tick will use:\n\n` +
-                          formatParamsForConfirm(it.params)
-                      )
-                    ) {
-                      installMutation.mutate(it.id);
-                    }
-                  }}
+                  onClick={() => setInstallTarget(it)}
                 >
                   Install
                 </Button>
@@ -2172,14 +2350,31 @@ function IterationsTable({ iterations }: { iterations: ARIteration[] }) {
           </div>
         );
       })}
+
+      {/* Install confirm modal — uses the project's reusable ConfirmModal
+          pattern instead of native confirm() */}
+      <ConfirmModal
+        open={installTarget !== null}
+        title={
+          installTarget
+            ? `Install iteration #${installTarget.idx + 1} as live config?`
+            : ""
+        }
+        description="These params become your tenant's live strategy. The next bot tick (within 60s) will use them."
+        consequences={
+          installTarget
+            ? Object.entries(installTarget.params).map(
+                ([k, v]) => `${k}: ${typeof v === "number" && !Number.isInteger(v) ? v.toFixed(4) : v}`
+              )
+            : []
+        }
+        confirmLabel="Install"
+        pending={installMutation.isPending}
+        onConfirm={() => installTarget && installMutation.mutate(installTarget.id)}
+        onCancel={() => setInstallTarget(null)}
+      />
     </div>
   );
-}
-
-function formatParamsForConfirm(params: Record<string, number>): string {
-  return Object.entries(params)
-    .map(([k, v]) => `  ${k}: ${v}`)
-    .join("\n");
 }
 
 function iterationStatusClass(status: ARIteration["status"]): string {

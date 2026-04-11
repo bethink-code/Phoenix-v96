@@ -433,6 +433,14 @@ export const autoresearchSessions = pgTable(
     // the operator's edits applied). Source of truth at runtime — the
     // orchestrator reads this column, not any module-level constant.
     systemPrompt: text("system_prompt").notNull().default(""),
+    // Optional starting params for the baseline iteration. When the
+    // operator clicks "Continue from this iteration" on a previous
+    // session's row, we copy that iteration's params here so the new
+    // session begins where the previous one's interesting result was —
+    // not from DEFAULT_PARAMS. The agent then refines from that point.
+    // Empty object means "use DEFAULT_PARAMS as baseline" (the
+    // historical behaviour).
+    seedParams: jsonb("seed_params").notNull().default({}),
     status: varchar("status", { length: 16 }).notNull().default("running"),
     // running | done | aborted | error | idle
     iterationsRun: integer("iterations_run").notNull().default(0),
