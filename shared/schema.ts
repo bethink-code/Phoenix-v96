@@ -406,6 +406,13 @@ export const autoresearchSessions = pgTable(
     regime: regimeEnum("regime").notNull(),
     model: varchar("model", { length: 64 }).notNull(), // gpt-4o, gpt-4o-mini, etc.
     maxIterations: integer("max_iterations").notNull(),
+    // The system prompt actually used for this session. Stored verbatim
+    // so the operator can audit what the agent was instructed to do.
+    // Sourced from the start request (which the client populates from
+    // the GET /api/autoresearch/default-system-prompt endpoint, with
+    // the operator's edits applied). Source of truth at runtime — the
+    // orchestrator reads this column, not any module-level constant.
+    systemPrompt: text("system_prompt").notNull().default(""),
     status: varchar("status", { length: 16 }).notNull().default("running"),
     // running | done | aborted | error | idle
     iterationsRun: integer("iterations_run").notNull().default(0),

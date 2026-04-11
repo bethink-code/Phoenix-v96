@@ -95,13 +95,23 @@ When picking your next hypothesis:
 
 Your responses are machine-parsed. JSON only. No markdown fences. No commentary outside the rationale field.`;
 
+// The default system prompt. The orchestrator does NOT use this directly
+// at runtime — every session carries its own `systemPrompt` value (set
+// via the start form, which fetches this default and lets the operator
+// edit it before submitting). This export exists so the
+// /api/autoresearch/default-system-prompt endpoint has something to
+// return, and so that buildMessages has a documented fallback if a
+// session row somehow has an empty systemPrompt.
+export const DEFAULT_SYSTEM_PROMPT = SYSTEM_PROMPT;
+
 export function buildMessages(args: {
   ctx: SessionContext;
   history: IterationSummary[];
   currentParams: ProposedParams;
   isBaseline: boolean;
+  systemPrompt: string;
 }): { role: "system" | "user"; content: string }[] {
-  const { ctx, history, currentParams, isBaseline } = args;
+  const { ctx, history, currentParams, isBaseline, systemPrompt } = args;
 
   const userContent = isBaseline
     ? `Goal: ${ctx.goal}
@@ -126,7 +136,7 @@ ${JSON.stringify(currentParams, null, 2)}
 Propose the next iteration. Return a JSON object with "params" (all fields) and "rationale" (1-2 sentences).`;
 
   return [
-    { role: "system", content: SYSTEM_PROMPT },
+    { role: "system", content: systemPrompt || DEFAULT_SYSTEM_PROMPT },
     { role: "user", content: userContent },
   ];
 }

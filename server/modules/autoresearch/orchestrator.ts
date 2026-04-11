@@ -62,6 +62,11 @@ export interface StartArgs {
   regime: Regime;
   model: string;
   maxIterations: number;
+  // The system prompt the operator confirmed (or edited) at session
+  // start. Stored verbatim on the session row and read by the LLM
+  // call inside the loop. The orchestrator never reads any module-level
+  // constant for the prompt — what's in the session row is what runs.
+  systemPrompt: string;
 }
 
 export async function startSession(args: StartArgs): Promise<AutoresearchSession> {
@@ -82,6 +87,7 @@ export async function startSession(args: StartArgs): Promise<AutoresearchSession
       regime: args.regime,
       model: args.model,
       maxIterations: args.maxIterations,
+      systemPrompt: args.systemPrompt,
       status: "running",
       createdByUserId: args.userId,
     })
@@ -161,6 +167,10 @@ async function runLoop(session: AutoresearchSession, args: StartArgs) {
           history,
           currentParams: bestParams,
           isBaseline: false,
+          // Read the prompt from the session row, NOT a module-level
+          // constant. The operator's confirmed/edited prompt at start
+          // time is what runs.
+          systemPrompt: session.systemPrompt,
         });
         const response = await chat({
           model: args.model,

@@ -22,6 +22,7 @@ import {
 import { applyRecommendation } from "./modules/experiments/applier";
 import { startSession, requestStop } from "./modules/autoresearch/orchestrator";
 import { isOpenAIConfigured } from "./modules/autoresearch/openai";
+import { DEFAULT_SYSTEM_PROMPT } from "./modules/autoresearch/prompt";
 import type { Timeframe } from "./modules/exchange/types";
 import {
   APPLIABLE_PARAM_KEYS,
@@ -402,6 +403,15 @@ export function registerRoutes(app: Express) {
     res.json({ available: isOpenAIConfigured() });
   });
 
+  // Returns the current default system prompt verbatim. The Start form
+  // fetches this when it opens, populates a textarea with it, and lets
+  // the operator edit before submitting. Source of truth at runtime is
+  // whatever the operator submitted — this endpoint just provides a
+  // sane starting point.
+  app.get("/api/autoresearch/default-system-prompt", isAuthenticated, (_req, res) => {
+    res.type("text/plain").send(DEFAULT_SYSTEM_PROMPT);
+  });
+
   app.post("/api/autoresearch/sessions", isAuthenticated, async (req, res) => {
     if (!isOpenAIConfigured()) {
       return res.status(400).json({
@@ -426,6 +436,11 @@ export function registerRoutes(app: Express) {
       ]),
       model: z.enum(["gpt-4o", "gpt-4o-mini"]),
       maxIterations: z.number().int().min(5).max(200),
+      // Operator-confirmed system prompt. Required — the client always
+      // submits the textarea contents (pre-populated from
+      // /api/autoresearch/default-system-prompt and editable). Capped
+      // at 20k chars so a runaway paste can't blow the column.
+      systemPrompt: z.string().min(50).max(20_000),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
@@ -458,6 +473,7 @@ export function registerRoutes(app: Express) {
         regime: parsed.data.regime,
         model: parsed.data.model,
         maxIterations: parsed.data.maxIterations,
+        systemPrompt: parsed.data.systemPrompt,
       });
       audit({
         userId: u.id,

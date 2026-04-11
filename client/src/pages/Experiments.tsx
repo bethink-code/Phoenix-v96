@@ -1123,6 +1123,20 @@ function StartSessionForm() {
   >("trending");
   const [model, setModel] = useState<"gpt-4o" | "gpt-4o-mini">("gpt-4o-mini");
   const [maxIterations, setMaxIterations] = useState(30);
+  const [systemPrompt, setSystemPrompt] = useState("");
+  const [promptOpen, setPromptOpen] = useState(false);
+
+  // Fetch the default system prompt when the form first opens. Only
+  // overwrites the textarea if it's empty — never clobbers an in-progress
+  // edit. This is the source of the agent's "constitution"; the operator
+  // sees and confirms it before every session.
+  useEffect(() => {
+    if (!open || systemPrompt) return;
+    fetch("/api/autoresearch/default-system-prompt", { credentials: "include" })
+      .then((r) => (r.ok ? r.text() : Promise.reject(r.statusText)))
+      .then((text) => setSystemPrompt(text))
+      .catch((err) => console.error("[autoresearch] fetch default prompt failed", err));
+  }, [open, systemPrompt]);
 
   const start = useMutation({
     mutationFn: async () => {
@@ -1136,6 +1150,7 @@ function StartSessionForm() {
           regime,
           model,
           maxIterations,
+          systemPrompt,
         }),
       });
       return r.json();
@@ -1245,6 +1260,38 @@ function StartSessionForm() {
           />
         </div>
       </div>
+      {/* System prompt — the agent's "constitution". Always editable,
+          always submitted with the request. Collapsed by default behind
+          a toggle so the form isn't a wall of text on first open, but
+          fully visible when the operator wants to read or edit. */}
+      <div className="mt-4 rounded border border-border/40 bg-background/40">
+        <button
+          type="button"
+          onClick={() => setPromptOpen((v) => !v)}
+          className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-xs hover:bg-card/40"
+        >
+          <span className="text-muted-foreground">
+            {promptOpen ? "▾" : "▸"} System prompt — the agent's instructions ({systemPrompt.length} chars)
+          </span>
+          <span className="text-[10px] text-muted-foreground/70">
+            click to {promptOpen ? "collapse" : "view / edit"}
+          </span>
+        </button>
+        {promptOpen && (
+          <div className="border-t border-border/40 p-3">
+            <textarea
+              value={systemPrompt}
+              onChange={(e) => setSystemPrompt(e.target.value)}
+              className="h-72 w-full rounded border border-border bg-card p-3 font-mono text-[11px] leading-relaxed"
+              spellCheck={false}
+            />
+            <p className="mt-2 text-[10px] text-muted-foreground/70">
+              This prompt is sent verbatim to the agent on every iteration of this session. The prompt is also stored on the session row so you can audit later. Edits here only affect this session — the default loaded from the server is unchanged.
+            </p>
+          </div>
+        )}
+      </div>
+
       <div className="mt-4 flex items-center justify-between gap-3">
         <span className="text-xs text-muted-foreground">
           Estimated cost: ~${estCost}
@@ -1256,7 +1303,7 @@ function StartSessionForm() {
           <Button
             size="sm"
             onClick={() => start.mutate()}
-            disabled={!canSubmit || start.isPending}
+            disabled={!canSubmit || start.isPending || systemPrompt.length < 50}
           >
             {start.isPending ? "Starting…" : "Start session"}
           </Button>
@@ -1277,14 +1324,107 @@ function StartSessionForm() {
 // `action` sentence that's the headline of every history card. The action
 // is what the operator can DO with the result. Everything else (goal text,
 // metadata, charts) is supporting context.
+//
+// `suggestions` are concrete one-click follow-up sessions the operator can
+// kick off. Each suggestion carries an `overrides` blob that the
+// StartSessionForm uses to pre-fill its fields when the suggestion button
+// is clicked. Rest of the form stays as-is so the operator can review.
+interface SessionPrefill {
+  pairId?: string;
+  timeframe?: "15m" | "1h" | "4h" | "12h" | "1d";
+  lookbackBars?: number;
+  regime?:
+    | "ranging"
+    | "trending"
+    | "breakout"
+    | "high_volatility"
+    | "low_liquidity"
+    | "accumulation_distribution";
+  model?: "gpt-4o" | "gpt-4o-mini";
+  maxIterations?: number;
+  goal?: string;
+}
+
+interface SessionSuggestion {
+  label: string; // button text
+  overrides: SessionPrefill; // values to pre-fill in the form
+}
+
 interface Verdict {
   tone: "good" | "neutral" | "bad";
   action: string; // BIG plain-language sentence — outcome + recommendation
   detail?: string; // optional supporting line, smaller
+  suggestions: SessionSuggestion[]; // one-click follow-up sessions
   foundWinner: boolean;
   bestIter: ARIteration | null;
   baseline: ARIteration | null;
 }
+
+// ---- Rejection aggregation (pure data, no opinions) ---------------------
+//
+// Sums rejection counts across every iteration in the session. Used by
+// the verdict to display facts ("X% of rejections were Y") — never to
+// recommend a fix. The agent owns the recommendation; this client only
+// surfaces what happened.
+
+interface RejectionAggregate {
+  total: number;
+  byReason: Array<{ reason: string; count: number; pct: number }>;
+}
+
+function aggregateRejections(iterations: ARIteration[]): RejectionAggregate {
+  const sums = new Map<string, number>();
+  let total = 0;
+  for (const it of iterations) {
+    if (!it.rejectionTop) continue;
+    for (const [reason, count] of Object.entries(it.rejectionTop)) {
+      sums.set(reason, (sums.get(reason) ?? 0) + count);
+      total += count;
+    }
+  }
+  const byReason = Array.from(sums.entries())
+    .map(([reason, count]) => ({
+      reason,
+      count,
+      pct: total > 0 ? (count / total) * 100 : 0,
+    }))
+    .sort((a, b) => b.count - a.count);
+  return { total, byReason };
+}
+
+// Human-readable label for a rejection reason. Pure rendering helper —
+// turns machine-readable codes into something a layperson can read,
+// nothing more.
+function humanReason(reason: string): string {
+  const map: Record<string, string> = {
+    no_levels: "no levels identified",
+    no_sweep: "no liquidity sweep detected",
+    no_proposal: "sweep found but no valid setup",
+    "risk_rejected:regime_suppresses_entries": "regime suppresses entries",
+    "risk_rejected:daily_drawdown_breached": "daily drawdown breached",
+    "risk_rejected:weekly_drawdown_breached": "weekly drawdown breached",
+    "risk_rejected:max_concurrent_positions_reached": "at max concurrent positions",
+    "risk_rejected:level_rank_below_minimum": "level rank below minimum",
+    "risk_rejected:rr_below_minimum": "R:R below minimum",
+    "risk_rejected:invalid_stop_distance": "invalid stop distance",
+    "risk_rejected:regime_size_multiplier_zero": "regime size multiplier zero",
+    "risk_rejected:below_min_order_size": "position below exchange minimum",
+    "risk_rejected:position_exceeds_capital": "position would exceed capital",
+  };
+  return map[reason] ?? reason;
+}
+
+// ---- Verdict computation -------------------------------------------------
+//
+// Pure data summarisation. The client describes WHAT happened (numbers
+// from the iteration log) and never WHAT TO DO (that's the agent's job
+// via its end-of-session summary, which lives on the session row once
+// implemented). If the data is "no trades found", the action says exactly
+// that and nothing more. No fixes, no exploratory suggestions, no
+// hypotheses about the underlying cause. The role split is:
+//
+//   Agent → testing strategy + recommendations
+//   Client → objective display
 
 function computeVerdict(session: ARSession, iterations: ARIteration[]): Verdict {
   const bestScore = session.bestScore ? Number(session.bestScore) : 0;
@@ -1293,38 +1433,65 @@ function computeVerdict(session: ARSession, iterations: ARIteration[]): Verdict 
   const foundWinner = bestScore > 0 && !!bestIter && bestIter.idx > 0;
   const maxTrades = Math.max(0, ...iterations.map((i) => i.trades));
   const noTradesFound = maxTrades === 0;
+  const agg = aggregateRejections(iterations);
 
-  let tone: Verdict["tone"] = "neutral";
-  let action: string;
-  let detail: string | undefined;
-
+  // Errored sessions: report what the server said.
   if (session.status === "error") {
-    tone = "bad";
-    action = "Session crashed before it could finish. Check the error and re-run.";
-    detail = session.errorMessage ?? undefined;
-  } else if (foundWinner) {
-    tone = "good";
+    return {
+      tone: "bad",
+      action: "Session crashed before it could finish.",
+      detail: session.errorMessage ?? undefined,
+      suggestions: [],
+      foundWinner: false,
+      bestIter,
+      baseline,
+    };
+  }
+
+  // Found a winner: describe the winning iteration with real numbers.
+  if (foundWinner) {
     const t = bestIter!.trades;
     const wr = Math.round(Number(bestIter!.winRate) * 100);
     const pnl = Number(bestIter!.netPnl);
-    action = `Use the config from iteration #${bestIter!.idx + 1}. ${t} trades, ${wr}% wins, ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} net PnL.`;
-    detail = `Score ${bestScore.toFixed(4)} vs baseline ${(baseline ? Number(baseline.score) : 0).toFixed(4)}.`;
-  } else if (noTradesFound) {
-    tone = "bad";
-    action = `This pair doesn't trade on ${session.timeframe} ${session.regime}. Try 4h or daily, switch regime to ranging, or pick a different pair.`;
-    detail = "Across all iterations, not a single setup made it through the strategy pipeline.";
+    return {
+      tone: "good",
+      action: `Iteration #${bestIter!.idx + 1} produced the best result: ${t} trades, ${wr}% wins, ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} net PnL.`,
+      detail: `Score ${bestScore.toFixed(4)} vs baseline ${(baseline ? Number(baseline.score) : 0).toFixed(4)}. The agent's iteration history has its rationale for why these params worked.`,
+      suggestions: [],
+      foundWinner: true,
+      bestIter,
+      baseline,
+    };
+  }
+
+  // No winner — describe what the data shows. The action is purely
+  // factual: "X iterations · Y trades · top rejection was Z (N%)". No
+  // recommendation. The agent's per-iteration rationales (visible in
+  // the Live tab and Iterations table) are the real analysis.
+  const factParts: string[] = [
+    `${session.iterationsRun} iterations completed`,
+    `${maxTrades === 0 ? "no trades produced" : `${maxTrades} trades at best`}`,
+    `best score ${bestScore.toFixed(4)}`,
+  ];
+  let detail: string | undefined;
+  if (agg.byReason.length > 0) {
+    const top3 = agg.byReason
+      .slice(0, 3)
+      .map((r) => `${Math.round(r.pct)}% ${humanReason(r.reason)}`)
+      .join(" · ");
+    detail = `Top rejection reasons across all iterations: ${top3}.`;
   } else {
-    // Some trades happened but score never beat baseline.
-    tone = "neutral";
-    action = `Best you can do here is the current default (${maxTrades} trades, score ${bestScore.toFixed(4)}). Try another regime or widen the search.`;
-    detail = "The LLM tried variants but none scored higher than the baseline.";
+    detail = "No rejection data was recorded for any iteration.";
   }
-
-  if (session.status === "aborted") {
-    detail = `${detail ?? ""}${detail ? " " : ""}Stopped early at iteration ${session.iterationsRun}/${session.maxIterations}.`;
-  }
-
-  return { tone, action, detail, foundWinner, bestIter, baseline };
+  return {
+    tone: noTradesFound ? "bad" : "neutral",
+    action: factParts.join(" · ") + ".",
+    detail,
+    suggestions: [],
+    foundWinner: false,
+    bestIter,
+    baseline,
+  };
 }
 
 function toneToClass(tone: Verdict["tone"]): string {

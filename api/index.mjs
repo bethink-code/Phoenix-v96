@@ -360,6 +360,13 @@ var autoresearchSessions = pgTable(
     model: varchar("model", { length: 64 }).notNull(),
     // gpt-4o, gpt-4o-mini, etc.
     maxIterations: integer("max_iterations").notNull(),
+    // The system prompt actually used for this session. Stored verbatim
+    // so the operator can audit what the agent was instructed to do.
+    // Sourced from the start request (which the client populates from
+    // the GET /api/autoresearch/default-system-prompt endpoint, with
+    // the operator's edits applied). Source of truth at runtime — the
+    // orchestrator reads this column, not any module-level constant.
+    systemPrompt: text("system_prompt").notNull().default(""),
     status: varchar("status", { length: 16 }).notNull().default("running"),
     // running | done | aborted | error | idle
     iterationsRun: integer("iterations_run").notNull().default(0),
@@ -2336,8 +2343,9 @@ When picking your next hypothesis:
 10. After ~10 iterations on a single dimension with no improvement, broaden to a different dimension.
 
 Your responses are machine-parsed. JSON only. No markdown fences. No commentary outside the rationale field.`;
+var DEFAULT_SYSTEM_PROMPT = SYSTEM_PROMPT;
 function buildMessages(args) {
-  const { ctx, history, currentParams, isBaseline } = args;
+  const { ctx, history, currentParams, isBaseline, systemPrompt } = args;
   const userContent = isBaseline ? `Goal: ${ctx.goal}
 
 Pair: ${ctx.pair.symbol} \xB7 timeframe: ${ctx.timeframe} \xB7 lookback: ${ctx.lookbackBars} bars \xB7 regime: ${ctx.regime}
@@ -2358,7 +2366,7 @@ ${JSON.stringify(currentParams, null, 2)}
 
 Propose the next iteration. Return a JSON object with "params" (all fields) and "rationale" (1-2 sentences).`;
   return [
-    { role: "system", content: SYSTEM_PROMPT },
+    { role: "system", content: systemPrompt || DEFAULT_SYSTEM_PROMPT },
     { role: "user", content: userContent }
   ];
 }
@@ -2478,6 +2486,7 @@ async function startSession(args) {
     regime: args.regime,
     model: args.model,
     maxIterations: args.maxIterations,
+    systemPrompt: args.systemPrompt,
     status: "running",
     createdByUserId: args.userId
   }).returning();
@@ -2534,7 +2543,11 @@ async function runLoop(session2, args) {
           ctx,
           history,
           currentParams: bestParams,
-          isBaseline: false
+          isBaseline: false,
+          // Read the prompt from the session row, NOT a module-level
+          // constant. The operator's confirmed/edited prompt at start
+          // time is what runs.
+          systemPrompt: session2.systemPrompt
         });
         const response = await chat({
           model: args.model,
@@ -3035,6 +3048,9 @@ function registerRoutes(app2) {
   app2.get("/api/autoresearch/capabilities", isAuthenticated, (_req, res) => {
     res.json({ available: isOpenAIConfigured() });
   });
+  app2.get("/api/autoresearch/default-system-prompt", isAuthenticated, (_req, res) => {
+    res.type("text/plain").send(DEFAULT_SYSTEM_PROMPT);
+  });
   app2.post("/api/autoresearch/sessions", isAuthenticated, async (req, res) => {
     if (!isOpenAIConfigured()) {
       return res.status(400).json({
@@ -3057,7 +3073,12 @@ function registerRoutes(app2) {
         "accumulation_distribution"
       ]),
       model: z2.enum(["gpt-4o", "gpt-4o-mini"]),
-      maxIterations: z2.number().int().min(5).max(200)
+      maxIterations: z2.number().int().min(5).max(200),
+      // Operator-confirmed system prompt. Required — the client always
+      // submits the textarea contents (pre-populated from
+      // /api/autoresearch/default-system-prompt and editable). Capped
+      // at 20k chars so a runaway paste can't blow the column.
+      systemPrompt: z2.string().min(50).max(2e4)
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) {
@@ -3085,7 +3106,8 @@ function registerRoutes(app2) {
         lookbackBars: parsed.data.lookbackBars,
         regime: parsed.data.regime,
         model: parsed.data.model,
-        maxIterations: parsed.data.maxIterations
+        maxIterations: parsed.data.maxIterations,
+        systemPrompt: parsed.data.systemPrompt
       });
       audit({
         userId: u.id,
