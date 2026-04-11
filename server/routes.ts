@@ -700,25 +700,28 @@ export function registerRoutes(app: Express) {
         minTouches: seeded.minTouches,
       });
 
-      // Replay the BEST iteration's backtest so the chart can plot
-      // where the strategy actually fired. "Best" = highest netPnl
-      // among iterations that traded. If none, no overlay.
+      // Replay every profitable iteration's backtest and collect all
+      // winning trades. Clustering of entries across different param
+      // sets = robust entry edge; scattered = coincidence. Gives the
+      // operator a time-space view of where the engine agrees a trade
+      // existed, regardless of which config spotted it.
       const iterations = await storage.listAutoresearchIterations(id);
-      const bestIteration = iterations
-        .filter((i) => i.trades > 0 && Number(i.netPnl) > 0)
-        .sort((a, b) => Number(b.netPnl) - Number(a.netPnl))[0];
-      let trades: Array<{
+      const profitable = iterations.filter(
+        (i) => i.trades > 0 && Number(i.netPnl) > 0
+      );
+      const trades: Array<{
         openedAt: number;
         closedAt: number;
         side: "long" | "short";
         entry: number;
         realisedPnl: number;
         outcome: "target" | "stop" | "timeout";
+        iterationIdx: number;
       }> = [];
-      if (bestIteration) {
+      for (const it of profitable) {
         const p = {
           ...DEFAULT_PARAMS,
-          ...(bestIteration.params as Partial<typeof DEFAULT_PARAMS>),
+          ...(it.params as Partial<typeof DEFAULT_PARAMS>),
         };
         const result = runBacktest({
           candles,
@@ -742,14 +745,19 @@ export function registerRoutes(app: Express) {
           sweepConfig: { minWickProtrusionPct: p.minWickProtrusionPct },
           proposalConfig: { targetDistanceMultiplier: p.targetDistanceMultiplier },
         });
-        trades = result.tradeLog.map((t) => ({
-          openedAt: t.openedAt,
-          closedAt: t.closedAt,
-          side: t.side,
-          entry: t.entry,
-          realisedPnl: t.realisedPnl,
-          outcome: t.outcome,
-        }));
+        for (const t of result.tradeLog) {
+          if (t.realisedPnl > 0) {
+            trades.push({
+              openedAt: t.openedAt,
+              closedAt: t.closedAt,
+              side: t.side,
+              entry: t.entry,
+              realisedPnl: t.realisedPnl,
+              outcome: t.outcome,
+              iterationIdx: it.idx,
+            });
+          }
+        }
       }
 
       res.json({ candles, levels, trades });

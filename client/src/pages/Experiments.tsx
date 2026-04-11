@@ -1399,6 +1399,7 @@ interface ChartTrade {
   entry: number;
   realisedPnl: number;
   outcome: "target" | "stop" | "timeout";
+  iterationIdx: number;
 }
 function ChartView({ sessionId }: { sessionId: string }) {
   const q = useQuery<{ candles: ChartCandle[]; levels: ChartLevel[]; trades: ChartTrade[] }>({
@@ -1417,7 +1418,37 @@ function ChartView({ sessionId }: { sessionId: string }) {
     );
   }
   const { candles, levels, trades } = q.data;
+  // Group winning trades by the candle they entered on. Count of
+  // distinct iterations agreeing there was a trade here = density.
+  // Bigger dot = more winning configs spotted the same entry. Clusters
+  // are robust edge; one-off dots are noise.
   const winningTrades = trades.filter((t) => t.realisedPnl > 0);
+  const tradeClusters = new Map<
+    string,
+    { openedAt: number; entry: number; count: number; iterations: Set<number> }
+  >();
+  for (const t of winningTrades) {
+    // Bucket by entry candle time. Same candle + different price would
+    // still be one event — averaging the price on stacked hits.
+    const key = String(t.openedAt);
+    const existing = tradeClusters.get(key);
+    if (existing) {
+      existing.iterations.add(t.iterationIdx);
+      existing.count = existing.iterations.size;
+      // Weighted average entry (useful if two different iterations'
+      // exact fill prices differ by a tick)
+      existing.entry = (existing.entry * (existing.count - 1) + t.entry) / existing.count;
+    } else {
+      tradeClusters.set(key, {
+        openedAt: t.openedAt,
+        entry: t.entry,
+        count: 1,
+        iterations: new Set([t.iterationIdx]),
+      });
+    }
+  }
+  const clusters = Array.from(tradeClusters.values());
+  const maxCluster = clusters.reduce((m, c) => Math.max(m, c.count), 1);
   if (candles.length === 0) {
     return <div className="text-xs text-muted-foreground">No candles in window.</div>;
   }
@@ -1547,11 +1578,11 @@ function ChartView({ sessionId }: { sessionId: string }) {
   return (
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground">
-        {candles.length} candles · {pools.length} liquidity pools ({pools.filter((p) => p.sweepIdx === null).length} live, {pools.filter((p) => p.sweepIdx !== null).length} swept) · {winningTrades.length} winning trades from best iteration.
-        Each box anchors at the candle that formed the pool and extends forward
-        until price sweeps through it. Open boxes are still-live targets;
-        faded boxes have already been taken. White dots mark profitable
-        entries from the highest-P&L iteration.
+        {candles.length} candles · {pools.length} liquidity pools ({pools.filter((p) => p.sweepIdx === null).length} live, {pools.filter((p) => p.sweepIdx !== null).length} swept) · {clusters.length} winning entry points across {winningTrades.length} trades from {new Set(winningTrades.map((t) => t.iterationIdx)).size} profitable iterations.
+        White dots mark entries where at least one winning config fired.
+        Dot size scales with how many different iterations agreed there
+        was a trade at that candle — big dots are robust edges, single
+        dots are coincidence.
       </p>
       <div className="overflow-hidden rounded border border-border/40 bg-card/30">
         <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full">
@@ -1632,23 +1663,27 @@ function ChartView({ sessionId }: { sessionId: string }) {
               </g>
             );
           })}
-          {/* Winning trades from the best iteration — white dots at
-              the entry candle. Sits on top of everything so the
-              operator can see exactly where the strategy fired. */}
-          {winningTrades.map((t, i) => {
-            const idx = candleByTime.get(t.openedAt);
+          {/* Winning entry points — white dots at each candle where
+              at least one profitable iteration opened a trade. Radius
+              scales with how many distinct iterations agreed on the
+              entry (clustering = robust edge). */}
+          {clusters.map((c, i) => {
+            const idx = candleByTime.get(c.openedAt);
             if (idx === undefined) return null;
             const x = xFor(idx);
-            const y = yFor(t.entry);
+            const y = yFor(c.entry);
+            // Scale radius from 3 (single iteration) up to 9 (all winners agree)
+            const r = 3 + (c.count / maxCluster) * 6;
             return (
               <circle
-                key={`trade-${i}`}
+                key={`cluster-${i}`}
                 cx={x}
                 cy={y}
-                r={3}
+                r={r}
                 fill="#ffffff"
                 stroke="#000000"
-                strokeWidth={0.5}
+                strokeWidth={0.75}
+                opacity={0.9}
               />
             );
           })}

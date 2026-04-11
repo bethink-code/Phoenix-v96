@@ -3507,12 +3507,14 @@ function registerRoutes(app2) {
         minTouches: seeded.minTouches
       });
       const iterations = await storage.listAutoresearchIterations(id);
-      const bestIteration = iterations.filter((i) => i.trades > 0 && Number(i.netPnl) > 0).sort((a, b) => Number(b.netPnl) - Number(a.netPnl))[0];
-      let trades2 = [];
-      if (bestIteration) {
+      const profitable = iterations.filter(
+        (i) => i.trades > 0 && Number(i.netPnl) > 0
+      );
+      const trades2 = [];
+      for (const it of profitable) {
         const p = {
           ...DEFAULT_PARAMS,
-          ...bestIteration.params
+          ...it.params
         };
         const result = runBacktest({
           candles,
@@ -3536,14 +3538,19 @@ function registerRoutes(app2) {
           sweepConfig: { minWickProtrusionPct: p.minWickProtrusionPct },
           proposalConfig: { targetDistanceMultiplier: p.targetDistanceMultiplier }
         });
-        trades2 = result.tradeLog.map((t) => ({
-          openedAt: t.openedAt,
-          closedAt: t.closedAt,
-          side: t.side,
-          entry: t.entry,
-          realisedPnl: t.realisedPnl,
-          outcome: t.outcome
-        }));
+        for (const t of result.tradeLog) {
+          if (t.realisedPnl > 0) {
+            trades2.push({
+              openedAt: t.openedAt,
+              closedAt: t.closedAt,
+              side: t.side,
+              entry: t.entry,
+              realisedPnl: t.realisedPnl,
+              outcome: t.outcome,
+              iterationIdx: it.idx
+            });
+          }
+        }
       }
       res.json({ candles, levels, trades: trades2 });
     }
