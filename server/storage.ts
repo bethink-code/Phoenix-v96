@@ -17,8 +17,12 @@ import {
   riskEvents,
   experiments,
   experimentRuns,
+  autoresearchSessions,
+  autoresearchIterations,
   type Experiment,
   type InsertExperiment,
+  type AutoresearchSession,
+  type AutoresearchIteration,
   type User,
   type InsertUser,
   type Tenant,
@@ -567,6 +571,49 @@ export const storage = {
         target: cachedSymbols.exchange,
         set: { symbols: symbols as object, refreshedAt: new Date() },
       });
+  },
+
+  // ---------- Autoresearch sessions ----------
+
+  async listAutoresearchSessions(tenantId: string): Promise<AutoresearchSession[]> {
+    return db
+      .select()
+      .from(autoresearchSessions)
+      .where(eq(autoresearchSessions.tenantId, tenantId))
+      .orderBy(desc(autoresearchSessions.startedAt));
+  },
+
+  async getAutoresearchSession(id: string): Promise<AutoresearchSession | null> {
+    const [row] = await db
+      .select()
+      .from(autoresearchSessions)
+      .where(eq(autoresearchSessions.id, id));
+    return row ?? null;
+  },
+
+  async listAutoresearchIterations(sessionId: string): Promise<AutoresearchIteration[]> {
+    return db
+      .select()
+      .from(autoresearchIterations)
+      .where(eq(autoresearchIterations.sessionId, sessionId))
+      .orderBy(autoresearchIterations.idx);
+  },
+
+  // Currently-active session for a tenant. Used by the UI to figure out
+  // whether to show "Start" or "running" state.
+  async findRunningAutoresearchSession(tenantId: string): Promise<AutoresearchSession | null> {
+    const [row] = await db
+      .select()
+      .from(autoresearchSessions)
+      .where(
+        and(
+          eq(autoresearchSessions.tenantId, tenantId),
+          eq(autoresearchSessions.status, "running")
+        )
+      )
+      .orderBy(desc(autoresearchSessions.startedAt))
+      .limit(1);
+    return row ?? null;
   },
 
   // ---------- Experiments (PRD §11) ----------

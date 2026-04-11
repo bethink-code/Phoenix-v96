@@ -15,9 +15,7 @@
     "start": "node dist-server/index.mjs",
     "db:push": "doppler run -- drizzle-kit push",
     "db:studio": "doppler run -- drizzle-kit studio",
-    "typecheck": "tsc --noEmit",
-    "autoresearch:prepare": "tsx autoresearch/prepare.ts",
-    "autoresearch:train": "tsx autoresearch/train.ts"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.1",

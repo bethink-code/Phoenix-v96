@@ -9,7 +9,3 @@ dist-server
 .vscode
 .idea
 drizzle/meta
-
-# Autoresearch — experiment log + run output, never committed
-autoresearch/results.tsv
-autoresearch/run.log

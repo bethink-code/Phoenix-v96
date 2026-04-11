@@ -6,6 +6,7 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import ResearcherIdentityCard from "@/components/ResearcherIdentityCard";
 import { apiRequest } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
 import type {
@@ -55,21 +56,8 @@ interface MarketPair {
 
 type TabKey = "library" | "recommendations" | "history" | "autoresearch";
 
-interface AutoresearchProbe {
+interface AutoresearchCapabilities {
   available: boolean;
-  runs?: AutoresearchRun[];
-  branch?: string | null;
-  updatedAt?: string;
-}
-
-interface AutoresearchRun {
-  commit: string;
-  score: string;
-  trades: string;
-  win_rate: string;
-  net_pnl: string;
-  status: string;
-  description: string;
 }
 
 export default function Experiments() {
@@ -79,16 +67,15 @@ export default function Experiments() {
   });
   const pendingCount = pendingQuery.data?.length ?? 0;
 
-  // Probe once on mount: does autoresearch/results.tsv exist on the server's
-  // disk? On Vercel it never does, so the tab stays hidden in production.
-  // On localhost (after running the harness once) it does, so the tab shows.
-  // Polling at 30s — agent iterations are seconds long but we don't need
-  // sub-30s freshness, and faster polling burns the rate limit budget.
-  const autoresearchProbe = useQuery<AutoresearchProbe>({
-    queryKey: ["/api/autoresearch/results"],
-    refetchInterval: 30_000,
+  // Probe whether the server has OPENAI_API_KEY configured. On prd it
+  // doesn't (we keep the key out of prd config by design) so the tab
+  // stays hidden in production. On localhost with the dev Doppler
+  // config, it shows. Cached — capabilities don't change at runtime.
+  const capabilities = useQuery<AutoresearchCapabilities>({
+    queryKey: ["/api/autoresearch/capabilities"],
+    staleTime: Infinity,
   });
-  const autoresearchAvailable = autoresearchProbe.data?.available ?? false;
+  const autoresearchAvailable = capabilities.data?.available ?? false;
 
   const tabs: Array<{ key: TabKey; label: string; count: number | null }> = [
     { key: "library", label: "Library", count: null },
@@ -99,7 +86,7 @@ export default function Experiments() {
     tabs.push({
       key: "autoresearch",
       label: "Autoresearch",
-      count: autoresearchProbe.data?.runs?.length ?? 0,
+      count: null,
     });
   }
 
@@ -146,9 +133,7 @@ export default function Experiments() {
             {tab === "library" && <LibraryTab />}
             {tab === "recommendations" && <RecommendationsTab />}
             {tab === "history" && <HistoryTab />}
-            {tab === "autoresearch" && autoresearchAvailable && (
-              <AutoresearchTab probe={autoresearchProbe.data!} />
-            )}
+            {tab === "autoresearch" && autoresearchAvailable && <AutoresearchTab />}
           </div>
         </Card>
       </main>
@@ -724,142 +709,542 @@ function verdictClass(v: RunRow["verdict"]): string {
 // AUTORESEARCH TAB — local-only viewer for results.tsv
 // ---------------------------------------------------------------------------
 //
-// Reads from /api/autoresearch/results which only exists when the harness
-// has been run on the same machine that's serving the API. The tab itself
-// is gated on the probe's `available` flag, so this component never renders
-// in production. The polling cadence is gentle (5s) so a long-running agent
-// loop's commits land in the table without manual refresh.
+// Bounded LLM-driven parameter search. Mirrors the Dashboard pattern:
+// identity card on top with status + actions, then inner tabs for the
+// live narration feed, the iteration table, and the archive of past
+// sessions. Local-only — gated upstream by the OPENAI_API_KEY probe.
 
-function AutoresearchTab({ probe }: { probe: AutoresearchProbe }) {
-  const runs = probe.runs ?? [];
-  const sorted = [...runs].sort(
-    (a, b) => Number(b.score ?? 0) - Number(a.score ?? 0)
-  );
-  const best = sorted[0];
-  const lastUpdated = probe.updatedAt ? new Date(probe.updatedAt) : null;
+interface ARSession {
+  id: string;
+  goal: string;
+  pairId: string;
+  timeframe: string;
+  lookbackBars: number;
+  regime: string;
+  model: string;
+  maxIterations: number;
+  status: "running" | "done" | "aborted" | "error";
+  iterationsRun: number;
+  bestIterationId: string | null;
+  bestScore: string | null;
+  totalCostUsd: string;
+  errorMessage: string | null;
+  startedAt: string;
+  stoppedAt: string | null;
+}
 
-  if (runs.length === 0) {
-    return (
-      <div className="space-y-3 p-6">
-        <div className="rounded-md border border-border/60 bg-card/40 p-4 text-xs text-muted-foreground">
-          <div className="mb-1 font-mono text-foreground">
-            Branch: {probe.branch ?? "(unknown)"}
-          </div>
-          <p>
-            No autoresearch runs yet. Open Codex (or your preferred coding
-            agent) in this directory and prompt:{" "}
-            <span className="italic text-foreground">
-              "Read autoresearch/program.md and kick off an experiment."
-            </span>
-          </p>
-        </div>
-      </div>
-    );
-  }
+interface ARIteration {
+  id: string;
+  sessionId: string;
+  idx: number;
+  params: Record<string, number>;
+  score: string;
+  trades: number;
+  winRate: string;
+  netPnl: string;
+  maxDrawdownPct: string;
+  barsEvaluated: number;
+  entriesTaken: number;
+  rejectionTop: Record<string, number> | null;
+  status: "keep" | "discard" | "crash" | "baseline";
+  narration: string;
+  rationale: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: string;
+  createdAt: string;
+}
 
-  const maxScore = Math.max(...runs.map((r) => Number(r.score) || 0), 0.0001);
+function AutoresearchTab() {
+  const qc = useQueryClient();
+  const [innerTab, setInnerTab] = useState<"live" | "iterations" | "archive">("live");
+
+  // Active session = currently running, OR most recently finished. The
+  // identity card always shows ONE session — we resolve which one to show
+  // by checking active first, then falling back to the latest archive
+  // entry. This way the operator sees their last result without needing
+  // to dig into archive.
+  const activeQuery = useQuery<ARSession | null>({
+    queryKey: ["/api/autoresearch/active"],
+    refetchInterval: 3_000,
+  });
+  const archiveQuery = useQuery<ARSession[]>({
+    queryKey: ["/api/autoresearch/sessions"],
+    // Refetch when active session goes from running -> done
+    refetchInterval: activeQuery.data?.status === "running" ? 3_000 : false,
+  });
+
+  const focusedSession =
+    activeQuery.data ?? (archiveQuery.data?.[0] ?? null);
+
+  // Iterations for the focused session, polled while running
+  const iterationsQuery = useQuery<ARIteration[]>({
+    queryKey: focusedSession
+      ? [`/api/autoresearch/sessions/${focusedSession.id}/iterations`]
+      : ["__no_session__"],
+    enabled: !!focusedSession,
+    refetchInterval: focusedSession?.status === "running" ? 3_000 : false,
+  });
+
+  const stopMutation = useMutation({
+    mutationFn: async (sessionId: string) => {
+      const r = await apiRequest(`/api/autoresearch/sessions/${sessionId}/stop`, {
+        method: "POST",
+      });
+      return r.json();
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/autoresearch/active"] });
+    },
+    onError: (e) => alert(`Stop failed: ${(e as Error).message}`),
+  });
+
+  const status: "idle" | "running" | "done" | "aborted" | "error" =
+    focusedSession?.status ?? "idle";
+  const iterationsRun = focusedSession?.iterationsRun ?? 0;
+  const maxIterations = focusedSession?.maxIterations ?? 0;
+  const bestScore = focusedSession?.bestScore ? Number(focusedSession.bestScore) : null;
+  const spentUsd = focusedSession?.totalCostUsd ? Number(focusedSession.totalCostUsd) : 0;
 
   return (
     <div className="space-y-4 p-6">
-      {/* Header — branch + last updated + count */}
-      <div className="flex flex-wrap items-baseline justify-between gap-3 text-xs">
-        <div className="font-mono text-muted-foreground">
-          Branch: <span className="text-foreground">{probe.branch ?? "(unknown)"}</span>
-          {" · "}
-          {runs.length} experiment{runs.length === 1 ? "" : "s"}
-        </div>
-        {lastUpdated && (
-          <div className="text-muted-foreground">
-            results.tsv updated {lastUpdated.toLocaleTimeString()}
+      <ResearcherIdentityCard
+        status={status}
+        iterationsRun={iterationsRun}
+        maxIterations={maxIterations}
+        bestScore={bestScore}
+        spentUsd={spentUsd}
+        goal={focusedSession?.goal}
+        stats={
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <StatBlock label="Status" value={status.toUpperCase()} />
+            <StatBlock
+              label="Iteration"
+              value={
+                focusedSession ? `${iterationsRun} / ${maxIterations}` : "—"
+              }
+            />
+            <StatBlock
+              label="Best score"
+              value={bestScore != null && bestScore > 0 ? bestScore.toFixed(4) : "—"}
+            />
+            <StatBlock label="Spent" value={`$${spentUsd.toFixed(2)}`} />
           </div>
-        )}
-      </div>
-
-      {/* Best so far */}
-      {best && Number(best.score) > 0 && (
-        <div className="rounded-md border border-emerald-500/40 bg-emerald-500/5 p-4">
-          <div className="mb-1 text-[10px] uppercase tracking-wide text-emerald-300/80">
-            Best so far
-          </div>
-          <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm">
-            <span className="font-mono text-foreground">{best.commit}</span>
-            <span className="text-emerald-300">score {Number(best.score).toFixed(4)}</span>
-            <span className="text-muted-foreground">
-              {best.trades} trades · {Math.round(Number(best.win_rate) * 100)}% wins · ${Number(best.net_pnl).toFixed(2)} PnL
-            </span>
-          </div>
-          <p className="mt-1 text-xs text-muted-foreground">{best.description}</p>
-        </div>
-      )}
-
-      {/* Full table */}
-      <div className="space-y-1">
-        <div className="grid grid-cols-12 gap-2 px-3 py-1 text-[10px] uppercase tracking-wide text-muted-foreground">
-          <div className="col-span-2 font-mono">commit</div>
-          <div className="col-span-1 text-right">score</div>
-          <div className="col-span-1 text-right">trades</div>
-          <div className="col-span-1 text-right">win%</div>
-          <div className="col-span-1 text-right">pnl</div>
-          <div className="col-span-1">status</div>
-          <div className="col-span-5">description</div>
-        </div>
-        {runs
-          .slice()
-          .reverse()
-          .map((r, i) => {
-            const score = Number(r.score) || 0;
-            const widthPct = (score / maxScore) * 100;
-            return (
-              <div
-                key={`${r.commit}-${i}`}
-                className="relative overflow-hidden rounded border border-border/40 bg-card/30"
+        }
+        actions={
+          <div className="flex flex-wrap items-center gap-2">
+            {status === "running" && focusedSession ? (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => stopMutation.mutate(focusedSession.id)}
+                disabled={stopMutation.isPending}
               >
-                {score > 0 && (
-                  <div
-                    className="absolute inset-y-0 left-0 bg-primary/10"
-                    style={{ width: `${widthPct}%` }}
-                  />
-                )}
-                <div className="relative grid grid-cols-12 items-center gap-2 px-3 py-2 text-xs">
-                  <div className="col-span-2 truncate font-mono text-foreground">{r.commit}</div>
-                  <div className="col-span-1 text-right font-mono">{score.toFixed(4)}</div>
-                  <div className="col-span-1 text-right font-mono text-muted-foreground">
-                    {r.trades}
-                  </div>
-                  <div className="col-span-1 text-right font-mono text-muted-foreground">
-                    {Math.round(Number(r.win_rate) * 100)}%
-                  </div>
-                  <div className="col-span-1 text-right font-mono text-muted-foreground">
-                    {Number(r.net_pnl).toFixed(0)}
-                  </div>
-                  <div className="col-span-1">
-                    <Badge className={cn("text-[10px]", autoresearchStatusClass(r.status))}>
-                      {r.status}
-                    </Badge>
-                  </div>
-                  <div className="col-span-5 truncate text-muted-foreground" title={r.description}>
-                    {r.description}
-                  </div>
-                </div>
-              </div>
-            );
-          })}
+                {stopMutation.isPending ? "Stopping…" : "Stop"}
+              </Button>
+            ) : (
+              <StartSessionForm />
+            )}
+            {focusedSession && focusedSession.errorMessage && (
+              <span className="text-xs text-red-300">{focusedSession.errorMessage}</span>
+            )}
+          </div>
+        }
+      />
+
+      {/* Inner tabs */}
+      <div className="rounded-md border border-border bg-card/40">
+        <div className="flex shrink-0 gap-1 border-b border-border px-4">
+          {(
+            [
+              { key: "live", label: "Live" },
+              { key: "iterations", label: "Iterations" },
+              { key: "archive", label: "Archive" },
+            ] as const
+          ).map((t) => (
+            <button
+              key={t.key}
+              onClick={() => setInnerTab(t.key)}
+              className={cn(
+                "-mb-px border-b-2 px-3 py-2 text-xs transition-colors",
+                innerTab === t.key
+                  ? "border-primary text-primary"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
+              )}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+        <div className="max-h-[480px] overflow-y-auto">
+          {innerTab === "live" && (
+            <LiveResearchFeed
+              session={focusedSession}
+              iterations={iterationsQuery.data ?? []}
+            />
+          )}
+          {innerTab === "iterations" && (
+            <IterationsTable iterations={iterationsQuery.data ?? []} />
+          )}
+          {innerTab === "archive" && (
+            <ArchiveList
+              sessions={archiveQuery.data ?? []}
+              activeId={focusedSession?.id ?? null}
+            />
+          )}
+        </div>
       </div>
     </div>
   );
 }
 
-function autoresearchStatusClass(status: string): string {
+function StatBlock({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+        {label}
+      </div>
+      <div className="mt-0.5 text-lg font-semibold text-foreground">{value}</div>
+    </div>
+  );
+}
+
+// ---- Start session form ---------------------------------------------------
+
+function StartSessionForm() {
+  const qc = useQueryClient();
+  const pairs = useQuery<MarketPair[]>({ queryKey: ["/api/markets"] });
+  const [open, setOpen] = useState(false);
+  const [goal, setGoal] = useState(
+    "Find a config where this pair opens at least 1 trade per day with positive net PnL."
+  );
+  const [pairId, setPairId] = useState("");
+  const [timeframe, setTimeframe] = useState<"15m" | "1h" | "4h" | "12h" | "1d">("1h");
+  const [lookbackBars, setLookbackBars] = useState(500);
+  const [model, setModel] = useState<"gpt-4o" | "gpt-4o-mini">("gpt-4o-mini");
+  const [maxIterations, setMaxIterations] = useState(30);
+
+  const start = useMutation({
+    mutationFn: async () => {
+      const r = await apiRequest("/api/autoresearch/sessions", {
+        method: "POST",
+        body: JSON.stringify({
+          goal,
+          pairId,
+          timeframe,
+          lookbackBars,
+          regime: "trending", // we'll let the operator pick later if needed
+          model,
+          maxIterations,
+        }),
+      });
+      return r.json();
+    },
+    onSuccess: () => {
+      setOpen(false);
+      qc.invalidateQueries({ queryKey: ["/api/autoresearch/active"] });
+      qc.invalidateQueries({ queryKey: ["/api/autoresearch/sessions"] });
+    },
+    onError: (e) => alert(`Start failed: ${(e as Error).message}`),
+  });
+
+  if (!open) {
+    return (
+      <Button size="sm" onClick={() => setOpen(true)}>
+        Start a session
+      </Button>
+    );
+  }
+
+  // Cost ballpark — see openai.ts PRICING. Each iteration ~2k input + 500
+  // output tokens. This is informational only.
+  const costPerIter = model === "gpt-4o" ? 0.01 : 0.0006;
+  const estCost = (costPerIter * maxIterations).toFixed(2);
+
+  const canSubmit = goal.trim().length > 5 && pairId.length > 0;
+
+  return (
+    <div className="w-full rounded-md border border-primary/40 bg-primary/5 p-4">
+      <h3 className="mb-3 text-sm font-semibold">New autoresearch session</h3>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div className="sm:col-span-2">
+          <Label className="text-xs">Goal</Label>
+          <Input value={goal} onChange={(e) => setGoal(e.target.value)} />
+        </div>
+        <div>
+          <Label className="text-xs">Pair</Label>
+          <select
+            value={pairId}
+            onChange={(e) => setPairId(e.target.value)}
+            className="h-9 w-full rounded-md border border-border bg-card px-3 text-sm"
+          >
+            <option value="">— pick a pair —</option>
+            {pairs.data?.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.displayName}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <Label className="text-xs">Timeframe</Label>
+          <select
+            value={timeframe}
+            onChange={(e) => setTimeframe(e.target.value as typeof timeframe)}
+            className="h-9 w-full rounded-md border border-border bg-card px-3 text-sm"
+          >
+            <option value="15m">15 minute</option>
+            <option value="1h">1 hour</option>
+            <option value="4h">4 hour</option>
+            <option value="12h">12 hour</option>
+            <option value="1d">Daily</option>
+          </select>
+        </div>
+        <div>
+          <Label className="text-xs">Lookback (bars)</Label>
+          <Input
+            type="number"
+            value={lookbackBars}
+            onChange={(e) => setLookbackBars(Number(e.target.value) || 0)}
+          />
+        </div>
+        <div>
+          <Label className="text-xs">Model</Label>
+          <select
+            value={model}
+            onChange={(e) => setModel(e.target.value as typeof model)}
+            className="h-9 w-full rounded-md border border-border bg-card px-3 text-sm"
+          >
+            <option value="gpt-4o-mini">gpt-4o-mini (cheap, ~$0.02/session)</option>
+            <option value="gpt-4o">gpt-4o (better, ~$0.30/session)</option>
+          </select>
+        </div>
+        <div>
+          <Label className="text-xs">Iterations (10–200)</Label>
+          <Input
+            type="number"
+            value={maxIterations}
+            onChange={(e) =>
+              setMaxIterations(Math.max(10, Math.min(200, Number(e.target.value) || 30)))
+            }
+          />
+        </div>
+      </div>
+      <div className="mt-4 flex items-center justify-between gap-3">
+        <span className="text-xs text-muted-foreground">
+          Estimated cost: ~${estCost}
+        </span>
+        <div className="flex gap-2">
+          <Button size="sm" variant="ghost" onClick={() => setOpen(false)}>
+            Cancel
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => start.mutate()}
+            disabled={!canSubmit || start.isPending}
+          >
+            {start.isPending ? "Starting…" : "Start session"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---- Live research feed ---------------------------------------------------
+
+function LiveResearchFeed({
+  session,
+  iterations,
+}: {
+  session: ARSession | null;
+  iterations: ARIteration[];
+}) {
+  if (!session) {
+    return (
+      <div className="p-6 text-xs text-muted-foreground">
+        No session yet. Click "Start a session" above to kick one off.
+      </div>
+    );
+  }
+  if (iterations.length === 0 && session.status === "running") {
+    return (
+      <div className="p-6 text-xs text-muted-foreground">
+        Session started. First iteration in flight…
+      </div>
+    );
+  }
+  if (iterations.length === 0) {
+    return <div className="p-6 text-xs text-muted-foreground">No iterations yet.</div>;
+  }
+  // Newest at top — same as the bot's HeartbeatFeed
+  const reversed = [...iterations].reverse();
+  return (
+    <div className="space-y-3 p-6">
+      {reversed.map((it) => (
+        <div
+          key={it.id}
+          className={cn(
+            "border-l-2 pl-4 leading-snug",
+            iterationMoodClass(it.status)
+          )}
+        >
+          <div className="text-sm">{it.narration}</div>
+          {it.rationale && (
+            <div className="mt-0.5 text-[11px] italic text-muted-foreground">
+              "{it.rationale}"
+            </div>
+          )}
+          <div className="mt-0.5 text-[10px] text-muted-foreground/70">
+            {new Date(it.createdAt).toLocaleTimeString()}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function iterationMoodClass(status: ARIteration["status"]): string {
+  switch (status) {
+    case "keep":
+      return "border-emerald-500/50 text-emerald-200";
+    case "baseline":
+      return "border-blue-500/50 text-blue-200";
+    case "discard":
+      return "border-border/60 text-muted-foreground";
+    case "crash":
+      return "border-red-500/50 text-red-300";
+  }
+}
+
+// ---- Iterations table ----------------------------------------------------
+
+function IterationsTable({ iterations }: { iterations: ARIteration[] }) {
+  if (iterations.length === 0) {
+    return <div className="p-6 text-xs text-muted-foreground">No iterations yet.</div>;
+  }
+  const maxScore = Math.max(...iterations.map((i) => Number(i.score) || 0), 0.0001);
+  return (
+    <div className="space-y-1 p-6">
+      <div className="grid grid-cols-12 gap-2 px-3 py-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+        <div className="col-span-1">#</div>
+        <div className="col-span-2 text-right">score</div>
+        <div className="col-span-1 text-right">trades</div>
+        <div className="col-span-2 text-right">win / pnl</div>
+        <div className="col-span-1">status</div>
+        <div className="col-span-5">narration</div>
+      </div>
+      {[...iterations].reverse().map((it) => {
+        const score = Number(it.score) || 0;
+        const widthPct = (score / maxScore) * 100;
+        return (
+          <div
+            key={it.id}
+            className="relative overflow-hidden rounded border border-border/40 bg-card/30"
+          >
+            {score > 0 && (
+              <div
+                className="absolute inset-y-0 left-0 bg-primary/10"
+                style={{ width: `${widthPct}%` }}
+              />
+            )}
+            <div className="relative grid grid-cols-12 items-center gap-2 px-3 py-2 text-xs">
+              <div className="col-span-1 font-mono text-muted-foreground">{it.idx + 1}</div>
+              <div className="col-span-2 text-right font-mono">{score.toFixed(4)}</div>
+              <div className="col-span-1 text-right font-mono text-muted-foreground">
+                {it.trades}
+              </div>
+              <div className="col-span-2 text-right font-mono text-muted-foreground">
+                {Math.round(Number(it.winRate) * 100)}% / {Number(it.netPnl).toFixed(0)}
+              </div>
+              <div className="col-span-1">
+                <Badge className={cn("text-[10px]", iterationStatusClass(it.status))}>
+                  {it.status}
+                </Badge>
+              </div>
+              <div className="col-span-5 truncate text-muted-foreground" title={it.narration}>
+                {it.narration}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function iterationStatusClass(status: ARIteration["status"]): string {
   switch (status) {
     case "keep":
       return "border-emerald-500/40 text-emerald-300";
+    case "baseline":
+      return "border-blue-500/40 text-blue-200";
     case "discard":
       return "border-border text-muted-foreground";
     case "crash":
       return "border-red-500/40 text-red-300";
-    case "defer":
+  }
+}
+
+// ---- Archive list --------------------------------------------------------
+
+function ArchiveList({
+  sessions,
+  activeId,
+}: {
+  sessions: ARSession[];
+  activeId: string | null;
+}) {
+  if (sessions.length === 0) {
+    return (
+      <div className="p-6 text-xs text-muted-foreground">
+        No past sessions yet. Once you've run a session it'll appear here.
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-2 p-6">
+      {sessions.map((s) => (
+        <div
+          key={s.id}
+          className={cn(
+            "rounded border bg-card/30 p-3",
+            s.id === activeId ? "border-primary/40" : "border-border/40"
+          )}
+        >
+          <div className="flex items-baseline justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm">{s.goal}</div>
+              <div className="text-[11px] text-muted-foreground">
+                {new Date(s.startedAt).toLocaleString()} · {s.timeframe} ·{" "}
+                {s.iterationsRun}/{s.maxIterations} iters · {s.model} · $
+                {Number(s.totalCostUsd).toFixed(2)}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="font-mono text-sm">
+                {s.bestScore ? Number(s.bestScore).toFixed(4) : "—"}
+              </span>
+              <Badge className={cn("text-[10px]", sessionStatusClass(s.status))}>
+                {s.status}
+              </Badge>
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function sessionStatusClass(status: ARSession["status"]): string {
+  switch (status) {
+    case "running":
       return "border-amber-500/40 text-amber-300";
-    default:
+    case "done":
+      return "border-emerald-500/40 text-emerald-300";
+    case "aborted":
       return "border-border text-muted-foreground";
+    case "error":
+      return "border-red-500/40 text-red-300";
   }
 }

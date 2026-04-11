@@ -71,29 +71,37 @@ Schema lives in `shared/schema.ts`. Key tables:
 - Regime change requires confirmation with plain-language consequences.
 - Emergency market exit: two taps max from any screen.
 
-## Autoresearch harness (`autoresearch/`)
+## Autoresearch (`server/modules/autoresearch/`)
 
-Karpathy-style autonomous research loop. Single editable file the agent
-edits + a fixed prepare step + a markdown skill. Local-only — does NOT
-run in production. The "agent" is whatever coding agent you point at the
-project (Claude Code, Codex CLI, etc.).
+Bounded LLM-driven parameter search loop. Local-only by design — refuses
+to start unless `OPENAI_API_KEY` is set, and we keep that secret out of
+prd Doppler config so it physically cannot run in production.
 
-- `autoresearch/program.md` — instructions the agent reads. Verbatim
-  Karpathy structure, adapted to Phoenix domain.
-- `autoresearch/prepare.ts` — one-time candle fetch + disk cache to
-  `~/.cache/phoenix-autoresearch/`. Read-only, agent never edits.
-- `autoresearch/train.ts` — **the single editable file.** PARAMS section
-  at top, evaluation pipeline below, score output at bottom in the exact
-  grep-friendly format program.md specifies.
-- `autoresearch/results.tsv` — agent-written experiment log. Gitignored.
-- `autoresearch/run.log` — captured stdout from each train run. Gitignored.
+Architecture:
+- `orchestrator.ts` — the bounded loop. One session per call. Iteration 0
+  is baseline (current params, no LLM call). Iterations 1..N call OpenAI
+  to propose new params, run backtest, score, persist. Stop flag honoured
+  after each iteration.
+- `openai.ts` — minimal Chat Completions client (no SDK, just `fetch`).
+  Per-model pricing table for cost accounting.
+- `prompt.ts` — system prompt + JSON schema for proposals + history
+  formatter. The LLM must return strict JSON via response_format.
+- `narrate.ts` — converts iteration outcome → first-person sentence for
+  the live feed UI.
 
-Workflow: `npm run autoresearch:prepare -- CRVUSDT 1h 1000` once, then
-open the agent in this directory and prompt it to read program.md.
-Each iteration is a git commit on a branch like `autoresearch/<tag>`.
+Storage:
+- `autoresearch_sessions` — one row per session (goal, model, status,
+  best_score, total_cost_usd, iterations_run, etc.)
+- `autoresearch_iterations` — one row per iteration (params JSONB, score,
+  trades, narration, rationale, cost). Summary only — no per-trade list.
 
-The harness reuses the same `runBacktest` engine the deployed Experiments
-UI uses, so the score is consistent across both surfaces.
+UI: Autoresearch tab on the Experiments page. Tab is gated on
+`/api/autoresearch/capabilities` returning `{available: true}` (which
+checks for OPENAI_API_KEY). Inner tabs: Live (heartbeat-style narration),
+Iterations (table), Archive (past sessions).
+
+Default model: `gpt-4o-mini` (cheap, ~$0.02/session). Operator can pick
+`gpt-4o` for ~$0.30/session of better quality on harder problems.
 
 ## Not yet built (Phase 1+)
 - Strategy engine (level identification, sweep detection, entry/exit logic)

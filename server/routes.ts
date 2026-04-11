@@ -1,6 +1,4 @@
 import type { Express, Request, Response } from "express";
-import { promises as fs } from "node:fs";
-import path from "node:path";
 import { z } from "zod";
 import { storage } from "./storage";
 import { isAuthenticated, isAdmin } from "./auth";
@@ -22,6 +20,9 @@ import {
   type LiveParams,
 } from "./modules/experiments/runners";
 import { applyRecommendation } from "./modules/experiments/applier";
+import { startSession, requestStop } from "./modules/autoresearch/orchestrator";
+import { isOpenAIConfigured } from "./modules/autoresearch/openai";
+import type { Timeframe } from "./modules/exchange/types";
 import {
   APPLIABLE_PARAM_KEYS,
   type DiagnosticConfig,
@@ -44,20 +45,6 @@ function getIp(req: Request): string {
 function pid(req: Request, key: string): string {
   const v = (req.params as Record<string, string | string[]>)[key];
   return Array.isArray(v) ? v[0] : v;
-}
-
-// Read the current git branch by parsing .git/HEAD. Cheap, no subprocess.
-// Returns null if anything goes wrong (no .git dir, detached HEAD, etc.).
-async function readGitHead(): Promise<string | null> {
-  try {
-    const headPath = path.join(process.cwd(), ".git", "HEAD");
-    const text = (await fs.readFile(headPath, "utf-8")).trim();
-    // "ref: refs/heads/branch-name" → "branch-name"
-    const m = text.match(/^ref:\s*refs\/heads\/(.+)$/);
-    return m ? m[1] : text.slice(0, 7); // detached HEAD → short sha
-  } catch {
-    return null;
-  }
 }
 
 export function registerRoutes(app: Express) {
@@ -392,43 +379,171 @@ export function registerRoutes(app: Express) {
     res.json(APPLIABLE_PARAM_KEYS);
   });
 
-  // Local-only autoresearch viewer. Reads autoresearch/results.tsv from
-  // disk relative to process.cwd(). On Vercel serverless the file does not
-  // exist, so this returns { available: false } and the client hides the
-  // entire tab — there is no "autoresearch in production" surface, by
-  // design. The harness is local only.
-  app.get("/api/autoresearch/results", isAuthenticated, async (_req, res) => {
-    const filePath = path.join(process.cwd(), "autoresearch", "results.tsv");
+  // ==========================================================================
+  // Autoresearch — bounded LLM-driven parameter search.
+  //
+  // Local-only by design: the orchestrator refuses to start without
+  // OPENAI_API_KEY (which lives only in Doppler dev). The /capabilities
+  // endpoint reports whether the loop can run on this server, and the UI
+  // hides the tab entirely when it can't. There is no autoresearch
+  // surface in production.
+  //
+  // Endpoints:
+  //   GET  /api/autoresearch/capabilities      probe (configured?)
+  //   POST /api/autoresearch/sessions          start a new session
+  //   POST /api/autoresearch/sessions/:id/stop graceful stop
+  //   GET  /api/autoresearch/sessions          list (for archive)
+  //   GET  /api/autoresearch/sessions/:id      session header
+  //   GET  /api/autoresearch/sessions/:id/iterations  iteration log
+  //   GET  /api/autoresearch/active            currently running session
+  // ==========================================================================
+
+  app.get("/api/autoresearch/capabilities", isAuthenticated, (_req, res) => {
+    res.json({ available: isOpenAIConfigured() });
+  });
+
+  app.post("/api/autoresearch/sessions", isAuthenticated, async (req, res) => {
+    if (!isOpenAIConfigured()) {
+      return res.status(400).json({
+        error: "openai_not_configured",
+        message:
+          "OPENAI_API_KEY not set. Add it to Doppler dev: doppler secrets set OPENAI_API_KEY=sk-... --config dev",
+      });
+    }
+    const schema = z.object({
+      goal: z.string().min(5).max(500),
+      pairId: z.string().uuid(),
+      timeframe: z.enum(["15m", "1h", "4h", "12h", "1d"]),
+      lookbackBars: z.number().int().min(100).max(1000),
+      regime: z.enum([
+        "no_trade",
+        "ranging",
+        "trending",
+        "breakout",
+        "high_volatility",
+        "low_liquidity",
+        "accumulation_distribution",
+      ]),
+      model: z.enum(["gpt-4o", "gpt-4o-mini"]),
+      maxIterations: z.number().int().min(5).max(200),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "invalid", issues: parsed.error.issues });
+    }
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    const pair = await storage.getMarketPair(parsed.data.pairId);
+    if (!pair) return res.status(404).json({ error: "pair_not_found" });
+
+    // Refuse to start a second session while one is already running for
+    // this tenant. Concurrency is doable but not worth the complexity yet.
+    const existing = await storage.findRunningAutoresearchSession(tenant.id);
+    if (existing) {
+      return res.status(409).json({
+        error: "session_already_running",
+        sessionId: existing.id,
+      });
+    }
+
     try {
-      const text = await fs.readFile(filePath, "utf-8");
-      const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-      if (lines.length === 0) {
-        return res.json({ available: true, runs: [], branch: await readGitHead() });
-      }
-      const header = lines[0].split("\t");
-      const runs = lines.slice(1).map((line) => {
-        const cols = line.split("\t");
-        const row: Record<string, string> = {};
-        header.forEach((h, i) => {
-          row[h] = cols[i] ?? "";
-        });
-        return row;
+      const session = await startSession({
+        tenantId: tenant.id,
+        userId: u.id,
+        goal: parsed.data.goal,
+        pairId: parsed.data.pairId,
+        pairSymbol: `${pair.baseAsset}${pair.quoteAsset}`,
+        timeframe: parsed.data.timeframe as Timeframe,
+        lookbackBars: parsed.data.lookbackBars,
+        regime: parsed.data.regime,
+        model: parsed.data.model,
+        maxIterations: parsed.data.maxIterations,
       });
-      const stat = await fs.stat(filePath);
-      res.json({
-        available: true,
-        runs,
-        branch: await readGitHead(),
-        updatedAt: stat.mtime.toISOString(),
+      audit({
+        userId: u.id,
+        tenantId: tenant.id,
+        action: "autoresearch_session_started",
+        resourceType: "autoresearch_session",
+        resourceId: session.id,
+        outcome: "success",
+        detail: {
+          goal: parsed.data.goal,
+          model: parsed.data.model,
+          maxIterations: parsed.data.maxIterations,
+        },
+        ipAddress: getIp(req),
       });
+      res.json(session);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-        return res.json({ available: false });
-      }
-      console.error("[autoresearch] read failed", err);
-      return res.json({ available: false });
+      res.status(500).json({ error: (err as Error).message });
     }
   });
+
+  app.post(
+    "/api/autoresearch/sessions/:id/stop",
+    isAuthenticated,
+    async (req, res) => {
+      const id = pid(req, "id");
+      const u = getUser(req);
+      const tenant = await storage.getOrCreateTenantForUser(u.id);
+      const session = await storage.getAutoresearchSession(id);
+      if (!session || session.tenantId !== tenant.id) {
+        return res.status(404).json({ error: "not_found" });
+      }
+      requestStop(id);
+      audit({
+        userId: u.id,
+        tenantId: tenant.id,
+        action: "autoresearch_session_stopped",
+        resourceType: "autoresearch_session",
+        resourceId: id,
+        outcome: "success",
+        ipAddress: getIp(req),
+      });
+      res.json({ ok: true });
+    }
+  );
+
+  app.get("/api/autoresearch/sessions", isAuthenticated, async (req, res) => {
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    const sessions = await storage.listAutoresearchSessions(tenant.id);
+    res.json(sessions);
+  });
+
+  app.get("/api/autoresearch/active", isAuthenticated, async (req, res) => {
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    const active = await storage.findRunningAutoresearchSession(tenant.id);
+    res.json(active);
+  });
+
+  app.get("/api/autoresearch/sessions/:id", isAuthenticated, async (req, res) => {
+    const id = pid(req, "id");
+    const u = getUser(req);
+    const tenant = await storage.getOrCreateTenantForUser(u.id);
+    const session = await storage.getAutoresearchSession(id);
+    if (!session || session.tenantId !== tenant.id) {
+      return res.status(404).json({ error: "not_found" });
+    }
+    res.json(session);
+  });
+
+  app.get(
+    "/api/autoresearch/sessions/:id/iterations",
+    isAuthenticated,
+    async (req, res) => {
+      const id = pid(req, "id");
+      const u = getUser(req);
+      const tenant = await storage.getOrCreateTenantForUser(u.id);
+      const session = await storage.getAutoresearchSession(id);
+      if (!session || session.tenantId !== tenant.id) {
+        return res.status(404).json({ error: "not_found" });
+      }
+      const iterations = await storage.listAutoresearchIterations(id);
+      res.json(iterations);
+    }
+  );
 
   app.get("/api/tenant/costs", isAuthenticated, async (req, res) => {
     const u = getUser(req);
