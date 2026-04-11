@@ -1400,6 +1400,8 @@ interface ChartTrade {
   realisedPnl: number;
   outcome: "target" | "stop" | "timeout";
   iterationIdx: number;
+  triggerPrice: number;
+  triggerSide: "support" | "resistance";
 }
 function ChartView({ sessionId }: { sessionId: string }) {
   const q = useQuery<{ candles: ChartCandle[]; levels: ChartLevel[]; trades: ChartTrade[] }>({
@@ -1429,6 +1431,8 @@ function ChartView({ sessionId }: { sessionId: string }) {
     count: number;
     iterations: Set<number>;
     side: "long" | "short" | "mixed";
+    triggerPrice: number;
+    triggerSide: "support" | "resistance";
   };
   const tradeClusters = new Map<string, Cluster>();
   for (const t of winningTrades) {
@@ -1448,6 +1452,8 @@ function ChartView({ sessionId }: { sessionId: string }) {
         count: 1,
         iterations: new Set([t.iterationIdx]),
         side: t.side,
+        triggerPrice: t.triggerPrice,
+        triggerSide: t.triggerSide,
       });
     }
   }
@@ -1585,9 +1591,10 @@ function ChartView({ sessionId }: { sessionId: string }) {
         {candles.length} candles · {pools.length} liquidity pools ({pools.filter((p) => p.sweepIdx === null).length} live, {pools.filter((p) => p.sweepIdx !== null).length} swept) · {clusters.length} winning entry points across {winningTrades.length} trades from {new Set(winningTrades.map((t) => t.iterationIdx)).size} profitable iterations.
         Triangles mark entries where at least one winning config fired —
         up for longs, down for shorts. Apex of the triangle sits on the
-        entry price. Size scales with how many different iterations agreed
-        there was a trade at that candle — big triangles are robust edges,
-        small ones are coincidence.
+        entry price. A dashed line connects each entry to the liquidity
+        level whose sweep triggered it — answers "why did it trade here?"
+        at a glance. Size scales with how many different iterations agreed
+        there was a trade at that candle.
       </p>
       <div className="overflow-hidden rounded border border-border/40 bg-card/30">
         <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full">
@@ -1666,6 +1673,32 @@ function ChartView({ sessionId }: { sessionId: string }) {
                   fill={color}
                 />
               </g>
+            );
+          })}
+          {/* Connector lines from each winning entry back to the
+              liquidity level whose sweep triggered it. Draws a short
+              vertical line at the entry candle from the entry price
+              to the triggering level price — answers "why did it
+              trade here?" visually. */}
+          {clusters.map((c, i) => {
+            const idx = candleByTime.get(c.openedAt);
+            if (idx === undefined) return null;
+            const x = xFor(idx);
+            const yEntry = yFor(c.entry);
+            const yTrigger = yFor(c.triggerPrice);
+            const color = c.triggerSide === "resistance" ? "#f87171" : "#34d399";
+            return (
+              <line
+                key={`connector-${i}`}
+                x1={x}
+                x2={x}
+                y1={yEntry}
+                y2={yTrigger}
+                stroke={color}
+                strokeWidth={1.5}
+                strokeDasharray="2 2"
+                opacity={0.9}
+              />
             );
           })}
           {/* Winning entry points — triangles at each candle where at

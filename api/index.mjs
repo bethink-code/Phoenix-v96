@@ -1875,7 +1875,9 @@ function runBacktest(input) {
           target: ot.target,
           size: ot.size,
           realisedPnl: hit.pnl,
-          outcome: hit.outcome
+          outcome: hit.outcome,
+          triggerPrice: ot.triggerPrice,
+          triggerSide: ot.triggerSide
         };
         closedTrades.push(closed);
         capital += hit.pnl;
@@ -1944,7 +1946,9 @@ function runBacktest(input) {
       stop: proposal.stopPrice,
       target: proposal.targetPrice,
       size: decision.positionSize,
-      riskAmount: decision.riskAmount
+      riskAmount: decision.riskAmount,
+      triggerPrice: sweep.level.price,
+      triggerSide: sweep.level.side
     });
   }
   const last = input.candles[input.candles.length - 1];
@@ -1960,7 +1964,9 @@ function runBacktest(input) {
       target: ot.target,
       size: ot.size,
       realisedPnl: pnl,
-      outcome: "timeout"
+      outcome: "timeout",
+      triggerPrice: ot.triggerPrice,
+      triggerSide: ot.triggerSide
     });
     capital += pnl;
   }
@@ -3547,7 +3553,9 @@ function registerRoutes(app2) {
               entry: t.entry,
               realisedPnl: t.realisedPnl,
               outcome: t.outcome,
-              iterationIdx: it.idx
+              iterationIdx: it.idx,
+              triggerPrice: t.triggerPrice,
+              triggerSide: t.triggerSide
             });
           }
         }

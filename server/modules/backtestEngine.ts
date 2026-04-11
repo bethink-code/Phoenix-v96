@@ -51,6 +51,11 @@ export interface BacktestTrade {
   size: number;
   realisedPnl: number;
   outcome: "target" | "stop" | "timeout";
+  // The liquidity level whose sweep triggered this entry. Preserved so
+  // UI overlays can draw a connector from the trade marker back to the
+  // pool that justified it.
+  triggerPrice: number;
+  triggerSide: "support" | "resistance";
 }
 
 export interface BacktestResult {
@@ -155,6 +160,8 @@ export function runBacktest(input: BacktestInput): BacktestResult {
           size: ot.size,
           realisedPnl: hit.pnl,
           outcome: hit.outcome,
+          triggerPrice: ot.triggerPrice,
+          triggerSide: ot.triggerSide,
         };
         closedTrades.push(closed);
         capital += hit.pnl;
@@ -240,6 +247,8 @@ export function runBacktest(input: BacktestInput): BacktestResult {
       target: proposal.targetPrice,
       size: decision.positionSize,
       riskAmount: decision.riskAmount,
+      triggerPrice: sweep.level.price,
+      triggerSide: sweep.level.side,
     });
   }
 
@@ -258,6 +267,8 @@ export function runBacktest(input: BacktestInput): BacktestResult {
       size: ot.size,
       realisedPnl: pnl,
       outcome: "timeout",
+      triggerPrice: ot.triggerPrice,
+      triggerSide: ot.triggerSide,
     });
     capital += pnl;
   }
@@ -276,6 +287,8 @@ interface OpenTrade {
   target: number;
   size: number;
   riskAmount: number;
+  triggerPrice: number;
+  triggerSide: "support" | "resistance";
 }
 
 function resolveBar(ot: OpenTrade, bar: Candle): { pnl: number; outcome: "target" | "stop" } | null {

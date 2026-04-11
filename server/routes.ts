@@ -717,6 +717,8 @@ export function registerRoutes(app: Express) {
         realisedPnl: number;
         outcome: "target" | "stop" | "timeout";
         iterationIdx: number;
+        triggerPrice: number;
+        triggerSide: "support" | "resistance";
       }> = [];
       for (const it of profitable) {
         const p = {
@@ -755,6 +757,8 @@ export function registerRoutes(app: Express) {
               realisedPnl: t.realisedPnl,
               outcome: t.outcome,
               iterationIdx: it.idx,
+              triggerPrice: t.triggerPrice,
+              triggerSide: t.triggerSide,
             });
           }
         }
