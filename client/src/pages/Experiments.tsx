@@ -1459,8 +1459,12 @@ function ChartView({ sessionId }: { sessionId: string }) {
     rank: number;
     anchorIdx: number;
     sweepIdx: number | null;
+    poolHigh: number; // top of the box in price
+    poolLow: number; // bottom of the box in price
   };
-  const POOL_THICKNESS_PCT = 0.0015; // 0.15% half-thickness for visibility
+  // Minimum half-thickness floor as a % of price — used when the swing
+  // candle's wick is too small to be visually meaningful (e.g. doji bars).
+  const MIN_HALF_THICKNESS_PCT = 0.0025;
   const findAnchorIdx = (firstSeenAt: number): number => {
     // Exact match first; fall back to nearest candle if the level's
     // anchor lies between bars (can happen with prev-day/prev-week levels).
@@ -1491,6 +1495,24 @@ function ChartView({ sessionId }: { sessionId: string }) {
         break;
       }
     }
+    // Pool thickness = the wick of the anchor candle, because that's
+    // the actual price range where liquidity sat before being created.
+    // Resistance pool spans the upper wick (body top → high). Support
+    // pool spans the lower wick (low → body bottom). Floor at
+    // MIN_HALF_THICKNESS_PCT so doji-anchored pools stay visible.
+    const anchor = candles[anchorIdx];
+    const minHalf = l.price * MIN_HALF_THICKNESS_PCT;
+    let poolHigh: number;
+    let poolLow: number;
+    if (l.side === "resistance") {
+      const bodyTop = Math.max(anchor.open, anchor.close);
+      poolHigh = anchor.high;
+      poolLow = Math.min(bodyTop, l.price - minHalf);
+    } else {
+      const bodyBottom = Math.min(anchor.open, anchor.close);
+      poolLow = anchor.low;
+      poolHigh = Math.max(bodyBottom, l.price + minHalf);
+    }
     return {
       levelId: l.id,
       side: l.side,
@@ -1498,6 +1520,8 @@ function ChartView({ sessionId }: { sessionId: string }) {
       rank: l.rank,
       anchorIdx,
       sweepIdx,
+      poolHigh,
+      poolLow,
     };
   });
 
@@ -1528,9 +1552,8 @@ function ChartView({ sessionId }: { sessionId: string }) {
             const xLeft = xFor(p.anchorIdx);
             const xRight = p.sweepIdx !== null ? xFor(p.sweepIdx) : padL + innerW;
             const w = Math.max(1, xRight - xLeft);
-            const halfThickness = p.price * POOL_THICKNESS_PCT;
-            const yTop = yFor(p.price + halfThickness);
-            const yBot = yFor(p.price - halfThickness);
+            const yTop = yFor(p.poolHigh);
+            const yBot = yFor(p.poolLow);
             const h = Math.max(2, yBot - yTop);
             const color = p.side === "resistance" ? "#f87171" : "#34d399";
             // Live pools fully visible, swept pools faded
