@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
@@ -61,7 +61,10 @@ interface AutoresearchCapabilities {
 }
 
 export default function Experiments() {
-  const [tab, setTab] = useState<TabKey>("library");
+  // Default landing tab is Autoresearch when it's available (i.e. local
+  // dev with OPENAI_API_KEY). On prd it's hidden so we land on History
+  // instead, which is the only useful surface there.
+  const [tab, setTab] = useState<TabKey>("autoresearch");
   const pendingQuery = useQuery<RunRow[]>({
     queryKey: ["/api/tenant/recommendations/pending"],
   });
@@ -77,27 +80,37 @@ export default function Experiments() {
   });
   const autoresearchAvailable = capabilities.data?.available ?? false;
 
-  const tabs: Array<{ key: TabKey; label: string; count: number | null }> = [
-    { key: "library", label: "Library", count: null },
-    { key: "recommendations", label: "Recommendations", count: pendingCount },
-    { key: "history", label: "History", count: null },
-  ];
+  // Tab order is intentional: Autoresearch first (when available, on
+  // local dev), History second (the archive of past results — useful
+  // on both local and prd). The Library/Recommendations manual
+  // framework comes last because it predates autoresearch and is
+  // largely superseded by it. The page header reflects the same
+  // priority — "Autoresearch" leads.
+  const tabs: Array<{ key: TabKey; label: string; count: number | null }> = [];
   if (autoresearchAvailable) {
-    tabs.push({
-      key: "autoresearch",
-      label: "Autoresearch",
-      count: null,
-    });
+    tabs.push({ key: "autoresearch", label: "Autoresearch", count: null });
   }
+  tabs.push({ key: "history", label: "History", count: null });
+  tabs.push({ key: "library", label: "Library", count: null });
+  tabs.push({ key: "recommendations", label: "Recommendations", count: pendingCount });
+
+  // If autoresearch isn't available (prd), redirect the default tab
+  // to History since that's the only meaningful surface there.
+  // useEffect avoids the "setState during render" anti-pattern.
+  useEffect(() => {
+    if (!autoresearchAvailable && tab === "autoresearch") {
+      setTab("history");
+    }
+  }, [autoresearchAvailable, tab]);
 
   return (
     <div className="flex h-screen flex-col bg-background">
       <header className="shrink-0 border-b border-border">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-6 py-4">
           <div>
-            <h1 className="text-lg font-semibold">Experiments</h1>
+            <h1 className="text-lg font-semibold">Autoresearch</h1>
             <p className="text-xs text-muted-foreground">
-              Research bench. Author experiments, run them, review recommendations.
+              Bounded LLM-driven parameter search. Start a session, watch it run, review the result in History.
             </p>
           </div>
           <Link href="/">

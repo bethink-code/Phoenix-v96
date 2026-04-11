@@ -189,7 +189,7 @@ export default function Dashboard() {
               </Badge>
             )}
             <Link href="/experiments">
-              <Button variant="outline" size="sm">Experiments</Button>
+              <Button variant="outline" size="sm">Autoresearch</Button>
             </Link>
             <Link href="/settings">
               <Button variant="outline" size="sm">Settings</Button>
