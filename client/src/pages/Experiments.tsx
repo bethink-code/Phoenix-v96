@@ -852,6 +852,18 @@ function AutoresearchTab() {
         }
       />
 
+      {/* Result panel — shows a clear verdict + best params when the
+          session has finished. Hidden while idle or running. */}
+      {focusedSession &&
+        (focusedSession.status === "done" ||
+          focusedSession.status === "aborted" ||
+          focusedSession.status === "error") && (
+          <SessionResult
+            session={focusedSession}
+            iterations={iterationsQuery.data ?? []}
+          />
+        )}
+
       {/* Inner tabs */}
       <div className="rounded-md border border-border bg-card/40">
         <div className="flex shrink-0 gap-1 border-b border-border px-4">
@@ -1051,6 +1063,329 @@ function StartSessionForm() {
   );
 }
 
+// ---- Session result panel ------------------------------------------------
+//
+// Shows ONE clear verdict for a finished session: "found a winner",
+// "no improvement", "stopped early", or "errored". Plus the best params
+// (if any improvement happened) so the operator can read off concrete
+// values to copy into Settings if they want.
+
+function SessionResult({
+  session,
+  iterations,
+}: {
+  session: ARSession;
+  iterations: ARIteration[];
+}) {
+  const bestScore = session.bestScore ? Number(session.bestScore) : 0;
+  const bestIter = iterations.find((i) => i.id === session.bestIterationId) ?? null;
+  const baseline = iterations.find((i) => i.idx === 0) ?? null;
+  const foundWinner = bestScore > 0 && bestIter && bestIter.idx > 0;
+  const noTradesFound = bestScore === 0 || (bestIter && bestIter.trades === 0);
+
+  // Build the verdict copy based on what actually happened
+  let verdictTone: "good" | "neutral" | "bad" = "neutral";
+  let headline: string;
+  let body: string;
+
+  if (session.status === "error") {
+    verdictTone = "bad";
+    headline = "Session errored";
+    body = session.errorMessage ?? "Unknown error.";
+  } else if (foundWinner) {
+    verdictTone = "good";
+    const baseScore = baseline ? Number(baseline.score) : 0;
+    const delta = bestScore - baseScore;
+    headline = `Found a winning config — score ${bestScore.toFixed(4)} (+${delta.toFixed(4)} over baseline).`;
+    body = `Iteration #${bestIter!.idx + 1} was the best. ${bestIter!.trades} trades, ${Math.round(Number(bestIter!.winRate) * 100)}% wins, ${Number(bestIter!.netPnl).toFixed(2)} net PnL.`;
+  } else if (noTradesFound) {
+    verdictTone = "bad";
+    headline = "No iteration produced any trades.";
+    body =
+      "Across all iterations the search didn't find a config that opened a single trade. The strategy as currently implemented may not be compatible with this pair/timeframe/regime combination. Try a different timeframe (4h or daily often works better than 1h on lower-cap tokens), a different regime (ranging instead of trending), or a different pair.";
+  } else {
+    verdictTone = "neutral";
+    headline = `No improvement over baseline (best score ${bestScore.toFixed(4)}).`;
+    body =
+      "The baseline already had the best score. The LLM tried variants but none beat it. You could run another session with more iterations, or change the goal/regime to widen the search.";
+  }
+
+  if (session.status === "aborted") {
+    headline = `${headline} (stopped early at iteration ${session.iterationsRun}/${session.maxIterations})`;
+  }
+
+  const toneClass =
+    verdictTone === "good"
+      ? "border-emerald-500/40 bg-emerald-500/5"
+      : verdictTone === "bad"
+        ? "border-red-500/40 bg-red-500/5"
+        : "border-amber-500/40 bg-amber-500/5";
+
+  return (
+    <div className={cn("rounded-md border p-4", toneClass)}>
+      <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+        Session result
+      </div>
+      <h3 className="text-base font-semibold">{headline}</h3>
+      <p className="mt-1 text-xs text-muted-foreground">{body}</p>
+
+      {/* Score-over-iterations chart — single visual telling the whole
+          search story at a glance */}
+      {iterations.length > 0 && (
+        <div className="mt-3">
+          <ScoreChart iterations={iterations} />
+        </div>
+      )}
+
+      {/* Side-by-side params: baseline vs best, only when we have a winner */}
+      {foundWinner && bestIter && baseline && (
+        <div className="mt-3 rounded border border-border/40 bg-background/40 p-3">
+          <div className="mb-2 text-[10px] uppercase tracking-wide text-muted-foreground">
+            What changed
+          </div>
+          <ParamDiffTable
+            baseline={baseline.params}
+            winner={bestIter.params}
+          />
+        </div>
+      )}
+
+      {/* When there's no winner but the operator might still want to see
+          the params it tried, surface the best iteration's params anyway */}
+      {!foundWinner && bestIter && (
+        <div className="mt-3 rounded border border-border/40 bg-background/40 p-3">
+          <div className="mb-2 text-[10px] uppercase tracking-wide text-muted-foreground">
+            Best iteration ({`#${bestIter.idx + 1}`}) — for reference
+          </div>
+          <ParamGrid params={bestIter.params} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ParamDiffTable({
+  baseline,
+  winner,
+}: {
+  baseline: Record<string, number>;
+  winner: Record<string, number>;
+}) {
+  const keys = Object.keys(winner);
+  return (
+    <div className="space-y-1">
+      {keys.map((k) => {
+        const b = baseline[k];
+        const w = winner[k];
+        const changed = b !== w;
+        return (
+          <div
+            key={k}
+            className={cn(
+              "flex items-center justify-between gap-3 text-xs",
+              changed ? "text-foreground" : "text-muted-foreground/60"
+            )}
+          >
+            <span className="font-mono">{k}</span>
+            <span className="font-mono">
+              {fmt(b)}{" "}
+              {changed && <span className="text-emerald-300">→ {fmt(w)}</span>}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ParamGrid({ params }: { params: Record<string, number> }) {
+  const entries = Object.entries(params);
+  return (
+    <div className="grid grid-cols-1 gap-1 sm:grid-cols-2">
+      {entries.map(([k, v]) => (
+        <div key={k} className="flex items-center justify-between text-xs">
+          <span className="font-mono text-muted-foreground">{k}</span>
+          <span className="font-mono text-foreground">{fmt(v)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function fmt(v: number): string {
+  if (Number.isInteger(v)) return v.toString();
+  return v.toFixed(3);
+}
+
+// ---- Score chart ---------------------------------------------------------
+//
+// Inline SVG, zero dependencies. X axis is iteration number, Y axis is
+// score. Shows two series:
+//   1. Each iteration as a dot (colour by status: baseline / keep / discard / crash)
+//   2. Running best as a step line — only goes up, shows convergence at a glance
+//
+// Drawn at a fixed aspect ratio, scales to container width via viewBox.
+
+function ScoreChart({ iterations }: { iterations: ARIteration[] }) {
+  if (iterations.length === 0) return null;
+  const sorted = [...iterations].sort((a, b) => a.idx - b.idx);
+  const scores = sorted.map((i) => Number(i.score) || 0);
+  const maxScore = Math.max(...scores, 0.0001);
+  const yMax = maxScore * 1.1; // a bit of headroom
+  const W = 600;
+  const H = 200;
+  const padL = 40;
+  const padR = 12;
+  const padT = 12;
+  const padB = 28;
+  const innerW = W - padL - padR;
+  const innerH = H - padT - padB;
+  const xStep = sorted.length > 1 ? innerW / (sorted.length - 1) : 0;
+
+  // Build the running-best step path
+  let bestSoFar = 0;
+  const bestPath: string[] = [];
+  sorted.forEach((it, i) => {
+    const score = Number(it.score) || 0;
+    if (score > bestSoFar) bestSoFar = score;
+    const x = padL + i * xStep;
+    const y = padT + innerH - (bestSoFar / yMax) * innerH;
+    if (i === 0) {
+      bestPath.push(`M ${x} ${y}`);
+    } else {
+      // Step up: horizontal then vertical
+      const prevY = padT + innerH - (Math.max(...scores.slice(0, i)) / yMax) * innerH;
+      bestPath.push(`L ${x} ${prevY} L ${x} ${y}`);
+    }
+  });
+
+  // Y axis ticks at 0, 50%, 100% of max
+  const yTicks = [0, yMax * 0.5, yMax];
+
+  return (
+    <div className="rounded border border-border/40 bg-background/40 p-3">
+      <div className="mb-2 flex items-baseline justify-between gap-3 text-[10px] uppercase tracking-wide text-muted-foreground">
+        <span>Score over iterations</span>
+        <span>
+          {sorted.length} iterations · best {maxScore.toFixed(4)}
+        </span>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full">
+        {/* Y grid + labels */}
+        {yTicks.map((v, i) => {
+          const y = padT + innerH - (v / yMax) * innerH;
+          return (
+            <g key={i}>
+              <line
+                x1={padL}
+                x2={W - padR}
+                y1={y}
+                y2={y}
+                stroke="currentColor"
+                strokeOpacity={0.1}
+                strokeDasharray="2 2"
+              />
+              <text
+                x={padL - 6}
+                y={y + 3}
+                textAnchor="end"
+                fontSize="10"
+                fill="currentColor"
+                fillOpacity={0.5}
+              >
+                {v.toFixed(2)}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* X axis labels: 1, midpoint, last */}
+        {[0, Math.floor(sorted.length / 2), sorted.length - 1].map((i) => {
+          if (i < 0 || i >= sorted.length) return null;
+          const x = padL + i * xStep;
+          return (
+            <text
+              key={i}
+              x={x}
+              y={H - 8}
+              textAnchor="middle"
+              fontSize="10"
+              fill="currentColor"
+              fillOpacity={0.5}
+            >
+              {i + 1}
+            </text>
+          );
+        })}
+
+        {/* Running best step line */}
+        <path
+          d={bestPath.join(" ")}
+          fill="none"
+          stroke="rgb(16 185 129)"
+          strokeWidth="2"
+          strokeOpacity={0.8}
+        />
+
+        {/* Per-iteration dots */}
+        {sorted.map((it, i) => {
+          const score = Number(it.score) || 0;
+          const x = padL + i * xStep;
+          const y = padT + innerH - (score / yMax) * innerH;
+          const color = dotColor(it.status);
+          return (
+            <circle
+              key={it.id}
+              cx={x}
+              cy={y}
+              r={3}
+              fill={color}
+              stroke="rgb(20 20 20)"
+              strokeWidth={0.5}
+            >
+              <title>
+                #{it.idx + 1} · score {score.toFixed(4)} · {it.trades} trades · {it.status}
+              </title>
+            </circle>
+          );
+        })}
+      </svg>
+      <div className="mt-2 flex flex-wrap items-center gap-3 text-[10px] text-muted-foreground">
+        <LegendDot color="rgb(59 130 246)" label="baseline" />
+        <LegendDot color="rgb(16 185 129)" label="keep" />
+        <LegendDot color="rgb(115 115 115)" label="discard" />
+        <LegendDot color="rgb(239 68 68)" label="crash" />
+        <span className="ml-auto">— line: best so far</span>
+      </div>
+    </div>
+  );
+}
+
+function dotColor(status: ARIteration["status"]): string {
+  switch (status) {
+    case "baseline":
+      return "rgb(59 130 246)"; // blue
+    case "keep":
+      return "rgb(16 185 129)"; // emerald
+    case "discard":
+      return "rgb(115 115 115)"; // grey
+    case "crash":
+      return "rgb(239 68 68)"; // red
+  }
+}
+
+function LegendDot({ color, label }: { color: string; label: string }) {
+  return (
+    <span className="flex items-center gap-1">
+      <span
+        className="inline-block h-2 w-2 rounded-full"
+        style={{ backgroundColor: color }}
+      />
+      <span>{label}</span>
+    </span>
+  );
+}
+
 // ---- Live research feed ---------------------------------------------------
 
 function LiveResearchFeed({
@@ -1081,6 +1416,9 @@ function LiveResearchFeed({
   const reversed = [...iterations].reverse();
   return (
     <div className="space-y-3 p-6">
+      {/* Live chart at top of feed so the operator can watch the search
+          climb (or flatline) as iterations land. */}
+      <ScoreChart iterations={iterations} />
       {reversed.map((it) => (
         <div
           key={it.id}
