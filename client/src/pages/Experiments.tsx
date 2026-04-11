@@ -1407,8 +1407,17 @@ interface ChartTrade {
   triggerPrice: number;
   triggerSide: "support" | "resistance";
 }
+interface ChartBarEvent {
+  barTime: number;
+  reason: string;
+}
 function ChartView({ sessionId }: { sessionId: string }) {
-  const q = useQuery<{ candles: ChartCandle[]; levels: ChartLevel[]; trades: ChartTrade[] }>({
+  const q = useQuery<{
+    candles: ChartCandle[];
+    levels: ChartLevel[];
+    trades: ChartTrade[];
+    perBarEvents: ChartBarEvent[];
+  }>({
     queryKey: [`/api/autoresearch/sessions/${sessionId}/candles`],
   });
 
@@ -1423,7 +1432,20 @@ function ChartView({ sessionId }: { sessionId: string }) {
       </div>
     );
   }
-  const { candles, levels, trades } = q.data;
+  const { candles, levels, trades, perBarEvents } = q.data;
+  // Group per-bar events by candle openTime so we can look up the event
+  // for each bar in O(1) when rendering the overlay strip.
+  const eventByBar = new Map<number, string>();
+  for (const e of perBarEvents ?? []) {
+    eventByBar.set(e.barTime, e.reason);
+  }
+  // Count of interesting rejections for the caption (ignore no_sweep/
+  // no_levels which are the boring "nothing to trade here" bars).
+  const interestingEvents = (perBarEvents ?? []).filter(
+    (e) =>
+      e.reason.startsWith("no_proposal:") ||
+      e.reason.startsWith("risk_rejected:")
+  );
   // Group winning trades by the candle they entered on. Count of
   // distinct iterations agreeing there was a trade here = density.
   // Bigger dot = more winning configs spotted the same entry. Clusters
@@ -1598,7 +1620,13 @@ function ChartView({ sessionId }: { sessionId: string }) {
         entry price. A dashed line connects each entry to the liquidity
         level whose sweep triggered it — answers "why did it trade here?"
         at a glance. Size scales with how many different iterations agreed
-        there was a trade at that candle.
+        there was a trade at that candle. The strip below the candles
+        shows the best iteration's per-bar rejection reasons:
+        <span className="text-gray-400"> grey = no valid target</span>,
+        <span className="text-amber-400"> amber = risk manager blocked</span>,
+        <span className="text-violet-400"> violet = regime/mode suppressed</span>.
+        Blank bars = either no sweep or a trade was taken.
+        ({interestingEvents.length} interesting rejections in best iteration.)
       </p>
       <div className="overflow-hidden rounded border border-border/40 bg-card/30">
         <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full">
@@ -1679,6 +1707,42 @@ function ChartView({ sessionId }: { sessionId: string }) {
               </g>
             );
           })}
+          {/* Per-bar rejection overlay — a strip of colored ticks just
+              below the candles showing why the strategy didn't trade
+              each bar. Grey = no_target (sweep happened, no opposing
+              level), amber = risk_rejected (all flavours), violet =
+              mode/entry suppressed by regime. Hidden for no_sweep/
+              no_levels (boring). Sits below the candles so it doesn't
+              obscure price. */}
+          {(() => {
+            const stripY = padT + innerH + 4;
+            const tickH = 4;
+            return candles.map((c, i) => {
+              const reason = eventByBar.get(c.openTime);
+              if (!reason) return null;
+              let color: string | null = null;
+              if (reason === "no_proposal:no_target") color = "#9ca3af";
+              else if (reason.startsWith("risk_rejected:")) color = "#f59e0b";
+              else if (
+                reason === "no_proposal:mode_not_permitted" ||
+                reason === "no_proposal:entry_suppressed"
+              )
+                color = "#8b5cf6";
+              if (!color) return null;
+              const x = xFor(i);
+              return (
+                <rect
+                  key={`rej-${i}`}
+                  x={x - candleW / 2}
+                  y={stripY}
+                  width={Math.max(1, candleW)}
+                  height={tickH}
+                  fill={color}
+                  opacity={0.75}
+                />
+              );
+            });
+          })()}
           {/* Connector lines from each winning entry back to the
               liquidity level whose sweep triggered it. Draws a short
               vertical line at the entry candle from the entry price

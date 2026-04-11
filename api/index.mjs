@@ -1851,9 +1851,11 @@ function runBacktest(input) {
     minLevelRankFloor: input.config.minLevelRank,
     bestRRSeen: 0,
     minRRFloor: input.config.minRiskRewardRatio,
-    recentRejections: []
+    recentRejections: [],
+    perBarEvents: []
   };
   const reject = (barTime, reason, detail) => {
+    diag.perBarEvents.push({ barTime, reason });
     diag.rejections[reason] = (diag.rejections[reason] ?? 0) + 1;
     if (diag.recentRejections.length < 20) {
       diag.recentRejections.push({ atMs: barTime, reason, detail });
@@ -1944,6 +1946,7 @@ function runBacktest(input) {
       continue;
     }
     diag.entriesTaken++;
+    diag.perBarEvents.push({ barTime: bar.openTime, reason: "trade_taken" });
     openTrades.push({
       openedAt: bar.openTime,
       side: proposal.side,
@@ -2055,7 +2058,8 @@ function emptyResult() {
       minLevelRankFloor: 0,
       bestRRSeen: 0,
       minRRFloor: 0,
-      recentRejections: []
+      recentRejections: [],
+      perBarEvents: []
     }
   };
 }
@@ -3524,6 +3528,10 @@ function registerRoutes(app2) {
       const profitable = iterations.filter(
         (i) => i.trades > 0 && Number(i.netPnl) > 0
       );
+      const bestIteration = [...profitable].sort(
+        (a, b) => Number(b.netPnl) - Number(a.netPnl)
+      )[0];
+      let perBarEvents = [];
       const trades2 = [];
       for (const it of profitable) {
         const p = {
@@ -3567,8 +3575,11 @@ function registerRoutes(app2) {
             });
           }
         }
+        if (bestIteration && it.id === bestIteration.id) {
+          perBarEvents = result.diagnostic.perBarEvents;
+        }
       }
-      res.json({ candles, levels, trades: trades2 });
+      res.json({ candles, levels, trades: trades2, perBarEvents });
     }
   );
   app2.post(

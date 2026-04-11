@@ -709,6 +709,14 @@ export function registerRoutes(app: Express) {
       const profitable = iterations.filter(
         (i) => i.trades > 0 && Number(i.netPnl) > 0
       );
+      // The single highest-P&L iteration's rejection log powers the chart
+      // overlay. Mixing per-bar events across multiple iterations would be
+      // meaningless (different param sets produce different sweeps and
+      // different rejection reasons for the same bar).
+      const bestIteration = [...profitable].sort(
+        (a, b) => Number(b.netPnl) - Number(a.netPnl)
+      )[0];
+      let perBarEvents: Array<{ barTime: number; reason: string }> = [];
       const trades: Array<{
         openedAt: number;
         closedAt: number;
@@ -762,9 +770,12 @@ export function registerRoutes(app: Express) {
             });
           }
         }
+        if (bestIteration && it.id === bestIteration.id) {
+          perBarEvents = result.diagnostic.perBarEvents;
+        }
       }
 
-      res.json({ candles, levels, trades });
+      res.json({ candles, levels, trades, perBarEvents });
     }
   );
 

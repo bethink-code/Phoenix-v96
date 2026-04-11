@@ -88,6 +88,12 @@ export interface BacktestDiagnostic {
     reason: string;
     detail?: Record<string, unknown>;
   }>;
+  // Per-bar event log — one entry per evaluated bar, telling the UI
+  // exactly what happened at that bar. Used by the chart overlay to
+  // answer "why didn't it trade this obvious setup?" visually.
+  // Light payload (reason only, no detail blob) so 500-bar sessions
+  // don't blow up the response size.
+  perBarEvents: Array<{ barTime: number; reason: string }>;
 }
 
 // Deterministic replay. Walks the candle array forward bar-by-bar. At each
@@ -116,8 +122,10 @@ export function runBacktest(input: BacktestInput): BacktestResult {
     bestRRSeen: 0,
     minRRFloor: input.config.minRiskRewardRatio,
     recentRejections: [],
+    perBarEvents: [],
   };
   const reject = (barTime: number, reason: string, detail?: Record<string, unknown>) => {
+    diag.perBarEvents.push({ barTime, reason });
     diag.rejections[reason] = (diag.rejections[reason] ?? 0) + 1;
     if (diag.recentRejections.length < 20) {
       diag.recentRejections.push({ atMs: barTime, reason, detail });
@@ -239,6 +247,7 @@ export function runBacktest(input: BacktestInput): BacktestResult {
     }
 
     diag.entriesTaken++;
+    diag.perBarEvents.push({ barTime: bar.openTime, reason: "trade_taken" });
     openTrades.push({
       openedAt: bar.openTime,
       side: proposal.side,
@@ -393,6 +402,7 @@ function emptyResult(): BacktestResult {
       bestRRSeen: 0,
       minRRFloor: 0,
       recentRejections: [],
+      perBarEvents: [],
     },
   };
 }
