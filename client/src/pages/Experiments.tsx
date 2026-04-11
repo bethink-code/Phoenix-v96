@@ -1446,6 +1446,21 @@ function ChartView({ sessionId }: { sessionId: string }) {
       e.reason.startsWith("no_proposal:") ||
       e.reason.startsWith("risk_rejected:")
   );
+  // Per-colour counts for the caption so the operator can sanity-check
+  // what the overlay is supposed to look like against subtle rendering.
+  const eventCounts = { grey: 0, amber: 0, violet: 0, blue: 0, trade: 0 };
+  for (const e of perBarEvents ?? []) {
+    if (e.reason === "no_proposal:no_target") eventCounts.grey++;
+    else if (e.reason.startsWith("risk_rejected:")) eventCounts.amber++;
+    else if (
+      e.reason === "no_proposal:mode_not_permitted" ||
+      e.reason === "no_proposal:entry_suppressed"
+    )
+      eventCounts.violet++;
+    else if (e.reason === "no_sweep" || e.reason === "no_levels")
+      eventCounts.blue++;
+    else if (e.reason === "trade_taken") eventCounts.trade++;
+  }
   // Group winning trades by the candle they entered on. Count of
   // distinct iterations agreeing there was a trade here = density.
   // Bigger dot = more winning configs spotted the same entry. Clusters
@@ -1621,13 +1636,12 @@ function ChartView({ sessionId }: { sessionId: string }) {
         level whose sweep triggered it — answers "why did it trade here?"
         at a glance. Size scales with how many different iterations agreed
         there was a trade at that candle. The strip below the candles
-        shows the best iteration's per-bar outcome:
-        <span className="text-gray-400"> grey = sweep detected but no valid target</span>,
-        <span className="text-amber-400"> amber = risk manager blocked</span>,
-        <span className="text-violet-400"> violet = regime/mode suppressed</span>,
-        <span className="text-blue-400"> blue = no sweep detected</span>.
-        Blank bars = a trade was taken (see triangles).
-        ({interestingEvents.length} bars where a sweep was detected but the trade was killed.)
+        shows the best iteration's per-bar outcome — counts:
+        <span className="text-gray-200"> grey {eventCounts.grey} (no target)</span>,
+        <span className="text-amber-400"> amber {eventCounts.amber} (risk blocked)</span>,
+        <span className="text-violet-400"> violet {eventCounts.violet} (mode suppressed)</span>,
+        <span className="text-blue-400"> blue {eventCounts.blue} (no sweep)</span>.
+        {eventCounts.trade} trades taken (triangles).
       </p>
       <div className="overflow-hidden rounded border border-border/40 bg-card/30">
         <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full">
@@ -1716,15 +1730,15 @@ function ChartView({ sessionId }: { sessionId: string }) {
               no_levels (boring). Sits below the candles so it doesn't
               obscure price. */}
           {(() => {
-            const stripY = padT + innerH + 4;
-            const tickH = 4;
+            const stripY = padT + innerH + 2;
+            const tickH = 8;
             return candles.map((c, i) => {
               const reason = eventByBar.get(c.openTime);
               if (!reason) return null;
               // trade_taken bars keep the white triangle overlay — no tick
               if (reason === "trade_taken") return null;
               let color: string | null = null;
-              if (reason === "no_proposal:no_target") color = "#9ca3af"; // grey
+              if (reason === "no_proposal:no_target") color = "#e5e7eb"; // bright grey (gray-200) for contrast
               else if (reason.startsWith("risk_rejected:")) color = "#f59e0b"; // amber
               else if (
                 reason === "no_proposal:mode_not_permitted" ||
