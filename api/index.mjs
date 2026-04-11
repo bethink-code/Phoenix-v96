@@ -1557,7 +1557,10 @@ function detectLatestSweep(candles, levels, config = DEFAULT_SWEEP_CONFIG) {
 }
 
 // server/modules/strategy/entries.ts
-function generateProposal(sweep, allLevels, regime) {
+var DEFAULT_PROPOSAL_CONFIG = {
+  targetDistanceMultiplier: 1.5
+};
+function generateProposal(sweep, allLevels, regime, config = DEFAULT_PROPOSAL_CONFIG) {
   if (!sweep) return null;
   const profile = getRegimeProfile(regime);
   if (profile.entrySuppressed) return null;
@@ -1567,7 +1570,7 @@ function generateProposal(sweep, allLevels, regime) {
   const entryPrice = sweep.level.price;
   const stopPrice = side === "short" ? sweep.wickExtreme * 1.0005 : sweep.wickExtreme * 0.9995;
   const riskPerUnit = Math.abs(entryPrice - stopPrice);
-  const minTargetDistance = riskPerUnit * 1.5;
+  const minTargetDistance = riskPerUnit * config.targetDistanceMultiplier;
   const target = findTargetLevel(allLevels, entryPrice, side, minTargetDistance);
   if (!target) return null;
   const reasoning = [
@@ -1692,7 +1695,10 @@ function runBacktest(input) {
       diag.recentRejections.push({ atMs: barTime, reason, detail });
     }
   };
-  const fullWindowLevels = identifyLevels(input.candles);
+  const levelConfig = input.levelConfig ?? DEFAULT_LEVEL_CONFIG;
+  const sweepConfig = input.sweepConfig ?? DEFAULT_SWEEP_CONFIG;
+  const proposalConfig = input.proposalConfig ?? DEFAULT_PROPOSAL_CONFIG;
+  const fullWindowLevels = identifyLevels(input.candles, levelConfig);
   for (let i = warmup; i < input.candles.length; i++) {
     const bar = input.candles[i];
     diag.barsEvaluated++;
@@ -1725,7 +1731,7 @@ function runBacktest(input) {
       reject(bar.openTime, "no_levels");
       continue;
     }
-    const sweep = detectLatestSweep([bar], levels);
+    const sweep = detectLatestSweep([bar], levels, sweepConfig);
     if (!sweep) {
       reject(bar.openTime, "no_sweep", { levelCount: levels.length });
       continue;
@@ -1733,7 +1739,7 @@ function runBacktest(input) {
     if (sweep.level.rank > diag.bestLevelRankSeen) {
       diag.bestLevelRankSeen = sweep.level.rank;
     }
-    const proposal = generateProposal(sweep, levels, input.regime);
+    const proposal = generateProposal(sweep, levels, input.regime, proposalConfig);
     if (!proposal) {
       reject(bar.openTime, "no_proposal", {
         levelType: sweep.level.type,
@@ -1923,12 +1929,9 @@ function runDiagnostic(args) {
     `${diag.barsEvaluated} bars evaluated \xB7 ${diag.entriesTaken} entries taken \xB7 ${totalRejected} rejected.`
   );
   const sorted = Object.entries(diag.rejections).sort((a, b) => b[1] - a[1]);
-  if (sorted.length > 0) {
-    const [topReason, topCount] = sorted[0];
-    const pct = totalRejected > 0 ? Math.round(topCount / totalRejected * 100) : 0;
-    findings.push(
-      `Dominant rejection: ${humanReason(topReason)} (${topCount} bars, ${pct}% of all rejections).`
-    );
+  for (const [reason, count] of sorted.slice(0, 6)) {
+    const pct = totalRejected > 0 ? Math.round(count / totalRejected * 100) : 0;
+    findings.push(`${humanReason(reason)}: ${count} bars (${pct}%)`);
   }
   if (diag.bestLevelRankSeen > 0 && diag.bestLevelRankSeen < diag.minLevelRankFloor) {
     findings.push(

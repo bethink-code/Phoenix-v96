@@ -71,6 +71,30 @@ Schema lives in `shared/schema.ts`. Key tables:
 - Regime change requires confirmation with plain-language consequences.
 - Emergency market exit: two taps max from any screen.
 
+## Autoresearch harness (`autoresearch/`)
+
+Karpathy-style autonomous research loop. Single editable file the agent
+edits + a fixed prepare step + a markdown skill. Local-only — does NOT
+run in production. The "agent" is whatever coding agent you point at the
+project (Claude Code, Codex CLI, etc.).
+
+- `autoresearch/program.md` — instructions the agent reads. Verbatim
+  Karpathy structure, adapted to Phoenix domain.
+- `autoresearch/prepare.ts` — one-time candle fetch + disk cache to
+  `~/.cache/phoenix-autoresearch/`. Read-only, agent never edits.
+- `autoresearch/train.ts` — **the single editable file.** PARAMS section
+  at top, evaluation pipeline below, score output at bottom in the exact
+  grep-friendly format program.md specifies.
+- `autoresearch/results.tsv` — agent-written experiment log. Gitignored.
+- `autoresearch/run.log` — captured stdout from each train run. Gitignored.
+
+Workflow: `npm run autoresearch:prepare -- CRVUSDT 1h 1000` once, then
+open the agent in this directory and prompt it to read program.md.
+Each iteration is a git commit on a branch like `autoresearch/<tag>`.
+
+The harness reuses the same `runBacktest` engine the deployed Experiments
+UI uses, so the score is consistent across both surfaces.
+
 ## Not yet built (Phase 1+)
 - Strategy engine (level identification, sweep detection, entry/exit logic)
 - Real exchange adapters (Binance / Bybit) — currently stubbed

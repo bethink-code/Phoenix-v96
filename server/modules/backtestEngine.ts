@@ -6,6 +6,18 @@
 import type { Regime } from "../../shared/schema";
 import type { Candle } from "./strategy/types";
 import { identifyLevels, detectLatestSweep, generateProposal } from "./strategy";
+import {
+  DEFAULT_LEVEL_CONFIG,
+  type LevelConfig,
+} from "./strategy/levels";
+import {
+  DEFAULT_SWEEP_CONFIG,
+  type SweepConfig,
+} from "./strategy/sweeps";
+import {
+  DEFAULT_PROPOSAL_CONFIG,
+  type ProposalConfig,
+} from "./strategy/entries";
 import { assessTrade } from "./riskManager";
 
 export interface BacktestInput {
@@ -19,6 +31,11 @@ export interface BacktestInput {
     dailyDrawdownLimitPct: number;
     weeklyDrawdownLimitPct: number;
   };
+  // Strategy-internal configs. All optional; defaults preserve the live bot's
+  // behaviour. Autoresearch's train.ts varies these to find good values.
+  levelConfig?: LevelConfig;
+  sweepConfig?: SweepConfig;
+  proposalConfig?: ProposalConfig;
   startingCapital: number;
   warmupCandles?: number; // how many bars before starting to trade
 }
@@ -112,9 +129,11 @@ export function runBacktest(input: BacktestInput): BacktestResult {
   // param sweep, comparison) this is fine — every variant sees the same
   // level set, so comparisons are still valid, and the diagnostic question
   // "why isn't the bot trading right now?" is naturally answered against
-  // the current level set anyway. If we ever add an experiment that varies
-  // level-identification config itself, that needs a separate run mode.
-  const fullWindowLevels = identifyLevels(input.candles);
+  // the current level set anyway.
+  const levelConfig = input.levelConfig ?? DEFAULT_LEVEL_CONFIG;
+  const sweepConfig = input.sweepConfig ?? DEFAULT_SWEEP_CONFIG;
+  const proposalConfig = input.proposalConfig ?? DEFAULT_PROPOSAL_CONFIG;
+  const fullWindowLevels = identifyLevels(input.candles, levelConfig);
 
   for (let i = warmup; i < input.candles.length; i++) {
     const bar = input.candles[i];
@@ -158,7 +177,7 @@ export function runBacktest(input: BacktestInput): BacktestResult {
     // the cheap part of the pipeline and the time-sensitive one. It only
     // looks at the latest candle, so pass a 1-element array instead of
     // slicing the whole history.
-    const sweep = detectLatestSweep([bar], levels);
+    const sweep = detectLatestSweep([bar], levels, sweepConfig);
     if (!sweep) {
       reject(bar.openTime, "no_sweep", { levelCount: levels.length });
       continue;
@@ -169,7 +188,7 @@ export function runBacktest(input: BacktestInput): BacktestResult {
       diag.bestLevelRankSeen = sweep.level.rank;
     }
 
-    const proposal = generateProposal(sweep, levels, input.regime);
+    const proposal = generateProposal(sweep, levels, input.regime, proposalConfig);
     if (!proposal) {
       reject(bar.openTime, "no_proposal", {
         levelType: sweep.level.type,

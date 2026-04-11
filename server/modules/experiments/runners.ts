@@ -85,18 +85,18 @@ export function runDiagnostic(args: {
   const diag = result.diagnostic;
   const totalRejected = Object.values(diag.rejections).reduce((a, b) => a + b, 0);
 
-  // Build operator-readable findings from the histogram
+  // Build operator-readable findings from the histogram. Always include the
+  // full top-N breakdown so the operator can see the shape even when no
+  // single reason dominates — that's the most common diagnostic failure
+  // mode and "no dominant reason" alone is unhelpful without the numbers.
   const findings: string[] = [];
   findings.push(
     `${diag.barsEvaluated} bars evaluated · ${diag.entriesTaken} entries taken · ${totalRejected} rejected.`
   );
   const sorted = Object.entries(diag.rejections).sort((a, b) => b[1] - a[1]);
-  if (sorted.length > 0) {
-    const [topReason, topCount] = sorted[0];
-    const pct = totalRejected > 0 ? Math.round((topCount / totalRejected) * 100) : 0;
-    findings.push(
-      `Dominant rejection: ${humanReason(topReason)} (${topCount} bars, ${pct}% of all rejections).`
-    );
+  for (const [reason, count] of sorted.slice(0, 6)) {
+    const pct = totalRejected > 0 ? Math.round((count / totalRejected) * 100) : 0;
+    findings.push(`${humanReason(reason)}: ${count} bars (${pct}%)`);
   }
   if (diag.bestLevelRankSeen > 0 && diag.bestLevelRankSeen < diag.minLevelRankFloor) {
     findings.push(

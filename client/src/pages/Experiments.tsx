@@ -55,9 +55,11 @@ interface MarketPair {
 
 export default function Experiments() {
   const [tab, setTab] = useState<"library" | "recommendations" | "history">("library");
+  // No auto-poll: recommendations only change when the operator clicks
+  // Run, and that mutation explicitly invalidates this query. Background
+  // polling here is pure noise in DevTools and on the network tab.
   const pendingQuery = useQuery<RunRow[]>({
     queryKey: ["/api/tenant/recommendations/pending"],
-    refetchInterval: 15_000,
   });
   const pendingCount = pendingQuery.data?.length ?? 0;
 
@@ -124,6 +126,10 @@ export default function Experiments() {
 function LibraryTab() {
   const qc = useQueryClient();
   const [showForm, setShowForm] = useState(false);
+  // Latest run result per experiment, kept in component state so it renders
+  // inline immediately after the user clicks Run. Without this, a no_action
+  // diagnostic disappears into History and the operator gets zero feedback.
+  const [latestByExp, setLatestByExp] = useState<Record<string, RunRow>>({});
   const experiments = useQuery<ExperimentRow[]>({
     queryKey: ["/api/tenant/experiments"],
   });
@@ -131,9 +137,10 @@ function LibraryTab() {
   const runMutation = useMutation({
     mutationFn: async (id: string) => {
       const r = await apiRequest(`/api/tenant/experiments/${id}/run`, { method: "POST" });
-      return r.json();
+      return (await r.json()) as RunRow;
     },
-    onSuccess: () => {
+    onSuccess: (run, experimentId) => {
+      setLatestByExp((prev) => ({ ...prev, [experimentId]: run }));
       qc.invalidateQueries({ queryKey: ["/api/tenant/recommendations/pending"] });
       qc.invalidateQueries({ queryKey: ["/api/tenant/experiment-runs"] });
     },
@@ -225,9 +232,59 @@ function LibraryTab() {
                 </Button>
               </div>
             </div>
+            {/* Inline result panel — shows the latest run for this experiment
+                if one happened in this session. For runs with a diff, also
+                tells the operator to head to Recommendations to action it. */}
+            {latestByExp[exp.id] && <InlineRunResult run={latestByExp[exp.id]} />}
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function InlineRunResult({ run }: { run: RunRow }) {
+  const rec = run.recommendation;
+  if (!rec) {
+    return (
+      <div className="mt-3 rounded border border-border/50 bg-card/30 p-3 text-xs text-muted-foreground">
+        Run completed but produced no recommendation.
+      </div>
+    );
+  }
+  const verdictColor =
+    run.verdict === "no_action"
+      ? "border-border text-muted-foreground"
+      : run.verdict === "pending"
+        ? "border-amber-500/40 text-amber-300"
+        : "border-border text-muted-foreground";
+  return (
+    <div className="mt-3 rounded border border-border/60 bg-background/40 p-3">
+      <div className="mb-2 flex items-baseline justify-between gap-3">
+        <h4 className="text-sm font-semibold text-foreground">{rec.summary}</h4>
+        <Badge className={cn("text-[10px]", verdictColor)}>{run.verdict}</Badge>
+      </div>
+      <ul className="list-disc space-y-0.5 pl-5 text-xs text-muted-foreground">
+        {rec.findings.map((f, i) => (
+          <li key={i}>{f}</li>
+        ))}
+      </ul>
+      {rec.diff && (
+        <div className="mt-2 rounded border border-amber-500/40 bg-amber-500/5 p-2 text-xs">
+          <div className="font-mono text-amber-200">
+            {rec.diff.paramKey}: {rec.diff.fromValue} → {rec.diff.toValue}
+          </div>
+          <div className="mt-1 text-muted-foreground">{rec.diff.rationale}</div>
+          <div className="mt-2 text-[11px] text-amber-300/80">
+            → Open the Recommendations tab to approve and apply.
+          </div>
+        </div>
+      )}
+      {rec.variants && rec.variants.length > 0 && (
+        <div className="mt-2">
+          <VariantsTable variants={rec.variants} />
+        </div>
+      )}
     </div>
   );
 }
@@ -398,9 +455,9 @@ function NewExperimentForm({ onCreated }: { onCreated: () => void }) {
 
 function RecommendationsTab() {
   const qc = useQueryClient();
+  // Same reasoning as the page-level pending query: no background polling.
   const pending = useQuery<RunRow[]>({
     queryKey: ["/api/tenant/recommendations/pending"],
-    refetchInterval: 15_000,
   });
 
   const action = useMutation({
@@ -548,25 +605,63 @@ function VariantsTable({ variants }: { variants: ScoredVariant[] }) {
 
 function HistoryTab() {
   const runs = useQuery<RunRow[]>({ queryKey: ["/api/tenant/experiment-runs"] });
+  const [expanded, setExpanded] = useState<string | null>(null);
   const rows = runs.data ?? [];
   if (rows.length === 0) {
     return <div className="p-6 text-sm text-muted-foreground">No runs yet.</div>;
   }
   return (
     <div className="space-y-2 p-6">
-      {rows.map((r) => (
-        <div key={r.id} className="rounded border border-border/50 bg-card/30 p-3">
-          <div className="flex items-baseline justify-between gap-3">
-            <span className="text-sm">
-              {r.recommendation?.summary ?? "(no recommendation)"}
-            </span>
-            <Badge className={cn("text-xs", verdictClass(r.verdict))}>{r.verdict}</Badge>
+      {rows.map((r) => {
+        const isOpen = expanded === r.id;
+        return (
+          <div key={r.id} className="rounded border border-border/50 bg-card/30">
+            <button
+              type="button"
+              onClick={() => setExpanded(isOpen ? null : r.id)}
+              className="flex w-full items-baseline justify-between gap-3 p-3 text-left hover:bg-card/50"
+            >
+              <div className="min-w-0 flex-1">
+                <div className="text-sm">
+                  {r.recommendation?.summary ?? "(no recommendation)"}
+                </div>
+                <div className="text-[11px] text-muted-foreground">
+                  {new Date(r.createdAt).toLocaleString()} ·{" "}
+                  {isOpen ? "click to collapse" : "click for details"}
+                </div>
+              </div>
+              <Badge className={cn("shrink-0 text-xs", verdictClass(r.verdict))}>
+                {r.verdict}
+              </Badge>
+            </button>
+            {isOpen && r.recommendation && (
+              <div className="border-t border-border/50 p-3">
+                <ul className="list-disc space-y-0.5 pl-5 text-xs text-muted-foreground">
+                  {r.recommendation.findings.map((f, i) => (
+                    <li key={i}>{f}</li>
+                  ))}
+                </ul>
+                {r.recommendation.diff && (
+                  <div className="mt-2 rounded border border-amber-500/40 bg-amber-500/5 p-2 text-xs">
+                    <div className="font-mono text-amber-200">
+                      {r.recommendation.diff.paramKey}: {r.recommendation.diff.fromValue} →{" "}
+                      {r.recommendation.diff.toValue}
+                    </div>
+                    <div className="mt-1 text-muted-foreground">
+                      {r.recommendation.diff.rationale}
+                    </div>
+                  </div>
+                )}
+                {r.recommendation.variants && r.recommendation.variants.length > 0 && (
+                  <div className="mt-2">
+                    <VariantsTable variants={r.recommendation.variants} />
+                  </div>
+                )}
+              </div>
+            )}
           </div>
-          <div className="text-[11px] text-muted-foreground">
-            {new Date(r.createdAt).toLocaleString()}
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

@@ -11,6 +11,18 @@ import { getRegimeProfile } from "../regimeEngine";
 
 export type SetupMode = "mode_a" | "mode_b";
 
+// Tunables exposed to autoresearch and (eventually) the operator. Defaults
+// preserve the original 1.5× behaviour so existing callers are unchanged.
+export interface ProposalConfig {
+  // Target must be at least this multiple of the risk distance away.
+  // Lowering it admits tighter ranges; raising it forces bigger setups.
+  targetDistanceMultiplier: number;
+}
+
+export const DEFAULT_PROPOSAL_CONFIG: ProposalConfig = {
+  targetDistanceMultiplier: 1.5,
+};
+
 export interface TradeProposal {
   side: "long" | "short";
   setupMode: SetupMode;
@@ -30,7 +42,8 @@ export interface TradeProposal {
 export function generateProposal(
   sweep: SweepEvent | null,
   allLevels: Level[],
-  regime: Regime
+  regime: Regime,
+  config: ProposalConfig = DEFAULT_PROPOSAL_CONFIG
 ): TradeProposal | null {
   if (!sweep) return null;
   const profile = getRegimeProfile(regime);
@@ -57,10 +70,10 @@ export function generateProposal(
       : sweep.wickExtreme * 0.9995;
 
   const riskPerUnit = Math.abs(entryPrice - stopPrice);
-  // Require the target to give at least 1.5× the risk distance, otherwise
-  // there's no point — the risk manager would reject it on R:R anyway,
-  // and tight ranges produce same-price targets that look valid but aren't.
-  const minTargetDistance = riskPerUnit * 1.5;
+  // Require the target to give at least N× the risk distance. Tight ranges
+  // would otherwise produce same-price targets that look valid but aren't.
+  // Multiplier is configurable so autoresearch can sweep it.
+  const minTargetDistance = riskPerUnit * config.targetDistanceMultiplier;
   const target = findTargetLevel(allLevels, entryPrice, side, minTargetDistance);
   if (!target) return null;
 
