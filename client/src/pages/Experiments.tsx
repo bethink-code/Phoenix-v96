@@ -742,8 +742,14 @@ function SessionHistoryCard({ session }: { session: ARSession }) {
           </Badge>
         </div>
 
-        {/* Key finding — the verdict headline as a single line */}
-        <p className="mt-1 text-sm text-muted-foreground">{verdict.headline}</p>
+        {/* Key finding — headline first, then the actionable body. The
+            body carries the recommendation ("Try a different timeframe…")
+            which is the part the operator actually needs to read, so it
+            stays visible even in the collapsed state. The expanded body
+            below shows only supporting data (chart + params), no duplicate
+            verdict text. */}
+        <p className="mt-2 text-sm font-medium text-foreground">{verdict.headline}</p>
+        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{verdict.body}</p>
 
         {/* Sparkline — visible at-a-glance score-over-iterations shape */}
         {iterations.length > 0 && (
@@ -769,15 +775,13 @@ function SessionHistoryCard({ session }: { session: ARSession }) {
         </div>
       </button>
 
-      {/* Expanded body — full verdict explanation, full chart, params */}
+      {/* Expanded body — supporting data only. The verdict text is
+          already visible in the collapsed header above; expanding adds
+          the full chart with axes and the params. */}
       {open && (
         <div className="border-t border-border/40 p-4">
-          <p className="text-sm leading-relaxed text-muted-foreground">{verdict.body}</p>
-
           {iterations.length > 0 && (
-            <div className="mt-4">
-              <ScoreChart iterations={iterations} />
-            </div>
+            <ScoreChart iterations={iterations} />
           )}
 
           {verdict.foundWinner && verdict.bestIter && verdict.baseline && (
