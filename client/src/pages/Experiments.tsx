@@ -1063,16 +1063,14 @@ function AutoresearchSurface({
 
   // Active session = the most recent NON-TERMINAL session (running /
   // paused / legacy aborted). The server's /active endpoint filters
-  // this for us. Terminal sessions (stopped / error / legacy done)
-  // are hidden from the Live tab and live in History.
-  // Polling cadence ≈ iteration speed so the UI updates as soon as a
-  // new iteration completes. Polling stops when there's no active
-  // session — no need to burn rate limit on an idle Live tab.
+  // this for us, but we double-check on the client in case a legacy
+  // terminal session (done, stopped) slips through an older server.
   const activeQuery = useQuery<ARSession | null>({
     queryKey: ["/api/autoresearch/active"],
     refetchInterval: 5_000,
   });
-  const focusedSession = activeQuery.data ?? null;
+  const rawActive = activeQuery.data ?? null;
+  const focusedSession = rawActive && !isTerminal(rawActive.status) ? rawActive : null;
 
   // Iterations for the focused session, polled while running
   const iterationsQuery = useQuery<ARIteration[]>({
@@ -1133,19 +1131,23 @@ function AutoresearchSurface({
   const status: "idle" | "running" | "paused" | "stopped" | "done" | "aborted" | "error" =
     focusedSession?.status ?? "idle";
 
-  // Live-tab actions — three states:
-  //   running                → [Pause]
-  //   paused (or legacy aborted) → [Continue] [Done]
-  //   idle / error / (no session) → [Start a session]
+  // Live-tab actions — three cases:
+  //   running                   → [Pause]
+  //   paused (continuable)      → [Continue] [Done]
+  //   otherwise (idle / error / terminal leak) → [Start a session]
   // Pause sets the stop flag; the orchestrator exits the loop after
   // the current iteration and transitions to "paused". Continue
-  // resumes on the same session row. Done is the terminal transition:
-  // the session becomes "stopped" and moves to History.
-  const sessionIsPaused =
-    focusedSession && isContinuable(focusedSession.status);
+  // resumes on the same session row. Done is the terminal transition
+  // (paused → stopped, session moves to History). Start shows
+  // whenever there's no work currently in progress — covers idle,
+  // error states, and any terminal session that somehow got focused
+  // on Live (e.g. legacy done rows slipping past the server filter).
+  const isRunning = status === "running";
+  const isPaused = !!focusedSession && isContinuable(focusedSession.status);
+  const hasWorkInProgress = isRunning || isPaused;
   const actions = (
     <div className="flex flex-wrap items-center gap-2">
-      {status === "running" && focusedSession && (
+      {isRunning && focusedSession && (
         <Button
           size="sm"
           variant="outline"
@@ -1155,7 +1157,7 @@ function AutoresearchSurface({
           {pauseMutation.isPending ? "Pausing…" : "Pause"}
         </Button>
       )}
-      {sessionIsPaused && focusedSession && (
+      {isPaused && focusedSession && (
         <>
           <Button
             size="sm"
@@ -1174,7 +1176,7 @@ function AutoresearchSurface({
           </Button>
         </>
       )}
-      {(status === "idle" || status === "error") && (
+      {!hasWorkInProgress && (
         <StartSessionForm
           prefill={prefill ?? undefined}
           onPrefillConsumed={onPrefillConsumed}
