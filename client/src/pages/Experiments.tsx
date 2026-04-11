@@ -55,7 +55,7 @@ interface MarketPair {
   displayName: string;
 }
 
-type TabKey = "live" | "iterations" | "history" | "library" | "recommendations";
+type TabKey = "live" | "history" | "library" | "recommendations";
 
 interface AutoresearchCapabilities {
   available: boolean;
@@ -87,25 +87,22 @@ export default function Experiments() {
   });
   const autoresearchAvailable = capabilities.data?.available ?? false;
 
-  // Flat tab structure — no nesting. Live/Iterations are the two views
-  // of the active autoresearch session, History is the archive of past
-  // sessions, Library/Recommendations are the legacy manual framework.
-  // Live and Iterations are only present when autoresearch is available
-  // (i.e. local dev with OPENAI_API_KEY); on prd they're hidden.
+  // Top-level tabs are flat. Live is the active autoresearch session
+  // view (with sub-tabs underneath the identity card for Trades / Score
+  // / Iterations / Successes — handled inside AutoresearchSurface).
+  // History is the archive of past sessions. Library/Recommendations
+  // are the legacy manual framework.
   const tabs: Array<{ key: TabKey; label: string; count: number | null }> = [];
   if (autoresearchAvailable) {
     tabs.push({ key: "live", label: "Live", count: null });
-    tabs.push({ key: "iterations", label: "Iterations", count: null });
   }
   tabs.push({ key: "history", label: "History", count: null });
   tabs.push({ key: "library", label: "Library", count: null });
   tabs.push({ key: "recommendations", label: "Recommendations", count: pendingCount });
 
-  // If autoresearch isn't available (prd), redirect Live/Iterations to
-  // History since those tabs are hidden there. useEffect avoids the
-  // "setState during render" anti-pattern.
+  // If autoresearch isn't available (prd), redirect Live to History.
   useEffect(() => {
-    if (!autoresearchAvailable && (tab === "live" || tab === "iterations")) {
+    if (!autoresearchAvailable && tab === "live") {
       setTab("history");
     }
   }, [autoresearchAvailable, tab]);
@@ -153,13 +150,11 @@ export default function Experiments() {
       </header>
 
       <main className="mx-auto max-w-6xl px-6 py-6">
-        {/* Live and Iterations both render the AutoresearchSurface
-            component, which owns the identity card + start form +
-            session queries. The `view` prop tells it which sub-content
-            to show below the identity card. */}
-        {(tab === "live" || tab === "iterations") && autoresearchAvailable && (
+        {/* Live renders the AutoresearchSurface — identity card +
+            start form + 4 sub-tabs (Trades / Score / Iterations /
+            Successes). The sub-tabs are owned by the surface itself. */}
+        {tab === "live" && autoresearchAvailable && (
           <AutoresearchSurface
-            view={tab}
             onViewHistory={() => setTab("history")}
             prefill={startPrefill}
             onPrefillConsumed={() => setStartPrefill(null)}
@@ -682,14 +677,12 @@ interface SessionWithIterations {
 }
 
 function HistoryTab({
-  onContinueFromIteration: _onContinueFromIteration,
+  onContinueFromIteration,
 }: {
-  // Reserved for when SessionHistoryCard's expanded body gets the
-  // IterationsTable embedded — at that point each iteration row will
-  // emit "continue from this" up through the card to here, and we'll
-  // forward to the parent. Currently unused (history cards don't
-  // expose the iterations table inline) but the prop is in place so
-  // the parent can wire it without another refactor.
+  // Forwarded to SessionHistoryCard so each session's iterations
+  // table (in the Iterations / Successes sub-tabs of an expanded
+  // card) can emit "continue from this iteration" all the way up
+  // to the parent Experiments component.
   onContinueFromIteration?: (p: StartFormPrefill) => void;
 } = {}) {
   // Light refetch so a session that finishes while you're on this tab
@@ -736,10 +729,14 @@ function HistoryTab({
   ].sort((a, b) => b.at - a.at);
 
   return (
-    <div className="space-y-4 p-6">
-      {timeline.map((item, i) =>
+    <div className="space-y-4">
+      {timeline.map((item) =>
         item.kind === "session" ? (
-          <SessionHistoryCard key={`s-${item.row.id}`} session={item.row} />
+          <SessionHistoryCard
+            key={`s-${item.row.id}`}
+            session={item.row}
+            onContinueFromIteration={onContinueFromIteration}
+          />
         ) : (
           <ManualRunHistoryCard key={`r-${item.row.id}`} run={item.row} />
         )
@@ -754,8 +751,15 @@ function HistoryTab({
 // the goal as the title, the verdict headline as the key finding,
 // a sparkline of score progression, and a metadata strip. Click to
 // expand into the full SessionResult body (chart with axes, params).
-function SessionHistoryCard({ session }: { session: ARSession }) {
+function SessionHistoryCard({
+  session,
+  onContinueFromIteration,
+}: {
+  session: ARSession;
+  onContinueFromIteration?: (p: StartFormPrefill) => void;
+}) {
   const [open, setOpen] = useState(false);
+  const [view, setView] = useState<SessionView>("trades");
   const iterationsQuery = useQuery<ARIteration[]>({
     queryKey: [`/api/autoresearch/sessions/${session.id}/iterations`],
   });
@@ -828,30 +832,23 @@ function SessionHistoryCard({ session }: { session: ARSession }) {
         </div>
       </button>
 
-      {/* Expanded body — supporting data. Chart shape depends on mode:
-          - tune: trades + score, both with running-best lines (the
-            climb/flatline signal is what tune mode is about)
-          - discover: trades + win rate + net PnL + drawdown, no
-            running-best lines (every point is a sample, no winner) */}
+      {/* Expanded body — same 4 sub-tabs as the Live surface so the
+          structure is consistent: Trades / Score / Iterations /
+          Successes. Plus the params block (winning diff or best-iter
+          reference) which is small enough to leave under the sub-tabs
+          rather than become its own tab. */}
       {open && (
         <div className="space-y-4 border-t border-border/40 p-4">
-          {iterations.length > 0 && session.mode === "tune" && (
-            <>
-              <IterationChart iterations={iterations} metric="trades" />
-              <IterationChart iterations={iterations} metric="score" />
-            </>
-          )}
-          {iterations.length > 0 && session.mode === "discover" && (
-            <>
-              <IterationChart iterations={iterations} metric="trades" showBest={false} />
-              <IterationChart iterations={iterations} metric="winRate" showBest={false} />
-              <IterationChart iterations={iterations} metric="netPnl" showBest={false} />
-              <IterationChart iterations={iterations} metric="drawdown" showBest={false} />
-            </>
-          )}
+          <SessionViewTabs view={view} onChange={setView} />
+          <SessionViewContent
+            view={view}
+            session={session}
+            iterations={iterations}
+            onContinueFromIteration={onContinueFromIteration}
+          />
 
           {verdict.foundWinner && verdict.bestIter && verdict.baseline && (
-            <div className="mt-4 rounded border border-border/40 bg-background/40 p-3">
+            <div className="mt-2 rounded border border-border/40 bg-background/40 p-3">
               <div className="mb-2 text-[10px] uppercase tracking-wide text-muted-foreground">
                 What changed
               </div>
@@ -862,7 +859,7 @@ function SessionHistoryCard({ session }: { session: ARSession }) {
             </div>
           )}
           {!verdict.foundWinner && verdict.bestIter && (
-            <div className="mt-4 rounded border border-border/40 bg-background/40 p-3">
+            <div className="mt-2 rounded border border-border/40 bg-background/40 p-3">
               <div className="mb-2 text-[10px] uppercase tracking-wide text-muted-foreground">
                 Best iteration (#{verdict.bestIter.idx + 1}) — for reference
               </div>
@@ -997,20 +994,21 @@ interface ARIteration {
   createdAt: string;
 }
 
+type SessionView = "trades" | "score" | "iterations" | "successes";
+
 function AutoresearchSurface({
-  view,
   onViewHistory,
   prefill,
   onPrefillConsumed,
   onContinueFromIteration,
 }: {
-  view: "live" | "iterations";
   onViewHistory: () => void;
   prefill: StartFormPrefill | null;
   onPrefillConsumed: () => void;
   onContinueFromIteration: (p: StartFormPrefill) => void;
 }) {
   const qc = useQueryClient();
+  const [view, setView] = useState<SessionView>("trades");
 
   // Active session = currently running, OR most recently finished. The
   // identity card always shows ONE session — we resolve which one to show
@@ -1124,34 +1122,162 @@ function AutoresearchSurface({
         }
       />
 
-      {/* Sub-content driven by the top-level tab (Live or Iterations).
-          No inner tab bar — the parent's tab menu IS the navigation. */}
-      {view === "live" && (
-        <LiveResearchFeed
-          session={focusedSession}
-          iterations={iterationsQuery.data ?? []}
-        />
-      )}
-      {view === "iterations" && (
-        <IterationsTable
-          iterations={iterationsQuery.data ?? []}
-          onContinueFromIteration={
-            focusedSession
-              ? (it) =>
-                  onContinueFromIteration({
-                    seedParams: it.params,
-                    pairId: focusedSession.pairId,
-                    timeframe: focusedSession.timeframe as StartFormPrefill["timeframe"],
-                    regime: focusedSession.regime as StartFormPrefill["regime"],
-                    lookbackBars: focusedSession.lookbackBars,
-                    model: focusedSession.model as StartFormPrefill["model"],
-                    mode: focusedSession.mode,
-                    sourceLabel: `iteration #${it.idx + 1}`,
-                  })
-              : undefined
-          }
-        />
-      )}
+      {/* Sub-tabs underneath the identity card — four views of the
+          active session. Each shows ONE thing well rather than four
+          things stacked. */}
+      <SessionViewTabs view={view} onChange={setView} />
+      <SessionViewContent
+        view={view}
+        session={focusedSession}
+        iterations={iterationsQuery.data ?? []}
+        onContinueFromIteration={onContinueFromIteration}
+      />
+    </div>
+  );
+}
+
+// Sub-tab bar for the active session views. Lives directly under the
+// identity card. Same visual language as the page-level tabs.
+function SessionViewTabs({
+  view,
+  onChange,
+}: {
+  view: SessionView;
+  onChange: (v: SessionView) => void;
+}) {
+  const tabs: Array<{ key: SessionView; label: string }> = [
+    { key: "trades", label: "Trades" },
+    { key: "score", label: "Score" },
+    { key: "iterations", label: "Iterations" },
+    { key: "successes", label: "Successes" },
+  ];
+  return (
+    <div className="flex gap-1 border-b border-border">
+      {tabs.map((t) => (
+        <button
+          key={t.key}
+          onClick={() => onChange(t.key)}
+          className={cn(
+            "-mb-px border-b-2 px-3 py-2 text-xs transition-colors",
+            view === t.key
+              ? "border-primary text-primary"
+              : "border-transparent text-muted-foreground hover:text-foreground"
+          )}
+        >
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// Renders one of the four session sub-views. Pure switch — used by
+// both AutoresearchSurface and the expanded body of SessionHistoryCard
+// so the structure stays consistent.
+function SessionViewContent({
+  view,
+  session,
+  iterations,
+  onContinueFromIteration,
+}: {
+  view: SessionView;
+  session: ARSession | null;
+  iterations: ARIteration[];
+  onContinueFromIteration?: (p: StartFormPrefill) => void;
+}) {
+  if (!session) {
+    return (
+      <div className="text-xs text-muted-foreground">
+        No session yet. Click "Start a session" above to kick one off.
+      </div>
+    );
+  }
+  if (iterations.length === 0 && session.status === "running") {
+    return (
+      <div className="text-xs text-muted-foreground">
+        Session started. First iteration in flight…
+      </div>
+    );
+  }
+  if (iterations.length === 0) {
+    return <div className="text-xs text-muted-foreground">No iterations yet.</div>;
+  }
+
+  // The Continue handler — converts an iteration into a StartFormPrefill
+  // by carrying forward the session's pair/timeframe/regime/etc and
+  // setting seedParams to the iteration's params.
+  const continueFromIteration = onContinueFromIteration
+    ? (it: ARIteration) =>
+        onContinueFromIteration({
+          seedParams: it.params,
+          pairId: session.pairId,
+          timeframe: session.timeframe as StartFormPrefill["timeframe"],
+          regime: session.regime as StartFormPrefill["regime"],
+          lookbackBars: session.lookbackBars,
+          model: session.model as StartFormPrefill["model"],
+          mode: session.mode,
+          sourceLabel: `iteration #${it.idx + 1}`,
+        })
+    : undefined;
+
+  if (view === "trades") {
+    return <IterationChart iterations={iterations} metric="trades" showBest={session.mode === "tune"} />;
+  }
+  if (view === "score") {
+    return <IterationChart iterations={iterations} metric="score" showBest={session.mode === "tune"} />;
+  }
+  if (view === "iterations") {
+    return (
+      <IterationsTable
+        iterations={iterations}
+        onContinueFromIteration={continueFromIteration}
+      />
+    );
+  }
+  if (view === "successes") {
+    return (
+      <SuccessesView
+        iterations={iterations}
+        onContinueFromIteration={continueFromIteration}
+      />
+    );
+  }
+  return null;
+}
+
+// "Successes" — filtered iteration list. A success is an iteration
+// that produced MORE trades than the baseline AND made money. Sorted
+// by net P&L descending so the strongest candidates lead. Pure data
+// filter, no opinion.
+function SuccessesView({
+  iterations,
+  onContinueFromIteration,
+}: {
+  iterations: ARIteration[];
+  onContinueFromIteration?: (it: ARIteration) => void;
+}) {
+  const baseline = iterations.find((i) => i.idx === 0);
+  const baselineTrades = baseline ? baseline.trades : 0;
+  const successes = iterations
+    .filter((i) => i.trades > baselineTrades && Number(i.netPnl) > 0)
+    .sort((a, b) => Number(b.netPnl) - Number(a.netPnl));
+
+  if (successes.length === 0) {
+    return (
+      <div className="rounded border border-border/40 bg-card/30 p-4 text-xs text-muted-foreground">
+        No successes yet. A success is an iteration that produced more trades than the baseline ({baselineTrades}) AND made money. None of the {iterations.length} iterations met both criteria.
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      <p className="text-xs text-muted-foreground">
+        {successes.length} of {iterations.length} iterations did more trades than baseline ({baselineTrades}) AND were profitable. Sorted by net P&L descending.
+      </p>
+      <IterationsTable
+        iterations={successes}
+        onContinueFromIteration={onContinueFromIteration}
+      />
     </div>
   );
 }
@@ -2142,83 +2268,6 @@ function LegendDot({ color, label }: { color: string; label: string }) {
       <span>{label}</span>
     </span>
   );
-}
-
-// ---- Live research feed ---------------------------------------------------
-
-function LiveResearchFeed({
-  session,
-  iterations,
-}: {
-  session: ARSession | null;
-  iterations: ARIteration[];
-}) {
-  if (!session) {
-    return (
-      <div className="p-6 text-xs text-muted-foreground">
-        No session yet. Click "Start a session" above to kick one off.
-      </div>
-    );
-  }
-  if (iterations.length === 0 && session.status === "running") {
-    return (
-      <div className="p-6 text-xs text-muted-foreground">
-        Session started. First iteration in flight…
-      </div>
-    );
-  }
-  if (iterations.length === 0) {
-    return <div className="text-xs text-muted-foreground">No iterations yet.</div>;
-  }
-  // Newest at top — same as the bot's HeartbeatFeed
-  const reversed = [...iterations].reverse();
-  return (
-    <div className="space-y-3">
-      {/* Live charts at top of feed so the operator can watch the search
-          climb (or flatline) as iterations land. Trades chart first
-          because it's the more useful signal — score is 0 until
-          trades >= 3, so the trades chart catches partial progress
-          that score completely hides. */}
-      <div className="space-y-3">
-        <IterationChart iterations={iterations} metric="trades" />
-        <IterationChart iterations={iterations} metric="score" />
-      </div>
-      {reversed.map((it) => (
-        <div
-          key={it.id}
-          className={cn(
-            "border-l-2 pl-4 leading-snug",
-            iterationMoodClass(it.status)
-          )}
-        >
-          <div className="text-sm">{it.narration}</div>
-          {it.rationale && (
-            <div className="mt-0.5 text-[11px] italic text-muted-foreground">
-              "{it.rationale}"
-            </div>
-          )}
-          <div className="mt-0.5 text-[10px] text-muted-foreground/70">
-            {new Date(it.createdAt).toLocaleTimeString()}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function iterationMoodClass(status: ARIteration["status"]): string {
-  switch (status) {
-    case "keep":
-      return "border-emerald-500/50 text-emerald-200";
-    case "baseline":
-      return "border-blue-500/50 text-blue-200";
-    case "discard":
-      return "border-border/60 text-muted-foreground";
-    case "sampled":
-      return "border-purple-500/50 text-purple-200";
-    case "crash":
-      return "border-red-500/50 text-red-300";
-  }
 }
 
 // ---- Iterations table ----------------------------------------------------
