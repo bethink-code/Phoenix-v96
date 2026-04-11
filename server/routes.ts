@@ -1,4 +1,6 @@
 import type { Express, Request, Response } from "express";
+import { promises as fs } from "node:fs";
+import path from "node:path";
 import { z } from "zod";
 import { storage } from "./storage";
 import { isAuthenticated, isAdmin } from "./auth";
@@ -42,6 +44,20 @@ function getIp(req: Request): string {
 function pid(req: Request, key: string): string {
   const v = (req.params as Record<string, string | string[]>)[key];
   return Array.isArray(v) ? v[0] : v;
+}
+
+// Read the current git branch by parsing .git/HEAD. Cheap, no subprocess.
+// Returns null if anything goes wrong (no .git dir, detached HEAD, etc.).
+async function readGitHead(): Promise<string | null> {
+  try {
+    const headPath = path.join(process.cwd(), ".git", "HEAD");
+    const text = (await fs.readFile(headPath, "utf-8")).trim();
+    // "ref: refs/heads/branch-name" → "branch-name"
+    const m = text.match(/^ref:\s*refs\/heads\/(.+)$/);
+    return m ? m[1] : text.slice(0, 7); // detached HEAD → short sha
+  } catch {
+    return null;
+  }
 }
 
 export function registerRoutes(app: Express) {
@@ -374,6 +390,44 @@ export function registerRoutes(app: Express) {
   // forms and validate input client-side.
   app.get("/api/tenant/experiments/appliable-keys", isAuthenticated, (_req, res) => {
     res.json(APPLIABLE_PARAM_KEYS);
+  });
+
+  // Local-only autoresearch viewer. Reads autoresearch/results.tsv from
+  // disk relative to process.cwd(). On Vercel serverless the file does not
+  // exist, so this returns { available: false } and the client hides the
+  // entire tab — there is no "autoresearch in production" surface, by
+  // design. The harness is local only.
+  app.get("/api/autoresearch/results", isAuthenticated, async (_req, res) => {
+    const filePath = path.join(process.cwd(), "autoresearch", "results.tsv");
+    try {
+      const text = await fs.readFile(filePath, "utf-8");
+      const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+      if (lines.length === 0) {
+        return res.json({ available: true, runs: [], branch: await readGitHead() });
+      }
+      const header = lines[0].split("\t");
+      const runs = lines.slice(1).map((line) => {
+        const cols = line.split("\t");
+        const row: Record<string, string> = {};
+        header.forEach((h, i) => {
+          row[h] = cols[i] ?? "";
+        });
+        return row;
+      });
+      const stat = await fs.stat(filePath);
+      res.json({
+        available: true,
+        runs,
+        branch: await readGitHead(),
+        updatedAt: stat.mtime.toISOString(),
+      });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        return res.json({ available: false });
+      }
+      console.error("[autoresearch] read failed", err);
+      return res.json({ available: false });
+    }
   });
 
   app.get("/api/tenant/costs", isAuthenticated, async (req, res) => {

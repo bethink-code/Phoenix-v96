@@ -53,15 +53,53 @@ interface MarketPair {
   displayName: string;
 }
 
+type TabKey = "library" | "recommendations" | "history" | "autoresearch";
+
+interface AutoresearchProbe {
+  available: boolean;
+  runs?: AutoresearchRun[];
+  branch?: string | null;
+  updatedAt?: string;
+}
+
+interface AutoresearchRun {
+  commit: string;
+  score: string;
+  trades: string;
+  win_rate: string;
+  net_pnl: string;
+  status: string;
+  description: string;
+}
+
 export default function Experiments() {
-  const [tab, setTab] = useState<"library" | "recommendations" | "history">("library");
-  // No auto-poll: recommendations only change when the operator clicks
-  // Run, and that mutation explicitly invalidates this query. Background
-  // polling here is pure noise in DevTools and on the network tab.
+  const [tab, setTab] = useState<TabKey>("library");
   const pendingQuery = useQuery<RunRow[]>({
     queryKey: ["/api/tenant/recommendations/pending"],
   });
   const pendingCount = pendingQuery.data?.length ?? 0;
+
+  // Probe once on mount: does autoresearch/results.tsv exist on the server's
+  // disk? On Vercel it never does, so the tab stays hidden in production.
+  // On localhost (after running the harness once) it does, so the tab shows.
+  const autoresearchProbe = useQuery<AutoresearchProbe>({
+    queryKey: ["/api/autoresearch/results"],
+    refetchInterval: 5_000, // gentle polling so new commits land in the table
+  });
+  const autoresearchAvailable = autoresearchProbe.data?.available ?? false;
+
+  const tabs: Array<{ key: TabKey; label: string; count: number | null }> = [
+    { key: "library", label: "Library", count: null },
+    { key: "recommendations", label: "Recommendations", count: pendingCount },
+    { key: "history", label: "History", count: null },
+  ];
+  if (autoresearchAvailable) {
+    tabs.push({
+      key: "autoresearch",
+      label: "Autoresearch",
+      count: autoresearchProbe.data?.runs?.length ?? 0,
+    });
+  }
 
   return (
     <div className="flex h-screen flex-col bg-background">
@@ -82,13 +120,7 @@ export default function Experiments() {
       <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-4 overflow-hidden p-6">
         <Card className="flex flex-1 flex-col overflow-hidden">
           <div className="flex shrink-0 gap-1 border-b border-border px-4">
-            {(
-              [
-                { key: "library", label: "Library", count: null as number | null },
-                { key: "recommendations", label: "Recommendations", count: pendingCount },
-                { key: "history", label: "History", count: null },
-              ] as const
-            ).map((t) => (
+            {tabs.map((t) => (
               <button
                 key={t.key}
                 onClick={() => setTab(t.key)}
@@ -112,6 +144,9 @@ export default function Experiments() {
             {tab === "library" && <LibraryTab />}
             {tab === "recommendations" && <RecommendationsTab />}
             {tab === "history" && <HistoryTab />}
+            {tab === "autoresearch" && autoresearchAvailable && (
+              <AutoresearchTab probe={autoresearchProbe.data!} />
+            )}
           </div>
         </Card>
       </main>
@@ -679,6 +714,150 @@ function verdictClass(v: RunRow["verdict"]): string {
     case "deferred":
       return "border-border text-muted-foreground";
     case "no_action":
+      return "border-border text-muted-foreground";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// AUTORESEARCH TAB — local-only viewer for results.tsv
+// ---------------------------------------------------------------------------
+//
+// Reads from /api/autoresearch/results which only exists when the harness
+// has been run on the same machine that's serving the API. The tab itself
+// is gated on the probe's `available` flag, so this component never renders
+// in production. The polling cadence is gentle (5s) so a long-running agent
+// loop's commits land in the table without manual refresh.
+
+function AutoresearchTab({ probe }: { probe: AutoresearchProbe }) {
+  const runs = probe.runs ?? [];
+  const sorted = [...runs].sort(
+    (a, b) => Number(b.score ?? 0) - Number(a.score ?? 0)
+  );
+  const best = sorted[0];
+  const lastUpdated = probe.updatedAt ? new Date(probe.updatedAt) : null;
+
+  if (runs.length === 0) {
+    return (
+      <div className="space-y-3 p-6">
+        <div className="rounded-md border border-border/60 bg-card/40 p-4 text-xs text-muted-foreground">
+          <div className="mb-1 font-mono text-foreground">
+            Branch: {probe.branch ?? "(unknown)"}
+          </div>
+          <p>
+            No autoresearch runs yet. Open Codex (or your preferred coding
+            agent) in this directory and prompt:{" "}
+            <span className="italic text-foreground">
+              "Read autoresearch/program.md and kick off an experiment."
+            </span>
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const maxScore = Math.max(...runs.map((r) => Number(r.score) || 0), 0.0001);
+
+  return (
+    <div className="space-y-4 p-6">
+      {/* Header — branch + last updated + count */}
+      <div className="flex flex-wrap items-baseline justify-between gap-3 text-xs">
+        <div className="font-mono text-muted-foreground">
+          Branch: <span className="text-foreground">{probe.branch ?? "(unknown)"}</span>
+          {" · "}
+          {runs.length} experiment{runs.length === 1 ? "" : "s"}
+        </div>
+        {lastUpdated && (
+          <div className="text-muted-foreground">
+            results.tsv updated {lastUpdated.toLocaleTimeString()}
+          </div>
+        )}
+      </div>
+
+      {/* Best so far */}
+      {best && Number(best.score) > 0 && (
+        <div className="rounded-md border border-emerald-500/40 bg-emerald-500/5 p-4">
+          <div className="mb-1 text-[10px] uppercase tracking-wide text-emerald-300/80">
+            Best so far
+          </div>
+          <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm">
+            <span className="font-mono text-foreground">{best.commit}</span>
+            <span className="text-emerald-300">score {Number(best.score).toFixed(4)}</span>
+            <span className="text-muted-foreground">
+              {best.trades} trades · {Math.round(Number(best.win_rate) * 100)}% wins · ${Number(best.net_pnl).toFixed(2)} PnL
+            </span>
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">{best.description}</p>
+        </div>
+      )}
+
+      {/* Full table */}
+      <div className="space-y-1">
+        <div className="grid grid-cols-12 gap-2 px-3 py-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+          <div className="col-span-2 font-mono">commit</div>
+          <div className="col-span-1 text-right">score</div>
+          <div className="col-span-1 text-right">trades</div>
+          <div className="col-span-1 text-right">win%</div>
+          <div className="col-span-1 text-right">pnl</div>
+          <div className="col-span-1">status</div>
+          <div className="col-span-5">description</div>
+        </div>
+        {runs
+          .slice()
+          .reverse()
+          .map((r, i) => {
+            const score = Number(r.score) || 0;
+            const widthPct = (score / maxScore) * 100;
+            return (
+              <div
+                key={`${r.commit}-${i}`}
+                className="relative overflow-hidden rounded border border-border/40 bg-card/30"
+              >
+                {score > 0 && (
+                  <div
+                    className="absolute inset-y-0 left-0 bg-primary/10"
+                    style={{ width: `${widthPct}%` }}
+                  />
+                )}
+                <div className="relative grid grid-cols-12 items-center gap-2 px-3 py-2 text-xs">
+                  <div className="col-span-2 truncate font-mono text-foreground">{r.commit}</div>
+                  <div className="col-span-1 text-right font-mono">{score.toFixed(4)}</div>
+                  <div className="col-span-1 text-right font-mono text-muted-foreground">
+                    {r.trades}
+                  </div>
+                  <div className="col-span-1 text-right font-mono text-muted-foreground">
+                    {Math.round(Number(r.win_rate) * 100)}%
+                  </div>
+                  <div className="col-span-1 text-right font-mono text-muted-foreground">
+                    {Number(r.net_pnl).toFixed(0)}
+                  </div>
+                  <div className="col-span-1">
+                    <Badge className={cn("text-[10px]", autoresearchStatusClass(r.status))}>
+                      {r.status}
+                    </Badge>
+                  </div>
+                  <div className="col-span-5 truncate text-muted-foreground" title={r.description}>
+                    {r.description}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+      </div>
+    </div>
+  );
+}
+
+function autoresearchStatusClass(status: string): string {
+  switch (status) {
+    case "keep":
+      return "border-emerald-500/40 text-emerald-300";
+    case "discard":
+      return "border-border text-muted-foreground";
+    case "crash":
+      return "border-red-500/40 text-red-300";
+    case "defer":
+      return "border-amber-500/40 text-amber-300";
+    default:
       return "border-border text-muted-foreground";
   }
 }

@@ -972,6 +972,8 @@ function isAdmin(req, res, next) {
 }
 
 // server/routes.ts
+import { promises as fs } from "node:fs";
+import path from "node:path";
 import { z as z2 } from "zod";
 
 // server/modules/emergencyExit.ts
@@ -2171,6 +2173,16 @@ function pid(req, key) {
   const v = req.params[key];
   return Array.isArray(v) ? v[0] : v;
 }
+async function readGitHead() {
+  try {
+    const headPath = path.join(process.cwd(), ".git", "HEAD");
+    const text2 = (await fs.readFile(headPath, "utf-8")).trim();
+    const m = text2.match(/^ref:\s*refs\/heads\/(.+)$/);
+    return m ? m[1] : text2.slice(0, 7);
+  } catch {
+    return null;
+  }
+}
 function registerRoutes(app2) {
   app2.get("/api/auth/user", isAuthenticated, async (req, res) => {
     const u = getUser(req);
@@ -2449,6 +2461,38 @@ function registerRoutes(app2) {
   );
   app2.get("/api/tenant/experiments/appliable-keys", isAuthenticated, (_req, res) => {
     res.json(APPLIABLE_PARAM_KEYS);
+  });
+  app2.get("/api/autoresearch/results", isAuthenticated, async (_req, res) => {
+    const filePath = path.join(process.cwd(), "autoresearch", "results.tsv");
+    try {
+      const text2 = await fs.readFile(filePath, "utf-8");
+      const lines = text2.split(/\r?\n/).filter((l) => l.trim().length > 0);
+      if (lines.length === 0) {
+        return res.json({ available: true, runs: [], branch: await readGitHead() });
+      }
+      const header = lines[0].split("	");
+      const runs = lines.slice(1).map((line) => {
+        const cols = line.split("	");
+        const row = {};
+        header.forEach((h, i) => {
+          row[h] = cols[i] ?? "";
+        });
+        return row;
+      });
+      const stat = await fs.stat(filePath);
+      res.json({
+        available: true,
+        runs,
+        branch: await readGitHead(),
+        updatedAt: stat.mtime.toISOString()
+      });
+    } catch (err) {
+      if (err.code === "ENOENT") {
+        return res.json({ available: false });
+      }
+      console.error("[autoresearch] read failed", err);
+      return res.json({ available: false });
+    }
   });
   app2.get("/api/tenant/costs", isAuthenticated, async (req, res) => {
     const u = getUser(req);
