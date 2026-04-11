@@ -1437,6 +1437,54 @@ function ChartView({ sessionId }: { sessionId: string }) {
   // Filter out unreachable levels — nothing to draw if it's off-screen
   const visibleLevels = levels.filter((l) => l.price >= yMin && l.price <= yMax);
 
+  // Liquidity pools — clusters of nearby levels. A pool is where stops
+  // pile up: multiple levels (swing high + equal high + prev day high)
+  // landing within ~0.3% of each other means real liquidity, not a
+  // single random swing. Drawn as semi-transparent filled bands behind
+  // the level lines so the operator sees the *zone* the strategy is
+  // hunting, not just isolated ticks.
+  const POOL_TOLERANCE_PCT = 0.003; // 0.3%
+  const sortedLevels = [...visibleLevels].sort((a, b) => a.price - b.price);
+  type Pool = { low: number; high: number; side: "support" | "resistance" | "mixed"; size: number; rank: number };
+  const pools: Pool[] = [];
+  let cluster: typeof sortedLevels = [];
+  const flushCluster = () => {
+    if (cluster.length < 2) {
+      // 1-level "clusters" only count if the level itself is strong
+      if (cluster.length === 1 && cluster[0].rank >= 4) {
+        const l = cluster[0];
+        const pad = l.price * POOL_TOLERANCE_PCT * 0.5;
+        pools.push({ low: l.price - pad, high: l.price + pad, side: l.side, size: 1, rank: l.rank });
+      }
+      cluster = [];
+      return;
+    }
+    const lows = cluster.map((l) => l.price);
+    const sides = new Set(cluster.map((l) => l.side));
+    pools.push({
+      low: Math.min(...lows),
+      high: Math.max(...lows),
+      side: sides.size === 1 ? (cluster[0].side as "support" | "resistance") : "mixed",
+      size: cluster.length,
+      rank: Math.max(...cluster.map((l) => l.rank)),
+    });
+    cluster = [];
+  };
+  for (const lvl of sortedLevels) {
+    if (cluster.length === 0) {
+      cluster.push(lvl);
+      continue;
+    }
+    const last = cluster[cluster.length - 1];
+    if ((lvl.price - last.price) / last.price <= POOL_TOLERANCE_PCT) {
+      cluster.push(lvl);
+    } else {
+      flushCluster();
+      cluster.push(lvl);
+    }
+  }
+  flushCluster();
+
   const xFor = (i: number) => padL + (i / Math.max(candles.length - 1, 1)) * innerW;
   const yFor = (price: number) => padT + ((yMax - price) / ySpan) * innerH;
   const candleW = Math.max(1, (innerW / candles.length) * 0.6);
@@ -1447,47 +1495,64 @@ function ChartView({ sessionId }: { sessionId: string }) {
     return n.toFixed(4);
   };
 
-  // Rank → opacity. Higher rank = more confluence = stronger pool.
-  const opacityForRank = (r: number) => Math.min(0.85, 0.25 + r * 0.15);
-
   return (
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground">
-        {candles.length} candles · {visibleLevels.length} of {levels.length} liquidity levels in price range.
-        Horizontal lines mark where the strategy sees liquidity. Stronger
-        lines = higher confluence (more touches / multiple level types
-        agreeing on the same price). Levels outside the candle range are
-        hidden — price can't reach them in this window.
+        {candles.length} candles · {pools.length} liquidity pools (from {visibleLevels.length} levels).
+        Shaded bands are pools — clusters of nearby levels where stops
+        pile up, the actual zones the strategy hunts. Stronger fill =
+        more levels confluencing in that zone.
       </p>
       <div className="overflow-hidden rounded border border-border/40 bg-card/30">
         <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full">
-          {/* Liquidity level lines, drawn first so candles sit on top */}
-          {visibleLevels.map((lvl) => {
-            const y = yFor(lvl.price);
-            const color = lvl.side === "resistance" ? "#f87171" : "#34d399";
+          {/* Liquidity pools — drawn first as the deepest layer so
+              level lines and candles sit on top */}
+          {pools.map((p, i) => {
+            const yTop = yFor(p.high);
+            const yBot = yFor(p.low);
+            // Min visible thickness so single-level pools are still readable
+            const h = Math.max(2, yBot - yTop);
+            const fill =
+              p.side === "resistance"
+                ? "#f87171"
+                : p.side === "support"
+                ? "#34d399"
+                : "#fbbf24";
+            // Fill opacity scales with cluster size — bigger pool = more obvious
+            const fillOpacity = Math.min(0.32, 0.1 + p.size * 0.05);
             return (
-              <g key={lvl.id}>
-                <line
-                  x1={padL}
-                  x2={padL + innerW}
-                  y1={y}
-                  y2={y}
-                  stroke={color}
-                  strokeWidth={1}
-                  strokeDasharray="3 3"
-                  opacity={opacityForRank(lvl.rank)}
-                />
-                <text
-                  x={padL + innerW + 4}
-                  y={y + 3}
-                  fontSize={9}
-                  fill={color}
-                  opacity={opacityForRank(lvl.rank)}
-                  fontFamily="monospace"
-                >
-                  {fmtPrice(lvl.price)}
-                </text>
-              </g>
+              <rect
+                key={`pool-${i}`}
+                x={padL}
+                y={yTop}
+                width={innerW}
+                height={h}
+                fill={fill}
+                opacity={fillOpacity}
+              />
+            );
+          })}
+          {/* Pool price labels — one per pool on the right edge */}
+          {pools.map((p, i) => {
+            const yMid = yFor((p.high + p.low) / 2);
+            const color =
+              p.side === "resistance"
+                ? "#f87171"
+                : p.side === "support"
+                ? "#34d399"
+                : "#fbbf24";
+            return (
+              <text
+                key={`label-${i}`}
+                x={padL + innerW + 4}
+                y={yMid + 3}
+                fontSize={9}
+                fill={color}
+                opacity={0.8}
+                fontFamily="monospace"
+              >
+                {fmtPrice((p.high + p.low) / 2)}
+              </text>
             );
           })}
           {/* Candles */}
