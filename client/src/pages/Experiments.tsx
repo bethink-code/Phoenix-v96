@@ -1003,6 +1003,13 @@ export function SessionDetailView({
       ? Math.max(...successes.map((i) => Number(i.netPnl)))
       : null;
 
+  // Convergence score for the header — count of tight params over total
+  // params seen across the profitable iterations. Empty until we have
+  // at least 3 successes (computeParamConvergence returns []).
+  const convergenceStats = computeParamConvergence(iterations);
+  const convergenceTight = convergenceStats.filter((s) => s.band === "tight").length;
+  const convergenceTotal = convergenceStats.length;
+
   return (
     <div className="space-y-4">
       <ResearcherIdentityCard
@@ -1013,7 +1020,7 @@ export function SessionDetailView({
         spentUsd={spentUsd}
         goal={session?.goal}
         stats={
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-7">
             <StatBlock label="Status" value={status.toUpperCase()} />
             <StatBlock label="Pair" value={pairLabel} />
             <StatBlock
@@ -1029,6 +1036,14 @@ export function SessionDetailView({
               value={
                 bestPnl != null
                   ? `${bestPnl >= 0 ? "+" : ""}$${bestPnl.toFixed(2)}`
+                  : "—"
+              }
+            />
+            <StatBlock
+              label="Convergence"
+              value={
+                convergenceTotal > 0
+                  ? `${convergenceTight} / ${convergenceTotal}`
                   : "—"
               }
             />
@@ -1348,6 +1363,48 @@ function SuccessesView({
   );
 }
 
+// Pure stats helper shared by ConvergenceView and the header score.
+// Returns one entry per param across the profitable iterations, with
+// the band classification used in both places.
+type ConvergenceBand = "tight" | "loose" | "scattered";
+interface ParamConvergence {
+  name: string;
+  count: number;
+  mean: number;
+  min: number;
+  max: number;
+  stdev: number;
+  cv: number | null;
+  band: ConvergenceBand;
+}
+function computeParamConvergence(iterations: ARIteration[]): ParamConvergence[] {
+  const successes = iterations.filter((i) => i.trades > 0 && Number(i.netPnl) > 0);
+  if (successes.length < 3) return [];
+  const paramNames = Array.from(
+    new Set(successes.flatMap((i) => Object.keys(i.params)))
+  ).sort();
+  return paramNames.map((name) => {
+    const values = successes
+      .map((i) => i.params[name])
+      .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+    if (values.length === 0) {
+      return { name, count: 0, mean: 0, min: 0, max: 0, stdev: 0, cv: null, band: "scattered" };
+    }
+    const mean = values.reduce((a, b) => a + b, 0) / values.length;
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const variance = values.reduce((a, b) => a + (b - mean) ** 2, 0) / values.length;
+    const stdev = Math.sqrt(variance);
+    let cv: number | null;
+    if (stdev === 0) cv = 0;
+    else if (mean === 0) cv = null;
+    else cv = stdev / Math.abs(mean);
+    const band: ConvergenceBand =
+      cv === null ? "scattered" : cv < 0.1 ? "tight" : cv < 0.3 ? "loose" : "scattered";
+    return { name, count: values.length, mean, min, max, stdev, cv, band };
+  });
+}
+
 // "Convergence" — pure stats over the winning iterations. For each
 // param the LLM proposed, computes how tightly the top performers
 // agree on its value. Tight = the search found a ridge worth
@@ -1365,39 +1422,15 @@ function SuccessesView({
 // we fall back to Scattered.
 function ConvergenceView({ iterations }: { iterations: ARIteration[] }) {
   const successes = iterations.filter((i) => i.trades > 0 && Number(i.netPnl) > 0);
+  const stats = computeParamConvergence(iterations);
 
-  if (successes.length < 3) {
+  if (stats.length === 0) {
     return (
       <div className="rounded border border-border/40 bg-card/30 p-4 text-xs text-muted-foreground">
         Need at least 3 profitable iterations to look for convergence. Currently have {successes.length}.
       </div>
     );
   }
-
-  const paramNames = Array.from(
-    new Set(successes.flatMap((i) => Object.keys(i.params)))
-  ).sort();
-
-  const stats = paramNames.map((name) => {
-    const values = successes
-      .map((i) => i.params[name])
-      .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
-    if (values.length === 0) {
-      return { name, count: 0, mean: 0, min: 0, max: 0, stdev: 0, cv: null as number | null, band: "scattered" as const };
-    }
-    const mean = values.reduce((a, b) => a + b, 0) / values.length;
-    const min = Math.min(...values);
-    const max = Math.max(...values);
-    const variance = values.reduce((a, b) => a + (b - mean) ** 2, 0) / values.length;
-    const stdev = Math.sqrt(variance);
-    let cv: number | null;
-    if (stdev === 0) cv = 0;
-    else if (mean === 0) cv = null;
-    else cv = stdev / Math.abs(mean);
-    const band: "tight" | "loose" | "scattered" =
-      cv === null ? "scattered" : cv < 0.1 ? "tight" : cv < 0.3 ? "loose" : "scattered";
-    return { name, count: values.length, mean, min, max, stdev, cv, band };
-  });
 
   const tightCount = stats.filter((s) => s.band === "tight").length;
   const looseCount = stats.filter((s) => s.band === "loose").length;
