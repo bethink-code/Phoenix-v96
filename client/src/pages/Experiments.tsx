@@ -1020,9 +1020,13 @@ export function SessionDetailView({
         spentUsd={spentUsd}
         goal={session?.goal}
         stats={
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-7">
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 lg:grid-cols-8">
             <StatBlock label="Status" value={status.toUpperCase()} />
             <StatBlock label="Pair" value={pairLabel} />
+            <StatBlock
+              label="Regime"
+              value={session ? session.regime.replace(/_/g, " ").toUpperCase() : "—"}
+            />
             <StatBlock
               label="Iteration"
               value={session ? `${iterationsRun} / ${maxIterations}` : "—"}
