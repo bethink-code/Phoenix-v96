@@ -1621,12 +1621,13 @@ function ChartView({ sessionId }: { sessionId: string }) {
         level whose sweep triggered it — answers "why did it trade here?"
         at a glance. Size scales with how many different iterations agreed
         there was a trade at that candle. The strip below the candles
-        shows the best iteration's per-bar rejection reasons:
-        <span className="text-gray-400"> grey = no valid target</span>,
+        shows the best iteration's per-bar outcome:
+        <span className="text-gray-400"> grey = sweep detected but no valid target</span>,
         <span className="text-amber-400"> amber = risk manager blocked</span>,
-        <span className="text-violet-400"> violet = regime/mode suppressed</span>.
-        Blank bars = either no sweep or a trade was taken.
-        ({interestingEvents.length} interesting rejections in best iteration.)
+        <span className="text-violet-400"> violet = regime/mode suppressed</span>,
+        <span className="text-blue-400"> blue = no sweep detected</span>.
+        Blank bars = a trade was taken (see triangles).
+        ({interestingEvents.length} bars where a sweep was detected but the trade was killed.)
       </p>
       <div className="overflow-hidden rounded border border-border/40 bg-card/30">
         <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full">
@@ -1720,14 +1721,18 @@ function ChartView({ sessionId }: { sessionId: string }) {
             return candles.map((c, i) => {
               const reason = eventByBar.get(c.openTime);
               if (!reason) return null;
+              // trade_taken bars keep the white triangle overlay — no tick
+              if (reason === "trade_taken") return null;
               let color: string | null = null;
-              if (reason === "no_proposal:no_target") color = "#9ca3af";
-              else if (reason.startsWith("risk_rejected:")) color = "#f59e0b";
+              if (reason === "no_proposal:no_target") color = "#9ca3af"; // grey
+              else if (reason.startsWith("risk_rejected:")) color = "#f59e0b"; // amber
               else if (
                 reason === "no_proposal:mode_not_permitted" ||
                 reason === "no_proposal:entry_suppressed"
               )
-                color = "#8b5cf6";
+                color = "#8b5cf6"; // violet
+              else if (reason === "no_sweep" || reason === "no_levels")
+                color = "#3b82f6"; // blue — sweep detection inactive
               if (!color) return null;
               const x = xFor(i);
               return (
