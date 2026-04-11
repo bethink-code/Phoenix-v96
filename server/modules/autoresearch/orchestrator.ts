@@ -187,8 +187,13 @@ async function runLoop(session: AutoresearchSession, args: StartArgs) {
         proposedParams = clampParams(parsed.params);
         rationale = parsed.rationale;
       } catch (err) {
-        // LLM failed (parse error, network, rate limit). Record a crash
-        // iteration and keep going — the next iter will try again.
+        // Distinguish permanent (4xx auth/bad-request) from transient
+        // (parse errors, 429, 5xx, network). Permanent failures repeat
+        // forever — the next iteration will hit the same wall — so we
+        // record one crash row and ABORT the session. Transient failures
+        // get a single skipped iteration and the loop continues.
+        const isPermanent = (err as { isPermanent?: boolean }).isPermanent === true;
+        const errorMessage = (err as Error).message;
         await persistIteration({
           sessionId: session.id,
           idx,
@@ -211,9 +216,9 @@ async function runLoop(session: AutoresearchSession, args: StartArgs) {
             newScore: 0,
             trades: 0,
             status: "crash",
-            crashReason: (err as Error).message,
+            crashReason: errorMessage,
           }),
-          rationale: `LLM call failed: ${(err as Error).message}`,
+          rationale: `LLM call failed: ${errorMessage}`,
           inputTokens: 0,
           outputTokens: 0,
           costUsd: 0,
@@ -225,6 +230,23 @@ async function runLoop(session: AutoresearchSession, args: StartArgs) {
             totalCostUsd: totalCostUsd.toFixed(6),
           })
           .where(eq(autoresearchSessions.id, session.id));
+
+        if (isPermanent) {
+          // Abort the entire session — there's no point retrying a 401
+          // or a 400 thirty more times in a row.
+          await db
+            .update(autoresearchSessions)
+            .set({
+              status: "error",
+              errorMessage: errorMessage,
+              stoppedAt: new Date(),
+            })
+            .where(eq(autoresearchSessions.id, session.id));
+          console.error(
+            `[autoresearch] aborting session ${session.id} on permanent error: ${errorMessage}`
+          );
+          return;
+        }
         continue;
       }
     }

@@ -69,7 +69,21 @@ export async function chat(args: {
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`openai chat ${res.status}: ${text.slice(0, 500)}`);
+    // Strip any "sk-..." substrings from the error body so the partial
+    // key OpenAI sometimes echoes back doesn't end up persisted in the
+    // iteration row or shown in the live feed.
+    const sanitized = text.replace(/sk-[A-Za-z0-9_\-.*]+/g, "[redacted-key]").slice(0, 500);
+    const err = new Error(`openai chat ${res.status}: ${sanitized}`) as Error & {
+      status?: number;
+      isPermanent?: boolean;
+    };
+    err.status = res.status;
+    // Permanent failures (4xx that won't get better with retries):
+    // 401 invalid key, 403 wrong perms, 400 bad request, 404 model
+    // not found. The orchestrator uses isPermanent to abort the
+    // session entirely instead of crashing every iteration in a row.
+    err.isPermanent = res.status >= 400 && res.status < 500 && res.status !== 429;
+    throw err;
   }
 
   const data = (await res.json()) as {

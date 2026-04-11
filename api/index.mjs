@@ -2294,7 +2294,11 @@ async function chat(args) {
   });
   if (!res.ok) {
     const text3 = await res.text().catch(() => "");
-    throw new Error(`openai chat ${res.status}: ${text3.slice(0, 500)}`);
+    const sanitized = text3.replace(/sk-[A-Za-z0-9_\-.*]+/g, "[redacted-key]").slice(0, 500);
+    const err = new Error(`openai chat ${res.status}: ${sanitized}`);
+    err.status = res.status;
+    err.isPermanent = res.status >= 400 && res.status < 500 && res.status !== 429;
+    throw err;
   }
   const data = await res.json();
   const text2 = data.choices[0]?.message?.content ?? "";
@@ -2563,6 +2567,8 @@ async function runLoop(session2, args) {
         proposedParams = clampParams(parsed.params);
         rationale = parsed.rationale;
       } catch (err) {
+        const isPermanent = err.isPermanent === true;
+        const errorMessage = err.message;
         await persistIteration({
           sessionId: session2.id,
           idx,
@@ -2585,9 +2591,9 @@ async function runLoop(session2, args) {
             newScore: 0,
             trades: 0,
             status: "crash",
-            crashReason: err.message
+            crashReason: errorMessage
           }),
-          rationale: `LLM call failed: ${err.message}`,
+          rationale: `LLM call failed: ${errorMessage}`,
           inputTokens: 0,
           outputTokens: 0,
           costUsd: 0
@@ -2596,6 +2602,17 @@ async function runLoop(session2, args) {
           iterationsRun: idx + 1,
           totalCostUsd: totalCostUsd.toFixed(6)
         }).where(eq3(autoresearchSessions.id, session2.id));
+        if (isPermanent) {
+          await db.update(autoresearchSessions).set({
+            status: "error",
+            errorMessage,
+            stoppedAt: /* @__PURE__ */ new Date()
+          }).where(eq3(autoresearchSessions.id, session2.id));
+          console.error(
+            `[autoresearch] aborting session ${session2.id} on permanent error: ${errorMessage}`
+          );
+          return;
+        }
         continue;
       }
     }
