@@ -82,9 +82,11 @@ export default function Experiments() {
   // Probe once on mount: does autoresearch/results.tsv exist on the server's
   // disk? On Vercel it never does, so the tab stays hidden in production.
   // On localhost (after running the harness once) it does, so the tab shows.
+  // Polling at 30s — agent iterations are seconds long but we don't need
+  // sub-30s freshness, and faster polling burns the rate limit budget.
   const autoresearchProbe = useQuery<AutoresearchProbe>({
     queryKey: ["/api/autoresearch/results"],
-    refetchInterval: 5_000, // gentle polling so new commits land in the table
+    refetchInterval: 30_000,
   });
   const autoresearchAvailable = autoresearchProbe.data?.available ?? false;
 

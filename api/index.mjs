@@ -778,6 +778,7 @@ var storage = {
     await db.update(experiments).set({ enabled }).where(eq(experiments.id, id));
   },
   async deleteExperiment(id) {
+    await db.update(experimentRuns).set({ experimentId: null }).where(eq(experimentRuns.experimentId, id));
     await db.delete(experiments).where(eq(experiments.id, id));
   },
   async insertExperimentRun(input) {

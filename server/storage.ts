@@ -594,6 +594,13 @@ export const storage = {
   },
 
   async deleteExperiment(id: string) {
+    // Orphan the runs instead of cascading. The Library card promises
+    // "Run history is preserved" — runs stay in the History tab as
+    // orphaned audit rows after the definition is deleted.
+    await db
+      .update(experimentRuns)
+      .set({ experimentId: null })
+      .where(eq(experimentRuns.experimentId, id));
     await db.delete(experiments).where(eq(experiments.id, id));
   },
 
