@@ -262,7 +262,7 @@ function NewExperimentForm({ onCreated }: { onCreated: () => void }) {
   const [name, setName] = useState("");
   const [kind, setKind] = useState<ExperimentKind>("diagnostic");
   const [pairId, setPairId] = useState<string>("");
-  const [timeframe, setTimeframe] = useState<"15m" | "1h" | "4h" | "1d">("15m");
+  const [timeframe, setTimeframe] = useState<"15m" | "1h" | "4h" | "12h" | "1d">("15m");
   const [lookbackBars, setLookbackBars] = useState(672);
   const [paramKey, setParamKey] = useState<AppliableParamKey>("minLevelRank");
   const [valuesStr, setValuesStr] = useState("1,2,3,4,5");
@@ -341,7 +341,8 @@ function NewExperimentForm({ onCreated }: { onCreated: () => void }) {
             <option value="15m">15 minute</option>
             <option value="1h">1 hour</option>
             <option value="4h">4 hour</option>
-            <option value="1d">1 day</option>
+            <option value="12h">12 hour</option>
+            <option value="1d">Daily</option>
           </select>
         </div>
         <div>

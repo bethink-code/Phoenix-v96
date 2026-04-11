@@ -20,6 +20,7 @@ import {
 } from "./temporalFilter";
 import { assessTrade, dailyPnl, weeklyPnl } from "./riskManager";
 import { getBinance } from "./exchange/binance";
+import type { Timeframe } from "./exchange/types";
 import {
   identifyLevels,
   detectLatestSweep,
@@ -42,8 +43,10 @@ import {
 // hammering the exchange.
 
 const TICK_MS = 60_000;
-const CANDLES_LOOKBACK = 300; // ~3 days of 15m candles
-const DEFAULT_TIMEFRAME = "15m" as const;
+const CANDLES_LOOKBACK = 300; // 300 bars regardless of timeframe — strategy
+// only needs ~300 bars of context for level identification + sweep
+// detection. On 15m that's ~3 days; on 1h that's ~12 days; on 4h that's
+// ~50 days; on 1d that's ~10 months. All within Binance's per-request cap.
 
 interface TickContext {
   tenant: Tenant;
@@ -158,7 +161,7 @@ async function tickTenant(tenant: Tenant) {
   try {
     candles = await binance.fetchCandles({
       symbol,
-      timeframe: DEFAULT_TIMEFRAME,
+      timeframe: (config.tradingTimeframe as Timeframe) ?? "15m",
       limit: CANDLES_LOOKBACK,
     });
     // Success — reset failure counter if it was non-zero

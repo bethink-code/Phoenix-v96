@@ -243,7 +243,7 @@ export function registerRoutes(app: Express) {
     if (!pair) return res.status(404).json({ error: "pair_not_found" });
 
     const symbol = `${pair.baseAsset}${pair.quoteAsset}`;
-    const timeframe = (expConfig.timeframe as "15m" | "1h" | "4h" | "1d") ?? "15m";
+    const timeframe = (expConfig.timeframe as "15m" | "1h" | "4h" | "12h" | "1d") ?? "15m";
     const lookback = expConfig.lookbackBars ?? 672;
 
     const candles = await getBinance().fetchCandles({
@@ -391,6 +391,7 @@ export function registerRoutes(app: Express) {
       weeklyDrawdownLimitPct: z.string().optional(),
       minRiskRewardRatio: z.string().optional(),
       minLevelRank: z.number().int().min(1).max(5).optional(),
+      tradingTimeframe: z.enum(["15m", "1h", "4h", "12h", "1d"]).optional(),
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "invalid" });

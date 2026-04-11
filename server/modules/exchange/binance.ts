@@ -9,11 +9,10 @@ import type { ExchangeAdapter, Timeframe } from "./types";
 // ones we use until real order placement lands.
 
 const TIMEFRAME_MAP: Record<Timeframe, string> = {
-  "1m": "1m",
-  "5m": "5m",
   "15m": "15m",
   "1h": "1h",
   "4h": "4h",
+  "12h": "12h",
   "1d": "1d",
 };
 

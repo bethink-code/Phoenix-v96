@@ -189,6 +189,13 @@ export const tenantConfigs = pgTable("tenant_configs", {
     .notNull()
     .default("2.00"),
   minLevelRank: integer("min_level_rank").notNull().default(2),
+  // Candle timeframe the bot evaluates entries against. Defaults to 15m so
+  // existing tenants are unchanged. Operator-controlled via Settings.
+  // Strategy logic itself is timeframe-agnostic — only the candle fetch
+  // changes. Valid values match Binance's supported intervals.
+  tradingTimeframe: varchar("trading_timeframe", { length: 8 })
+    .notNull()
+    .default("15m"),
   temporalRules: jsonb("temporal_rules"), // session/day-of-week rules
   regimeProfiles: jsonb("regime_profiles"), // per-regime overrides
   updatedAt: timestamp("updated_at").notNull().defaultNow(),

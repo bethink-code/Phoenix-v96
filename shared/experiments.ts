@@ -23,7 +23,7 @@ export type ExperimentKind = "diagnostic" | "param_sweep" | "comparison";
 
 export interface DiagnosticConfig {
   pairId: string; // which trading pair to evaluate
-  timeframe: "15m" | "1h" | "4h" | "1d";
+  timeframe: "15m" | "1h" | "4h" | "12h" | "1d";
   lookbackBars: number; // how many candles back from now
 }
 
@@ -41,7 +41,7 @@ export type AppliableParamKey = (typeof APPLIABLE_PARAM_KEYS)[number];
 
 export interface ParamSweepConfig {
   pairId: string;
-  timeframe: "15m" | "1h" | "4h" | "1d";
+  timeframe: "15m" | "1h" | "4h" | "12h" | "1d";
   lookbackBars: number;
   paramKey: AppliableParamKey;
   values: number[]; // values to try, in order
@@ -49,7 +49,7 @@ export interface ParamSweepConfig {
 
 export interface ComparisonConfig {
   pairId: string;
-  timeframe: "15m" | "1h" | "4h" | "1d";
+  timeframe: "15m" | "1h" | "4h" | "12h" | "1d";
   lookbackBars: number;
   alternatives: Array<{
     label: string;

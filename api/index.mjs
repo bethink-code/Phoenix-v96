@@ -201,6 +201,11 @@ var tenantConfigs = pgTable("tenant_configs", {
   weeklyDrawdownLimitPct: numeric("weekly_drawdown_limit_pct", { precision: 5, scale: 2 }).notNull().default("6.00"),
   minRiskRewardRatio: numeric("min_risk_reward_ratio", { precision: 4, scale: 2 }).notNull().default("2.00"),
   minLevelRank: integer("min_level_rank").notNull().default(2),
+  // Candle timeframe the bot evaluates entries against. Defaults to 15m so
+  // existing tenants are unchanged. Operator-controlled via Settings.
+  // Strategy logic itself is timeframe-agnostic — only the candle fetch
+  // changes. Valid values match Binance's supported intervals.
+  tradingTimeframe: varchar("trading_timeframe", { length: 8 }).notNull().default("15m"),
   temporalRules: jsonb("temporal_rules"),
   // session/day-of-week rules
   regimeProfiles: jsonb("regime_profiles"),
@@ -974,11 +979,10 @@ import { eq as eq2 } from "drizzle-orm";
 
 // server/modules/exchange/binance.ts
 var TIMEFRAME_MAP = {
-  "1m": "1m",
-  "5m": "5m",
   "15m": "15m",
   "1h": "1h",
   "4h": "4h",
+  "12h": "12h",
   "1d": "1d"
 };
 var BinanceAdapter = class {
@@ -2456,7 +2460,8 @@ function registerRoutes(app2) {
       dailyDrawdownLimitPct: z2.string().optional(),
       weeklyDrawdownLimitPct: z2.string().optional(),
       minRiskRewardRatio: z2.string().optional(),
-      minLevelRank: z2.number().int().min(1).max(5).optional()
+      minLevelRank: z2.number().int().min(1).max(5).optional(),
+      tradingTimeframe: z2.enum(["15m", "1h", "4h", "12h", "1d"]).optional()
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "invalid" });

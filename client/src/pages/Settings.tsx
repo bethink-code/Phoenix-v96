@@ -17,6 +17,7 @@ interface TenantConfig {
   weeklyDrawdownLimitPct: string;
   minRiskRewardRatio: string;
   minLevelRank: number;
+  tradingTimeframe: "15m" | "1h" | "4h" | "12h" | "1d";
 }
 
 const TIER_INFO: Record<string, { label: string; capitalRange: string; risk: string }> = {
@@ -240,6 +241,7 @@ function RiskConfigCard() {
           weeklyDrawdownLimitPct: form.weeklyDrawdownLimitPct,
           minRiskRewardRatio: form.minRiskRewardRatio,
           minLevelRank: Number(form.minLevelRank),
+          tradingTimeframe: form.tradingTimeframe,
         }),
       });
     },
@@ -288,6 +290,25 @@ function RiskConfigCard() {
             onChange={(v) => update("paperStartingCapital", v)}
           />
           <div>
+            <Label>Trading timeframe</Label>
+            <select
+              value={effective.tradingTimeframe ?? "15m"}
+              onChange={(e) =>
+                update("tradingTimeframe", e.target.value as TenantConfig["tradingTimeframe"])
+              }
+              className="mt-1 h-9 w-full rounded-md border border-border bg-card px-3 text-sm"
+            >
+              <option value="15m">15 minute</option>
+              <option value="1h">1 hour</option>
+              <option value="4h">4 hour</option>
+              <option value="12h">12 hour</option>
+              <option value="1d">Daily</option>
+            </select>
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              The candle interval the bot evaluates for entries. Takes effect on the next tick.
+            </p>
+          </div>
+          <div className="md:col-span-2">
             <Label>Tier</Label>
             <div className="mt-1 flex items-center gap-2">
               <Badge className="bg-primary/20 text-primary">{tierMeta.label}</Badge>
