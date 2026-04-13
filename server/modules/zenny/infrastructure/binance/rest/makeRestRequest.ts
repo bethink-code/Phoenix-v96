@@ -3,17 +3,13 @@
 // exponential backoff retry. All dependencies are injected so the function is
 // fully testable with a fake fetch + fake clock.
 
-import {
-  type TokenBucketState,
-  tryConsume,
-} from "../../rateLimiter/tokenBucket";
-import {
-  type BreakerState,
-  advanceBreaker,
-  canRequest,
-  recordFailure,
-  recordSuccess,
-} from "../../circuitBreaker/breakerState";
+import type { TokenBucketState } from "../../rateLimiter/types";
+import { tryConsume } from "../../rateLimiter/tryConsume";
+import type { BreakerState } from "../../circuitBreaker/types";
+import { advanceBreaker } from "../../circuitBreaker/advanceBreaker";
+import { canRequest } from "../../circuitBreaker/canRequest";
+import { recordFailure } from "../../circuitBreaker/recordFailure";
+import { recordSuccess } from "../../circuitBreaker/recordSuccess";
 import {
   type BackoffConfig,
   calculateBackoffDelay,
@@ -21,6 +17,10 @@ import {
   DEFAULT_BACKOFF_CONFIG,
 } from "../../backoff/exponentialBackoff";
 import type { ApiCallRecord } from "../../types";
+import {
+  RestRequestError,
+  CircuitOpenError,
+} from "./restErrors";
 
 export interface RestDeps {
   fetchFn: typeof fetch;
@@ -44,35 +44,9 @@ export interface RestRequestInput {
   backoffConfig?: BackoffConfig;
 }
 
-export class RestRequestError extends Error {
-  constructor(
-    message: string,
-    public readonly endpoint: string,
-    public readonly status: number | null,
-    public readonly cause?: unknown,
-  ) {
-    super(message);
-    this.name = "RestRequestError";
-  }
-}
-
-export class CircuitOpenError extends RestRequestError {
-  constructor(endpoint: string) {
-    super(`Circuit breaker open for ${endpoint}`, endpoint, null);
-    this.name = "CircuitOpenError";
-  }
-}
-
-export class WeightBudgetExceededError extends RestRequestError {
-  constructor(endpoint: string, msUntilAvailable: number) {
-    super(
-      `Weight budget exceeded for ${endpoint}, retry in ~${msUntilAvailable}ms`,
-      endpoint,
-      null,
-    );
-    this.name = "WeightBudgetExceededError";
-  }
-}
+// Error classes live in ./restErrors.ts — import them there if needed.
+// Re-exported here for consumers that expect them alongside makeRestRequest.
+export { RestRequestError, CircuitOpenError, WeightBudgetExceededError } from "./restErrors";
 
 export async function makeRestRequest<T = unknown>(
   input: RestRequestInput,

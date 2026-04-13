@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { findLocalExtrema, isSwingHigh, isSwingLow } from "./findLocalExtrema";
+import { findLocalExtrema } from "./findLocalExtrema";
+import { isSwingHigh } from "./isSwingHigh";
+import { isSwingLow } from "./isSwingLow";
 import type { Candle } from "../../../../../shared/zennyTypes";
 
 // Default helper: open=close=midpoint, so bodyTop=bodyBottom=midpoint.

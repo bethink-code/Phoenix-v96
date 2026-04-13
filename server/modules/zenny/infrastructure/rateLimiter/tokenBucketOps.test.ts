@@ -1,9 +1,7 @@
 import { describe, it, expect } from "vitest";
-import {
-  createTokenBucket,
-  advance,
-  tryConsume,
-} from "./tokenBucket";
+import { createTokenBucket } from "./createTokenBucket";
+import { advance } from "./advance";
+import { tryConsume } from "./tryConsume";
 
 describe("tokenBucket", () => {
   describe("createTokenBucket", () => {

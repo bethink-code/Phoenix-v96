@@ -8,14 +8,10 @@ import type { Candle, Timeframe } from "../../../../../shared/zennyTypes";
 import type { MarketDataProvider, CandleQuery } from "./providerInterface";
 import { CandleCache } from "../cache/candleCache";
 import { fetchKlinesRest } from "../binance/rest/fetchKlinesRest";
-import {
-  createTokenBucket,
-  type TokenBucketState,
-} from "../rateLimiter/tokenBucket";
-import {
-  createBreaker,
-  type BreakerState,
-} from "../circuitBreaker/breakerState";
+import type { TokenBucketState } from "../rateLimiter/types";
+import { createTokenBucket } from "../rateLimiter/createTokenBucket";
+import type { BreakerState } from "../circuitBreaker/types";
+import { createBreaker } from "../circuitBreaker/createBreaker";
 import type {
   ApiCallRecord,
   InfrastructureConfig,

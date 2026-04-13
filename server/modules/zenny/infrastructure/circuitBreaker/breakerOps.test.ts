@@ -1,11 +1,9 @@
 import { describe, it, expect } from "vitest";
-import {
-  createBreaker,
-  advanceBreaker,
-  canRequest,
-  recordSuccess,
-  recordFailure,
-} from "./breakerState";
+import { createBreaker } from "./createBreaker";
+import { advanceBreaker } from "./advanceBreaker";
+import { canRequest } from "./canRequest";
+import { recordSuccess } from "./recordSuccess";
+import { recordFailure } from "./recordFailure";
 
 describe("breakerState", () => {
   const config = {

@@ -13,6 +13,10 @@ import { findLocalExtrema } from "./candle/findLocalExtrema";
 import { countTouches } from "./candle/countTouches";
 import { clusterPriceLevels } from "./level/clusterPriceLevels";
 import { adaptiveTolerance } from "./level/adaptiveTolerance";
+import {
+  type LevelStrength,
+  combinedLevelStrength,
+} from "./level/strength";
 import { validateCandidatePool } from "./pool/validateCandidatePool";
 import { setPoolBoundaries } from "./pool/setPoolBoundaries";
 import { detectEngulfingDeath } from "./pool/detectEngulfingDeath";
@@ -27,9 +31,9 @@ import { scoreTouchQuality } from "./score/scoreTouchQuality";
 import { aggregatePoolScore } from "./score/aggregatePoolScore";
 
 // ---------------------------------------------------------------------------
-// Output types
+// Output types — LevelStrength re-exported from analysis/level/strength.ts.
 
-export type LevelStrength = "trivial" | "weak" | "medium" | "strong" | "very_strong";
+export type { LevelStrength } from "./level/strength";
 
 export interface AnalysisLevel {
   id: string;
@@ -43,52 +47,7 @@ export interface AnalysisLevel {
   graduatedToPoolId: string | null;
 }
 
-// Map touch count to historical-respect strength tier. The level has been
-// tested N times and held — high count = strong support. Pure.
-export function strengthFromTouches(touches: number): LevelStrength {
-  if (touches >= 6) return "very_strong";
-  if (touches >= 4) return "strong";
-  if (touches >= 3) return "medium";
-  if (touches >= 2) return "weak";
-  return "trivial";
-}
-
-// Map recency (0 = oldest in window, 1 = newest) to strength tier. A recent
-// untested swing low is "untaken liquidity" — it's a magnet for stops and
-// unfilled orders, not historical support. LuxAlgo / SMC concept. Pure.
-export function strengthFromRecency(recency: number): LevelStrength {
-  if (recency >= 0.95) return "very_strong";
-  if (recency >= 0.85) return "strong";
-  if (recency >= 0.7) return "medium";
-  return "trivial";
-}
-
-const STRENGTH_RANK: Record<LevelStrength, number> = {
-  trivial: 0,
-  weak: 1,
-  medium: 2,
-  strong: 3,
-  very_strong: 4,
-};
-
-// Combined level strength = max of the two dimensions. A level is strong if
-// EITHER it's been heavily tested OR it's recent and untested liquidity.
-// These are opposite signals on touch count: high touches = strong support,
-// zero touches + recent = strong target. Both matter; render the higher tier.
-export function combinedLevelStrength(
-  touches: number,
-  recency: number,
-): LevelStrength {
-  const a = strengthFromTouches(touches);
-  const b = strengthFromRecency(recency);
-  return STRENGTH_RANK[a] >= STRENGTH_RANK[b] ? a : b;
-}
-
-// Backwards-compatible single-input wrapper for any caller that only has
-// touches (kept so existing test/code paths still work).
-export function levelStrengthForTouches(touches: number): LevelStrength {
-  return strengthFromTouches(touches);
-}
+// Strength helpers live in analysis/level/strength.ts — single source of truth.
 
 export type PoolStatus = "active" | "dead";
 export type DeathReason = "engulfing" | "sustained_break" | "score_exhaustion";
