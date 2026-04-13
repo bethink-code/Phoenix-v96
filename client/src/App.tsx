@@ -6,6 +6,7 @@ import Admin from "@/pages/Admin";
 import Settings from "@/pages/Settings";
 import Experiments from "@/pages/Experiments";
 import SessionDetail from "@/pages/SessionDetail";
+import Braid from "@/pages/Braid";
 import NotFound from "@/pages/not-found";
 import TermsModal from "@/components/TermsModal";
 
@@ -35,6 +36,9 @@ export default function App() {
         </Route>
         <Route path="/experiments">
           {isAuthenticated ? <Experiments /> : <Redirect to="/" />}
+        </Route>
+        <Route path="/braid">
+          {isAuthenticated ? <Braid /> : <Redirect to="/" />}
         </Route>
         {/* Per-session detail page. Opened in a new tab from History
             cards so the operator can compare multiple sessions side

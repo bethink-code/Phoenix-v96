@@ -42,7 +42,14 @@ __export(schema_exports, {
   tradeStatusEnum: () => tradeStatusEnum,
   trades: () => trades,
   users: () => users,
-  usersRelations: () => usersRelations
+  usersRelations: () => usersRelations,
+  zennyDeathReasonEnum: () => zennyDeathReasonEnum,
+  zennyLevelSourceEnum: () => zennyLevelSourceEnum,
+  zennyLevels: () => zennyLevels,
+  zennyPoolStatusEnum: () => zennyPoolStatusEnum,
+  zennyPoolTypeEnum: () => zennyPoolTypeEnum,
+  zennyPools: () => zennyPools,
+  zennyTimeframeEnum: () => zennyTimeframeEnum
 });
 import {
   pgTable,
@@ -57,10 +64,10 @@ import {
   index,
   pgEnum
 } from "drizzle-orm/pg-core";
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
-var regimeEnum, botStatusEnum, tradeSideEnum, tradeStatusEnum, setupModeEnum, accessRequestStatusEnum, sessions, users, invitedUsers, accessRequests, auditLogs, tenants, tenantConfigs, exchangeKeys, marketPairs, trades, botDecisions, riskEvents, experiments, experimentRuns, autoresearchSessions, autoresearchIterations, cachedSymbols, llmUsage, regimeChanges, usersRelations, tenantsRelations, insertUserSchema, insertAccessRequestSchema, insertInviteSchema, insertMarketPairSchema, regimeChangeSchema;
+var regimeEnum, botStatusEnum, tradeSideEnum, tradeStatusEnum, setupModeEnum, accessRequestStatusEnum, sessions, users, invitedUsers, accessRequests, auditLogs, tenants, tenantConfigs, exchangeKeys, marketPairs, trades, botDecisions, riskEvents, experiments, experimentRuns, autoresearchSessions, autoresearchIterations, cachedSymbols, llmUsage, regimeChanges, usersRelations, tenantsRelations, insertUserSchema, insertAccessRequestSchema, insertInviteSchema, insertMarketPairSchema, regimeChangeSchema, zennyTimeframeEnum, zennyPoolTypeEnum, zennyPoolStatusEnum, zennyDeathReasonEnum, zennyLevelSourceEnum, zennyLevels, zennyPools;
 var init_schema = __esm({
   "shared/schema.ts"() {
     "use strict";
@@ -520,6 +527,82 @@ var init_schema = __esm({
         "accumulation_distribution"
       ])
     });
+    zennyTimeframeEnum = pgEnum("zenny_timeframe", [
+      "15m",
+      "1H",
+      "4H",
+      "12H",
+      "D"
+    ]);
+    zennyPoolTypeEnum = pgEnum("zenny_pool_type", [
+      "RESISTANCE",
+      "SUPPORT"
+    ]);
+    zennyPoolStatusEnum = pgEnum("zenny_pool_status", [
+      "active",
+      "dead",
+      "flipped"
+    ]);
+    zennyDeathReasonEnum = pgEnum("zenny_death_reason", [
+      "engulfing",
+      "sustained_break",
+      "score_exhaustion"
+    ]);
+    zennyLevelSourceEnum = pgEnum("zenny_level_source", [
+      "extrema",
+      "tick",
+      "both"
+    ]);
+    zennyLevels = pgTable(
+      "zenny_levels",
+      {
+        id: uuid("id").primaryKey().defaultRandom(),
+        tenantId: uuid("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+        symbol: varchar("symbol", { length: 32 }).notNull(),
+        timeframe: zennyTimeframeEnum("timeframe").notNull(),
+        price: numeric("price", { precision: 20, scale: 8 }).notNull(),
+        side: zennyPoolTypeEnum("side").notNull(),
+        // RESISTANCE for swing high, SUPPORT for swing low
+        swingCandleTime: timestamp("swing_candle_time").notNull(),
+        touchCountInWindow: integer("touch_count_in_window").notNull().default(0),
+        source: zennyLevelSourceEnum("source").notNull().default("extrema"),
+        poolId: uuid("pool_id"),
+        // nullable FK populated when graduated
+        expiredAt: timestamp("expired_at"),
+        createdAt: timestamp("created_at").notNull().defaultNow()
+      },
+      (t) => [
+        index("zenny_levels_tenant_symbol_tf_idx").on(t.tenantId, t.symbol, t.timeframe),
+        index("zenny_levels_swing_time_idx").on(t.swingCandleTime)
+      ]
+    );
+    zennyPools = pgTable(
+      "zenny_pools",
+      {
+        id: uuid("id").primaryKey().defaultRandom(),
+        tenantId: uuid("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+        symbol: varchar("symbol", { length: 32 }).notNull(),
+        timeframe: zennyTimeframeEnum("timeframe").notNull(),
+        type: zennyPoolTypeEnum("type").notNull(),
+        wickHigh: numeric("wick_high", { precision: 20, scale: 8 }).notNull(),
+        wickLow: numeric("wick_low", { precision: 20, scale: 8 }).notNull(),
+        centreLine: numeric("centre_line", { precision: 20, scale: 8 }).notNull(),
+        birthCandleTime: timestamp("birth_candle_time").notNull(),
+        deathCandleTime: timestamp("death_candle_time"),
+        deathReason: zennyDeathReasonEnum("death_reason"),
+        status: zennyPoolStatusEnum("status").notNull().default("active"),
+        sEffective: numeric("s_effective", { precision: 6, scale: 2 }).notNull().default("0"),
+        scoreBreakdown: jsonb("score_breakdown").notNull().default(sql`'{}'::jsonb`),
+        polarityFlippedFromPoolId: uuid("polarity_flipped_from_pool_id"),
+        createdAt: timestamp("created_at").notNull().defaultNow(),
+        updatedAt: timestamp("updated_at").notNull().defaultNow()
+      },
+      (t) => [
+        index("zenny_pools_tenant_symbol_tf_idx").on(t.tenantId, t.symbol, t.timeframe),
+        index("zenny_pools_status_idx").on(t.status),
+        index("zenny_pools_birth_time_idx").on(t.birthCandleTime)
+      ]
+    );
   }
 });
 

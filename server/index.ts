@@ -4,6 +4,7 @@ import cors from "cors";
 import rateLimit from "express-rate-limit";
 import { setupAuth } from "./auth";
 import { registerRoutes } from "./routes";
+import { registerZennyRoutes } from "./routes/zennyRoutes";
 import { startBotRunner } from "./modules/botRunner";
 import { cleanupStaleRunningSessions } from "./modules/autoresearch/orchestrator";
 
@@ -61,6 +62,7 @@ app.use(
 
 setupAuth(app);
 registerRoutes(app);
+registerZennyRoutes(app);
 
 app.get("/api/health", (_req, res) => {
   res.json({
