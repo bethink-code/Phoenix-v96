@@ -2,14 +2,36 @@ import { describe, it, expect } from "vitest";
 import { findLocalExtrema, isSwingHigh, isSwingLow } from "./findLocalExtrema";
 import type { Candle } from "../../../../../shared/zennyTypes";
 
+// Default helper: open=close=midpoint, so bodyTop=bodyBottom=midpoint.
+// Tests that need to distinguish body from wick use mkCandleFull below.
 function mkCandle(openTime: number, high: number, low: number): Candle {
+  const mid = (high + low) / 2;
   return {
     openTime,
     closeTime: openTime + 1000,
-    open: (high + low) / 2,
-    close: (high + low) / 2,
+    open: mid,
+    close: mid,
     high,
     low,
+    volume: 1000,
+  };
+}
+
+// Extended helper for tests that need to set body extremes explicitly.
+function mkCandleFull(
+  openTime: number,
+  open: number,
+  high: number,
+  low: number,
+  close: number,
+): Candle {
+  return {
+    openTime,
+    closeTime: openTime + 1000,
+    open,
+    high,
+    low,
+    close,
     volume: 1000,
   };
 }
@@ -31,7 +53,8 @@ describe("findLocalExtrema", () => {
     const highs = extrema.filter((e) => e.type === "swing_high");
     expect(highs).toHaveLength(1);
     expect(highs[0].index).toBe(5);
-    expect(highs[0].price).toBe(200);
+    // Body-based: pivot.price = bodyTop = midpoint = (200 + 190) / 2 = 195
+    expect(highs[0].price).toBe(195);
   });
 
   it("detects a clear swing low in the centre", () => {
@@ -44,7 +67,59 @@ describe("findLocalExtrema", () => {
     const lows = extrema.filter((e) => e.type === "swing_low");
     expect(lows).toHaveLength(1);
     expect(lows[0].index).toBe(5);
-    expect(lows[0].price).toBe(50);
+    // Body-based: pivot.price = bodyBottom = midpoint = (60 + 50) / 2 = 55
+    expect(lows[0].price).toBe(55);
+  });
+
+  // ─── Body-based pivot detection: the architectural decision ───────────
+
+  it("rejects a tall-wick high if another candle has a taller body", () => {
+    // Candle 5 has the tallest WICK (high=300) but a small body (open=close=200).
+    // Candle 8 has a smaller wick (high=250) but a much taller body (open=close=240).
+    // Wick-based detection would call candle 5 the swing high. Body-based picks
+    // neither at index 5 — index 8 wins with the tallest body.
+    const candles: Candle[] = [];
+    for (let i = 0; i < 17; i++) {
+      if (i === 5) {
+        // Tall-wick rejection candle: body 200, wick to 300
+        candles.push(mkCandleFull(i, 200, 300, 195, 200));
+      } else if (i === 8) {
+        // Tall-body candle: body 240, wick to 250
+        candles.push(mkCandleFull(i, 230, 250, 225, 240));
+      } else {
+        candles.push(mkCandle(i, 100, 90));
+      }
+    }
+    const highs = findLocalExtrema({ candles, n: 3 }).filter(
+      (e) => e.type === "swing_high",
+    );
+    // Body-based: candle 5 has bodyTop=200, candle 8 has bodyTop=240.
+    // Within candle 5's window (i-3..i+3 = 2..8), candle 8 has body 240 > 200,
+    // so candle 5 is NOT a swing high. Candle 8's window (5..11) contains
+    // candle 5 which has body 200 < 240, so candle 8 IS a swing high.
+    expect(highs.map((h) => h.index)).toEqual([8]);
+    expect(highs[0].price).toBe(240); // bodyTop of candle 8
+  });
+
+  it("rejects a long-tailed hammer at a low if another candle's body is lower", () => {
+    // Symmetric case: hammer with long lower wick at index 5 (low=50, body=100)
+    // vs. solid down candle at index 8 (low=70, body=80).
+    // Wick-based picks candle 5 (lowest wick). Body-based picks candle 8.
+    const candles: Candle[] = [];
+    for (let i = 0; i < 17; i++) {
+      if (i === 5) {
+        candles.push(mkCandleFull(i, 105, 110, 50, 100));
+      } else if (i === 8) {
+        candles.push(mkCandleFull(i, 90, 95, 70, 80));
+      } else {
+        candles.push(mkCandle(i, 200, 190));
+      }
+    }
+    const lows = findLocalExtrema({ candles, n: 3 }).filter(
+      (e) => e.type === "swing_low",
+    );
+    expect(lows.map((l) => l.index)).toEqual([8]);
+    expect(lows[0].price).toBe(80); // bodyBottom of candle 8
   });
 
   it("STRICT inequality: equal high disqualifies", () => {
