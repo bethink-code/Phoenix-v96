@@ -401,10 +401,15 @@ const TF_PRIORITY: Record<Timeframe, number> = {
   "15m": 0,
 };
 
-// Merge pools that are at the same price (within 0.5%) on the same side.
+// Merge pools that are at the same price (within 1%) on the same side.
 // Higher-TF pool wins. The survivor's confluenceCount is the max of the group.
+//
+// 0.5% (the level-clustering tolerance) is too tight for cross-TF pool merging
+// because each TF's swing candle closes at a slightly different exact price,
+// and three TFs at "the same level" can spread $500-1000 on a $70k asset.
+// 1% catches genuine confluents without merging structurally-distinct levels.
 function mergeConfluentPools(pools: AnalysisPool[]): AnalysisPool[] {
-  const tolerance = 0.005;
+  const tolerance = 0.01;
   const used = new Set<string>();
   const survivors: AnalysisPool[] = [];
 

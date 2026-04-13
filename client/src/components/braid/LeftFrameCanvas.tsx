@@ -181,18 +181,19 @@ function drawScene(
   ctx.lineWidth = 1;
 
   // Off-screen indicators: small arrows + price + TF tag at the top/bottom
-  // edge of the chart. Sorted strongest first so the most important
-  // off-screen levels appear at the edge nearest the price.
+  // edge of the chart. Sorted by DISTANCE from the visible range — closest
+  // first — so the user sees what's just above/below the current view first,
+  // not what's strongest in the abstract.
   drawOffScreenIndicators(
     ctx,
-    offScreenAbove.sort((a, b) => strengthRank(b.strength) - strengthRank(a.strength)),
+    offScreenAbove.sort((a, b) => a.price - b.price), // smallest price first = closest to top edge
     pad.l + cw + 4,
     pad.t + 4,
     "above",
   );
   drawOffScreenIndicators(
     ctx,
-    offScreenBelow.sort((a, b) => strengthRank(b.strength) - strengthRank(a.strength)),
+    offScreenBelow.sort((a, b) => b.price - a.price), // largest price first = closest to bottom edge
     pad.l + cw + 4,
     pad.t + ch - 4,
     "below",
