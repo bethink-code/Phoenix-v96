@@ -6,7 +6,7 @@
   "description": "Multi-tenant crypto liquidity sweep trading bot",
   "scripts": {
     "predev": "kill-port 5000 5173 5174 5175 5176 5177",
-    "dev:server": "npx tsx server/index.ts",
+    "dev:server": "npx tsx watch server/index.ts",
     "dev:client": "wait-on tcp:5000 && npx vite",
     "dev": "doppler run -- concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "build": "vite build",

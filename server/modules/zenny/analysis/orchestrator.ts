@@ -31,6 +31,8 @@ import {
   type LevelStrength,
 } from "./level/strength";
 import { setPoolBoundaries } from "./pool/setPoolBoundaries";
+import { detectEngulfingDeath } from "./pool/detectEngulfingDeath";
+import { detectSustainedBreakDeath } from "./pool/detectSustainedBreakDeath";
 
 // ---------------------------------------------------------------------------
 // Per-TF follow-through ATR multipliers (research-backed defaults)
@@ -288,22 +290,170 @@ export async function runAnalysis(
     level.graduatedToPoolId = poolId;
   }
 
+  // 6. Dead-pool detection. For each pool, walk forward through its SOURCE TF
+  //    candles starting from the candle after birth. Check engulfing
+  //    (single candle body crosses both boundaries) and sustained break
+  //    (3 consecutive closes beyond boundary). If a death event fires,
+  //    mark the pool dead and map the death candle time to the primary
+  //    TF's coordinate system for rendering.
+  for (const pool of pools) {
+    const sourceCandles = perTfCandles.get(pool.sourceTimeframe);
+    if (!sourceCandles || sourceCandles.length === 0) continue;
+
+    // Find the source-TF index of the birth candle
+    const birthIdx = sourceCandles.findIndex(
+      (c) => c.openTime === pool.birthCandleTime,
+    );
+    if (birthIdx < 0) continue;
+
+    for (let i = birthIdx + 1; i < sourceCandles.length; i++) {
+      const candle = sourceCandles[i];
+
+      // Engulfing — single-candle death
+      if (
+        detectEngulfingDeath({
+          candle,
+          poolWickHigh: pool.wickHigh,
+          poolWickLow: pool.wickLow,
+          poolType: pool.type,
+        })
+      ) {
+        pool.status = "dead";
+        pool.deathCandleTime = candle.openTime;
+        pool.deathCandleIndexOnPrimary = findClosestCandleIndex(
+          primaryCandles,
+          candle.openTime,
+        );
+        pool.deathReason = "engulfing";
+        break;
+      }
+
+      // Sustained break — last 3 closes
+      const lookbackStart = Math.max(birthIdx + 1, i - 2);
+      const recent = sourceCandles.slice(lookbackStart, i + 1);
+      if (recent.length >= 3) {
+        const sb = detectSustainedBreakDeath({
+          recentCandles: recent,
+          poolWickHigh: pool.wickHigh,
+          poolWickLow: pool.wickLow,
+          poolType: pool.type,
+        });
+        if (sb.dead) {
+          pool.status = "dead";
+          pool.deathCandleTime = candle.openTime;
+          pool.deathCandleIndexOnPrimary = findClosestCandleIndex(
+            primaryCandles,
+            candle.openTime,
+          );
+          pool.deathReason = "sustained_break";
+          break;
+        }
+      }
+    }
+  }
+
+  // 7. Merge confluent pools. After all pools have been graduated and
+  //    death-checked, collapse pools that sit at the same price (within
+  //    tolerance) on the same side into a single representative pool.
+  //    Prefer the higher-timeframe pool as the canonical one (Monthly >
+  //    Weekly > Daily > 4H > 1H > 15m), and combine confluence counts.
+  const mergedPools = mergeConfluentPools(pools);
+
+  // Re-link levels to the merged pool ids (any level whose
+  // graduatedToPoolId was on a pool that got merged should now point
+  // at the survivor).
+  const idMap = new Map<string, string>();
+  for (const original of pools) {
+    const survivor = mergedPools.find(
+      (m) =>
+        m.id === original.id ||
+        (Math.abs(m.linePrice - original.linePrice) / original.linePrice <
+          0.005 &&
+          m.type === original.type),
+    );
+    if (survivor) idMap.set(original.id, survivor.id);
+  }
+  for (const level of flatLevels) {
+    if (level.graduatedToPoolId && idMap.has(level.graduatedToPoolId)) {
+      level.graduatedToPoolId = idMap.get(level.graduatedToPoolId)!;
+    }
+  }
+
   return {
     symbol: input.symbol,
     primaryTimeframe: input.primaryTimeframe,
     analysedTimeframes: analysedTfs,
     candles: primaryCandles,
     levels: flatLevels,
-    pools,
+    pools: mergedPools,
     computedAtMs: Date.now(),
   };
+}
+
+// TF priority for merging — higher-TF pools win when collapsed.
+const TF_PRIORITY: Record<Timeframe, number> = {
+  M: 6,
+  W: 5,
+  D: 4,
+  "12H": 3,
+  "4H": 2,
+  "1H": 1,
+  "15m": 0,
+};
+
+// Merge pools that are at the same price (within 0.5%) on the same side.
+// Higher-TF pool wins. The survivor's confluenceCount is the max of the group.
+function mergeConfluentPools(pools: AnalysisPool[]): AnalysisPool[] {
+  const tolerance = 0.005;
+  const used = new Set<string>();
+  const survivors: AnalysisPool[] = [];
+
+  for (const a of pools) {
+    if (used.has(a.id)) continue;
+    const cluster = [a];
+    used.add(a.id);
+    for (const b of pools) {
+      if (used.has(b.id)) continue;
+      if (b.type !== a.type) continue;
+      const distance = Math.abs(b.linePrice - a.linePrice) / a.linePrice;
+      if (distance > tolerance) continue;
+      cluster.push(b);
+      used.add(b.id);
+    }
+    // Pick the highest-TF pool as the canonical
+    cluster.sort(
+      (x, y) => TF_PRIORITY[y.sourceTimeframe] - TF_PRIORITY[x.sourceTimeframe],
+    );
+    const winner = { ...cluster[0] };
+    winner.confluenceCount = Math.max(...cluster.map((c) => c.confluenceCount));
+    // If any pool in the cluster died, the cluster is dead
+    const dead = cluster.find((c) => c.status === "dead");
+    if (dead) {
+      winner.status = "dead";
+      winner.deathCandleTime = dead.deathCandleTime;
+      winner.deathCandleIndexOnPrimary = dead.deathCandleIndexOnPrimary;
+      winner.deathReason = dead.deathReason;
+    }
+    survivors.push(winner);
+  }
+
+  return survivors;
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 
+// Find the candle whose openTime is closest to the given time.
+// Returns negative index marker if the time is before the window starts
+// (so the renderer can clip pool rectangles to the visible left edge
+// without pretending the swing happened at index 0).
+//   - if openTime < first candle: returns -1 (pool is "older than visible")
+//   - if openTime > last candle:  returns candles.length (pool is "newer than visible" — should never happen)
+//   - otherwise:                  returns the closest index inside the window
 function findClosestCandleIndex(candles: Candle[], openTime: number): number {
   if (candles.length === 0) return 0;
+  if (openTime < candles[0].openTime) return -1;
+  if (openTime > candles[candles.length - 1].openTime) return candles.length;
   let closestIdx = 0;
   let closestDelta = Infinity;
   for (let i = 0; i < candles.length; i++) {

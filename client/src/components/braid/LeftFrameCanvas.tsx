@@ -123,14 +123,31 @@ function drawScene(
   }
 
   // ---- LEVELS ----
-  // Sort weakest → strongest so strong levels draw on top
+  // Sort weakest → strongest so strong levels draw on top.
+  // Off-screen levels (price above maxP or below minP) get a small arrow
+  // indicator at the top/bottom edge so the user knows they exist without
+  // distorting the candle Y-axis.
   const sortedLevels = [...state.levels].sort(
     (a, b) => strengthRank(a.strength) - strengthRank(b.strength),
   );
+
+  const offScreenAbove: typeof state.levels = [];
+  const offScreenBelow: typeof state.levels = [];
+
   for (const level of sortedLevels) {
     if (level.graduatedToPoolId !== null) continue; // pools own the rectangle
     const y = toY(level.price);
-    if (y < pad.t || y > pad.t + ch) continue;
+
+    // Off-screen handling: collect for indicator pass
+    if (y < pad.t) {
+      offScreenAbove.push(level);
+      continue;
+    }
+    if (y > pad.t + ch) {
+      offScreenBelow.push(level);
+      continue;
+    }
+
     const opacity = levelOpacity(level.strength);
     const rgb = level.side === "RESISTANCE" ? "226,75,74" : "29,158,117";
     ctx.strokeStyle = `rgba(${rgb},${opacity})`;
@@ -144,14 +161,17 @@ function drawScene(
             : level.strength === "weak"
               ? 0.7
               : 0.5;
-    const startX = toX(Math.max(0, Math.min(N - 1, level.swingCandleIndexOnPrimary)));
+
+    // Pre-window pools: swingCandleIndexOnPrimary is -1 — draw from the
+    // very left edge so the rectangle/line spans the entire visible width.
+    const idx = level.swingCandleIndexOnPrimary;
+    const startX = idx < 0 ? pad.l : toX(Math.max(0, Math.min(N - 1, idx)));
     ctx.beginPath();
     ctx.moveTo(startX, y);
     ctx.lineTo(pad.l + cw, y);
     ctx.stroke();
 
     // Right-edge TF tag — shows which TFs confirm this level
-    // e.g. "W+D+4H" for a 3-TF confluent level
     const tag = buildTfTag(level.sourceTimeframe, level.matchingTimeframes);
     ctx.fillStyle = `rgba(${rgb},${Math.min(1, opacity + 0.25)})`;
     ctx.font = `${level.strength === "very_strong" || level.strength === "strong" ? "500 " : ""}10px system-ui`;
@@ -160,15 +180,35 @@ function drawScene(
   }
   ctx.lineWidth = 1;
 
+  // Off-screen indicators: small arrows + price + TF tag at the top/bottom
+  // edge of the chart. Sorted strongest first so the most important
+  // off-screen levels appear at the edge nearest the price.
+  drawOffScreenIndicators(
+    ctx,
+    offScreenAbove.sort((a, b) => strengthRank(b.strength) - strengthRank(a.strength)),
+    pad.l + cw + 4,
+    pad.t + 4,
+    "above",
+  );
+  drawOffScreenIndicators(
+    ctx,
+    offScreenBelow.sort((a, b) => strengthRank(b.strength) - strengthRank(a.strength)),
+    pad.l + cw + 4,
+    pad.t + ch - 4,
+    "below",
+  );
+
   // ---- ACTIVE POOLS (translucent, behind candles) ----
+  // Skip pools whose price is entirely outside the visible Y range.
+  // Pools with birth index < 0 (predates window) start at the left edge.
   const activePools = state.pools.filter((p) => p.status === "active");
   const deadPools = state.pools.filter((p) => p.status === "dead");
   for (const pool of activePools) {
     const yTop = toY(pool.wickHigh);
     const yBot = toY(pool.wickLow);
-    const x1 = toX(
-      Math.max(0, Math.min(N - 1, pool.birthCandleIndexOnPrimary)),
-    );
+    if (yBot < pad.t || yTop > pad.t + ch) continue; // entirely off-screen
+    const idx = pool.birthCandleIndexOnPrimary;
+    const x1 = idx < 0 ? pad.l : toX(Math.max(0, Math.min(N - 1, idx)));
     const x2 = pad.l + cw;
     const fill = pool.type === "RESISTANCE" ? C.resAlive : C.supAlive;
     const border = pool.type === "RESISTANCE" ? C.resAliveBdr : C.supAliveBdr;
@@ -278,4 +318,41 @@ function buildTfTag(source: string, matching: string[]): string {
   const order = ["15m", "1H", "4H", "12H", "D", "W", "M"];
   const sorted = order.filter((tf) => all.has(tf));
   return sorted.join("+");
+}
+
+// Draw a small stack of off-screen level indicators at the top or bottom edge.
+// Each entry shows ↑ or ↓, the price, and the TF tag.
+// Limited to the top 3 strongest so the edge doesn't get crowded.
+function drawOffScreenIndicators(
+  ctx: CanvasRenderingContext2D,
+  levels: AnalysisStateClient["levels"],
+  x: number,
+  y: number,
+  position: "above" | "below",
+): void {
+  const limit = 3;
+  const arrow = position === "above" ? "↑" : "↓";
+  const lineHeight = 11;
+  ctx.font = "500 9px system-ui";
+  ctx.textAlign = "left";
+
+  const slice = levels.slice(0, limit);
+  for (let i = 0; i < slice.length; i++) {
+    const level = slice[i];
+    const rgb = level.side === "RESISTANCE" ? "226,75,74" : "29,158,117";
+    const opacity = Math.min(1, levelOpacity(level.strength) + 0.25);
+    ctx.fillStyle = `rgba(${rgb},${opacity})`;
+    const yOffset = position === "above" ? i * lineHeight : -i * lineHeight;
+    const tag = buildTfTag(level.sourceTimeframe, level.matchingTimeframes);
+    const priceLabel = formatPrice(level.price);
+    ctx.fillText(`${arrow} ${priceLabel} ${tag}`, x, y + yOffset);
+  }
+
+  // If there are more levels off-screen than we showed, indicate the count
+  if (levels.length > limit) {
+    const yOffset =
+      position === "above" ? limit * lineHeight : -limit * lineHeight;
+    ctx.fillStyle = "rgba(136,135,128,0.7)";
+    ctx.fillText(`+${levels.length - limit} more`, x, y + yOffset);
+  }
 }
