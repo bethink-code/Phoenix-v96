@@ -172,16 +172,17 @@ export async function runAnalysis(
         const side = pivot.type === "swing_high" ? "RESISTANCE" : "SUPPORT";
         const candidatePrice = pivot.price;
 
-        // Compute touch count for this level once at creation time.
-        // Used both for strength tiering and (immediately below) for validation.
-        const historyForLevel = candles.slice(0, i + 1);
-        const touchInfo = countTouches({
-          candles: historyForLevel,
+        // Touch count for STRENGTH/visualisation: use the full candle window so
+        // visits that happen AFTER the pivot stabilises are counted. This
+        // answers "how meaningful is this level across the visible chart?"
+        // The validation pipeline below uses a different (history-only) count
+        // because it must answer "would the engine have known this live?"
+        const fullWindowTouches = countTouches({
+          candles, // full window, including post-pivot candles
           price: candidatePrice,
           tolerancePct: tolerance,
           side,
-        });
-        const touchCount = touchInfo.length;
+        }).length;
 
         // Record the level (every candidate gets a level entry, even if it
         // never graduates to a pool — strong unattended levels are useful
@@ -194,8 +195,8 @@ export async function runAnalysis(
           swingCandleTime: candles[pivot.index].openTime,
           swingCandleIndex: pivot.index,
           source: "extrema",
-          touchCount,
-          strength: levelStrengthForTouches(touchCount),
+          touchCount: fullWindowTouches,
+          strength: levelStrengthForTouches(fullWindowTouches),
           graduatedToPoolId: null,
         });
 
