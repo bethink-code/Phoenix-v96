@@ -15,7 +15,10 @@
     "start": "node dist-server/index.mjs",
     "db:push": "doppler run -- drizzle-kit push",
     "db:studio": "doppler run -- drizzle-kit studio",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:ui": "vitest --ui"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.1",
@@ -60,6 +63,7 @@
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
+    "@vitest/ui": "^4.1.4",
     "autoprefixer": "^10.4.20",
     "concurrently": "^9.1.2",
     "cross-env": "^7.0.3",
@@ -71,6 +75,7 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vite": "^6.0.7",
+    "vitest": "^4.1.4",
     "wait-on": "^8.0.1"
   }
 }
