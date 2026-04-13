@@ -1,6 +1,7 @@
 // CountTouches — count how many candles in a window touched a price level.
 // Used at validation time with a provisional 0.5% zone (Gap A resolution).
-// A "touch" = candle high or low entered the price ± tolerance band.
+// A "touch" = the candle's price range (low..high) intersects the band
+// [price - tolerance, price + tolerance]. Standard range-overlap check.
 // Pure function. Spec §2.4 + Gap A resolution.
 
 import type { Candle } from "../../../../../shared/zennyTypes";
@@ -25,26 +26,18 @@ export function countTouches(input: CountTouchesInput): TouchInfo[] {
 
   for (let i = 0; i < input.candles.length; i++) {
     const c = input.candles[i];
+    // Range overlap check: the candle's [low, high] interval intersects
+    // the band [lower, upper]. Catches wick touches, full visits, and
+    // engulfs alike. The semantic touch price is still the high/low
+    // depending on side, for downstream display.
+    const intersects = c.low <= upper && c.high >= lower;
+    if (!intersects) continue;
     const touchPrice = input.side === "RESISTANCE" ? c.high : c.low;
-    // RESISTANCE: candle high reached or pierced the upper band
-    // SUPPORT: candle low reached or pierced the lower band
-    if (input.side === "RESISTANCE" && c.high >= lower && c.high <= upper) {
-      touches.push({
-        candleIndex: i,
-        candleOpenTime: c.openTime,
-        touchPrice,
-      });
-    } else if (
-      input.side === "SUPPORT" &&
-      c.low >= lower &&
-      c.low <= upper
-    ) {
-      touches.push({
-        candleIndex: i,
-        candleOpenTime: c.openTime,
-        touchPrice,
-      });
-    }
+    touches.push({
+      candleIndex: i,
+      candleOpenTime: c.openTime,
+      touchPrice,
+    });
   }
 
   return touches;
