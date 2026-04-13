@@ -17,7 +17,8 @@ export function ScoringPanel({ state }: Props) {
       <header className="px-4 py-2 border-b border-black/10 flex items-center justify-between">
         <h3 className="text-sm font-medium">Panel 3 · Scoring</h3>
         <span className="text-xs text-[#888780]">
-          {sorted.length} valid · threshold ≥ 60
+          {state.pools.filter((p) => p.status === "active").length} alive ·{" "}
+          {state.pools.filter((p) => p.status === "dead").length} taken
         </span>
       </header>
       <div className="max-h-96 overflow-auto">
@@ -30,6 +31,7 @@ export function ScoringPanel({ state }: Props) {
               <th className="text-right px-2 py-2" title="Volume /15">V</th>
               <th className="text-right px-2 py-2" title="Touch quality ±5">T</th>
               <th className="text-right px-3 py-2">Total</th>
+              <th className="text-right px-2 py-2">State</th>
             </tr>
           </thead>
           <tbody>
@@ -51,12 +53,22 @@ export function ScoringPanel({ state }: Props) {
                       {p.scoreBreakdown.total}
                     </span>
                   </td>
+                  <td
+                    className="px-2 py-1.5 text-right text-[10px]"
+                    title={p.deathReason ?? undefined}
+                  >
+                    {p.status === "active" ? (
+                      <span className="text-[#0F6E56]">alive</span>
+                    ) : (
+                      <span className="text-[#888780]">taken</span>
+                    )}
+                  </td>
                 </tr>
               );
             })}
             {sorted.length === 0 && (
               <tr>
-                <td colSpan={6} className="px-3 py-4 text-center text-[#888780]">
+                <td colSpan={7} className="px-3 py-4 text-center text-[#888780]">
                   no valid pools
                 </td>
               </tr>

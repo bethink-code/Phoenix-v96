@@ -24,6 +24,9 @@ export interface AnalysisLevelClient {
   graduatedToPoolId: string | null;
 }
 
+export type PoolStatusClient = "active" | "dead";
+export type DeathReasonClient = "engulfing" | "sustained_break" | "score_exhaustion";
+
 export interface AnalysisPoolClient {
   id: string;
   symbol: string;
@@ -34,7 +37,10 @@ export interface AnalysisPoolClient {
   centreLine: number;
   birthCandleTime: number;
   birthCandleIndex: number;
-  status: "active";
+  deathCandleTime: number | null;
+  deathCandleIndex: number | null;
+  deathReason: DeathReasonClient | null;
+  status: PoolStatusClient;
   scoreBreakdown: ScoreBreakdownClient;
   validationFailures: string[];
 }

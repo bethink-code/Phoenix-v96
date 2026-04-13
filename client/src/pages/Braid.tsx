@@ -100,10 +100,17 @@ export default function Braid() {
         {/* Stats summary */}
         {data && (
           <section className="bg-white border border-black/10 rounded-lg p-4">
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
+            <div className="grid grid-cols-2 md:grid-cols-6 gap-4 text-sm">
               <Stat label="Candles" value={data.candles.length.toString()} />
-              <Stat label="Levels detected" value={data.levels.length.toString()} />
-              <Stat label="Valid pools" value={data.pools.length.toString()} />
+              <Stat label="Levels" value={data.levels.length.toString()} />
+              <Stat
+                label="Pools alive"
+                value={data.pools.filter((p) => p.status === "active").length.toString()}
+              />
+              <Stat
+                label="Pools taken"
+                value={data.pools.filter((p) => p.status === "dead").length.toString()}
+              />
               <Stat label="Rejected" value={data.rejectedCandidates.length.toString()} />
               <Stat
                 label="Latest close"

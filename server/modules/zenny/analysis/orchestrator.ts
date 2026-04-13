@@ -1,16 +1,23 @@
-// Orchestrator — runs the analysis pipeline for a single symbol on a single timeframe.
-// Phase 1: Daily-only, no multi-TF confluence, no order book scoring, no liquidations.
-// Pure (given a provider + config) — returns the full AnalysisState.
+// Orchestrator — bar-by-bar replay of the analysis pipeline over the candle
+// history. Each candle close is treated as "now"; pools are born, scored, and
+// killed cumulatively. The final state at end-of-window contains both still-
+// active pools and historically-taken pools.
+//
+// Phase 1: Daily-only, no multi-TF confluence, no order book scoring,
+// no liquidations. Death detection IS in.
 
 import type { Candle, Timeframe } from "../../../../shared/zennyTypes";
 import type { MarketDataProvider } from "../infrastructure/providers/providerInterface";
 import { getCandles } from "./data/getCandles";
 import { findLocalExtrema } from "./candle/findLocalExtrema";
 import { classifyCandle } from "./candle/classifyCandle";
-import { clusterPriceLevels, type CandidateLevel } from "./level/clusterPriceLevels";
+import { countTouches } from "./candle/countTouches";
+import { clusterPriceLevels } from "./level/clusterPriceLevels";
 import { adaptiveTolerance } from "./level/adaptiveTolerance";
 import { validateCandidatePool } from "./pool/validateCandidatePool";
 import { setPoolBoundaries } from "./pool/setPoolBoundaries";
+import { detectEngulfingDeath } from "./pool/detectEngulfingDeath";
+import { detectSustainedBreakDeath } from "./pool/detectSustainedBreakDeath";
 import { scoreFreshness } from "./score/scoreFreshness";
 import { scoreDepartureStrength } from "./score/scoreDepartureStrength";
 import { scoreVolumeProfile } from "./score/scoreVolumeProfile";
@@ -24,7 +31,7 @@ import { aggregatePoolScore } from "./score/aggregatePoolScore";
 // Output types
 
 export interface AnalysisLevel {
-  id: string; // synthetic for v1 (deterministic from price+side+time)
+  id: string;
   price: number;
   side: "RESISTANCE" | "SUPPORT";
   swingCandleTime: number;
@@ -32,6 +39,9 @@ export interface AnalysisLevel {
   source: "extrema" | "tick" | "both";
   graduatedToPoolId: string | null;
 }
+
+export type PoolStatus = "active" | "dead";
+export type DeathReason = "engulfing" | "sustained_break" | "score_exhaustion";
 
 export interface AnalysisPool {
   id: string;
@@ -43,9 +53,12 @@ export interface AnalysisPool {
   centreLine: number;
   birthCandleTime: number;
   birthCandleIndex: number;
-  status: "active"; // Phase 1: all pools are alive (death detection deferred)
+  deathCandleTime: number | null;
+  deathCandleIndex: number | null;
+  deathReason: DeathReason | null;
+  status: PoolStatus;
   scoreBreakdown: ReturnType<typeof aggregatePoolScore>;
-  validationFailures: string[]; // empty if valid
+  validationFailures: string[];
 }
 
 export interface AnalysisRejected {
@@ -61,7 +74,7 @@ export interface AnalysisState {
   timeframe: Timeframe;
   candles: Candle[];
   levels: AnalysisLevel[];
-  pools: AnalysisPool[];
+  pools: AnalysisPool[]; // includes both active and dead
   rejectedCandidates: AnalysisRejected[];
   computedAtMs: number;
 }
@@ -73,8 +86,17 @@ export interface RunAnalysisInput {
   symbol: string;
   timeframe: Timeframe;
   candleCount?: number; // default 200
-  swingN?: number; // candles each side for swing detection (default 7)
+  swingN?: number; // default 7
   validityScoreThreshold?: number; // default 60
+  minTouches?: number; // override; default is TF-adaptive
+}
+
+// Higher TFs naturally have fewer touches per level (each Daily candle is 24h
+// of action compressed; 1H is 1h). Research-tuned minimum of 3 is fine for
+// 15m/1H/4H but is too strict on 12H/Daily where even 2 touches is meaningful.
+function defaultMinTouchesForTf(tf: Timeframe): number {
+  if (tf === "D" || tf === "12H") return 2;
+  return 3;
 }
 
 export async function runAnalysis(
@@ -83,19 +105,20 @@ export async function runAnalysis(
   const candleCount = input.candleCount ?? 200;
   const swingN = input.swingN ?? 7;
   const validityThreshold = input.validityScoreThreshold ?? 60;
+  const minTouches = input.minTouches ?? defaultMinTouchesForTf(input.timeframe);
 
-  // 1. Fetch candles
+  // 1. Fetch the full candle history for this run
   const candles = await getCandles(input.provider, {
     symbol: input.symbol,
     timeframe: input.timeframe,
     count: candleCount,
   });
 
-  if (candles.length === 0) {
+  if (candles.length < swingN * 2 + 1) {
     return {
       symbol: input.symbol,
       timeframe: input.timeframe,
-      candles: [],
+      candles,
       levels: [],
       pools: [],
       rejectedCandidates: [],
@@ -103,95 +126,164 @@ export async function runAnalysis(
     };
   }
 
-  const currentPrice = candles[candles.length - 1].close;
+  // 2. Pre-compute swing extrema across the whole window. We then "stream" them
+  //    into the replay loop in the order they would have stabilised at, which
+  //    is candle index = pivotIndex + swingN (the moment N candles past it close).
+  const allExtrema = findLocalExtrema({ candles, n: swingN });
 
-  // 2. Find swing extrema
-  const extrema = findLocalExtrema({ candles, n: swingN });
-
-  // 3. Cluster into candidate levels with adaptive tolerance
-  const tolerance = adaptiveTolerance({ candles });
-  const candidates = clusterPriceLevels({
-    extrema,
-    tolerancePct: tolerance,
-  });
-
-  // 4. Build the levels output (every candidate is rendered, pool or not)
-  const levels: AnalysisLevel[] = candidates.map((c, i) => ({
-    id: `lvl-${input.symbol}-${input.timeframe}-${i}-${Math.round(c.centrePrice)}`,
-    price: c.centrePrice,
-    side: c.side,
-    swingCandleTime: c.earliestSwingTime,
-    swingCandleIndex: findCandleIndexByTime(candles, c.earliestSwingTime),
-    source: "extrema",
-    graduatedToPoolId: null,
-  }));
-
-  // 5. Validate, build boundaries, score each candidate
+  // Track which candidate pools we've already considered (dedup by clustered price)
+  const consideredCandidates = new Map<string, true>();
   const pools: AnalysisPool[] = [];
   const rejectedCandidates: AnalysisRejected[] = [];
+  const levels: AnalysisLevel[] = [];
 
-  for (let i = 0; i < candidates.length; i++) {
-    const candidate = candidates[i];
-    const validation = validateCandidatePool({
-      candidatePrice: candidate.centrePrice,
-      side: candidate.side,
-      candles,
-    });
+  // 3. Bar-by-bar replay. At each candle close (index `i`), we:
+  //    a. Find any extrema that have just stabilised (their pivot was at i-swingN)
+  //    b. Cluster them with each other into candidate levels
+  //    c. Validate / score / birth new pools using only candles[0..=i]
+  //    d. Check existing active pools for death events at candles[i]
+  for (let i = swingN; i < candles.length; i++) {
+    // a. Find pivots whose stabilisation moment is exactly this candle (pivot at i - swingN)
+    const pivotIndex = i - swingN;
+    const newPivots = allExtrema.filter((e) => e.index === pivotIndex);
 
-    if (!validation.valid) {
-      rejectedCandidates.push({
-        candidatePrice: candidate.centrePrice,
-        side: candidate.side,
-        failureReasons: validation.failureReasons,
-        scoreBreakdown: null,
-        reason: "validation_failed",
-      });
-      continue;
+    if (newPivots.length > 0) {
+      // b. Cluster the new pivot(s) and any other unstabilised pivots within the same window
+      const tolerance = adaptiveTolerance({ candles: candles.slice(0, i + 1) });
+
+      for (const pivot of newPivots) {
+        const candidateKey = `${pivot.type}-${Math.round(pivot.price * 100)}`;
+        if (consideredCandidates.has(candidateKey)) continue;
+        consideredCandidates.set(candidateKey, true);
+
+        const side = pivot.type === "swing_high" ? "RESISTANCE" : "SUPPORT";
+        const candidatePrice = pivot.price;
+
+        // Record the level (every candidate gets a level entry)
+        const levelId = `lvl-${input.symbol}-${input.timeframe}-${pivot.index}-${Math.round(candidatePrice)}`;
+        levels.push({
+          id: levelId,
+          price: candidatePrice,
+          side,
+          swingCandleTime: candles[pivot.index].openTime,
+          swingCandleIndex: pivot.index,
+          source: "extrema",
+          graduatedToPoolId: null,
+        });
+
+        // c. Validate against the historical window we know about so far (candles[0..=i]).
+        //    The tolerance just adapts to local volatility.
+        const historyWindow = candles.slice(0, i + 1);
+        const validation = validateCandidatePool({
+          candidatePrice,
+          side,
+          candles: historyWindow,
+          provisionalTolerancePct: tolerance,
+          minTouches,
+        });
+
+        if (!validation.valid) {
+          rejectedCandidates.push({
+            candidatePrice,
+            side,
+            failureReasons: validation.failureReasons,
+            scoreBreakdown: null,
+            reason: "validation_failed",
+          });
+          continue;
+        }
+
+        const boundaries = setPoolBoundaries({
+          candidatePrice,
+          side,
+          candles: historyWindow,
+          currentPrice: candles[i].close,
+          provisionalTolerancePct: tolerance,
+        });
+
+        const breakdown = scoreNewPool({
+          touchCount: validation.touchCount,
+          volumePercentile: validation.volumePercentile,
+          candidatePrice,
+          candles: historyWindow,
+          side,
+        });
+
+        if (breakdown.total < validityThreshold) {
+          rejectedCandidates.push({
+            candidatePrice,
+            side,
+            failureReasons: [`score ${breakdown.total} < ${validityThreshold}`],
+            scoreBreakdown: breakdown,
+            reason: "score_below_threshold",
+          });
+          continue;
+        }
+
+        const poolId = `pool-${input.symbol}-${input.timeframe}-${pivot.index}-${Math.round(candidatePrice)}`;
+        pools.push({
+          id: poolId,
+          symbol: input.symbol,
+          timeframe: input.timeframe,
+          type: side,
+          wickHigh: boundaries.wickHigh,
+          wickLow: boundaries.wickLow,
+          centreLine: boundaries.centreLine,
+          birthCandleTime: candles[pivot.index].openTime,
+          birthCandleIndex: pivot.index,
+          deathCandleTime: null,
+          deathCandleIndex: null,
+          deathReason: null,
+          status: "active",
+          scoreBreakdown: breakdown,
+          validationFailures: [],
+        });
+        levels[levels.length - 1].graduatedToPoolId = poolId;
+      }
     }
 
-    const boundaries = setPoolBoundaries({
-      candidatePrice: candidate.centrePrice,
-      side: candidate.side,
-      candles,
-      currentPrice,
-    });
+    // d. Check existing active pools for death at the *current* candle close.
+    const currentCandle = candles[i];
+    for (const pool of pools) {
+      if (pool.status === "dead") continue;
+      if (i <= pool.birthCandleIndex) continue;
 
-    // Score the pool
-    const poolScore = scorePool({
-      touchCount: validation.touchCount,
-      volumePercentile: validation.volumePercentile,
-      candidatePrice: candidate.centrePrice,
-      candles,
-      side: candidate.side,
-    });
+      // Engulfing — single-candle death
+      if (
+        detectEngulfingDeath({
+          candle: currentCandle,
+          poolWickHigh: pool.wickHigh,
+          poolWickLow: pool.wickLow,
+          poolType: pool.type,
+        })
+      ) {
+        pool.status = "dead";
+        pool.deathCandleTime = currentCandle.openTime;
+        pool.deathCandleIndex = i;
+        pool.deathReason = "engulfing";
+        continue;
+      }
 
-    if (poolScore.total < validityThreshold) {
-      rejectedCandidates.push({
-        candidatePrice: candidate.centrePrice,
-        side: candidate.side,
-        failureReasons: [`score ${poolScore.total} < ${validityThreshold}`],
-        scoreBreakdown: poolScore,
-        reason: "score_below_threshold",
-      });
-      continue;
+      // Sustained break — last 3 candles
+      const lookbackStart = Math.max(pool.birthCandleIndex + 1, i - 2);
+      const recent = candles.slice(lookbackStart, i + 1);
+      if (recent.length >= 3) {
+        const sb = detectSustainedBreakDeath({
+          recentCandles: recent,
+          poolWickHigh: pool.wickHigh,
+          poolWickLow: pool.wickLow,
+          poolType: pool.type,
+        });
+        if (sb.dead) {
+          pool.status = "dead";
+          pool.deathCandleTime = currentCandle.openTime;
+          pool.deathCandleIndex = i;
+          pool.deathReason = "sustained_break";
+        }
+      }
+      // Score exhaustion deferred — needs a per-candle score history that
+      // we're not yet tracking. Phase 2 will wire it via pool_score_history.
     }
-
-    const poolId = `pool-${input.symbol}-${input.timeframe}-${i}-${Math.round(candidate.centrePrice)}`;
-    pools.push({
-      id: poolId,
-      symbol: input.symbol,
-      timeframe: input.timeframe,
-      type: candidate.side,
-      wickHigh: boundaries.wickHigh,
-      wickLow: boundaries.wickLow,
-      centreLine: boundaries.centreLine,
-      birthCandleTime: candidate.earliestSwingTime,
-      birthCandleIndex: findCandleIndexByTime(candles, candidate.earliestSwingTime),
-      status: "active",
-      scoreBreakdown: poolScore,
-      validationFailures: [],
-    });
-    levels[i].graduatedToPoolId = poolId;
   }
 
   return {
@@ -208,23 +300,6 @@ export async function runAnalysis(
 // ---------------------------------------------------------------------------
 // Helpers
 
-function findCandleIndexByTime(candles: Candle[], openTime: number): number {
-  for (let i = 0; i < candles.length; i++) {
-    if (candles[i].openTime === openTime) return i;
-  }
-  // Closest match (fallback)
-  let closestIdx = 0;
-  let closestDelta = Infinity;
-  for (let i = 0; i < candles.length; i++) {
-    const d = Math.abs(candles[i].openTime - openTime);
-    if (d < closestDelta) {
-      closestDelta = d;
-      closestIdx = i;
-    }
-  }
-  return closestIdx;
-}
-
 interface ScorePoolInput {
   touchCount: number;
   volumePercentile: number;
@@ -233,16 +308,14 @@ interface ScorePoolInput {
   side: "RESISTANCE" | "SUPPORT";
 }
 
-function scorePool(input: ScorePoolInput): ReturnType<typeof aggregatePoolScore> {
+function scoreNewPool(input: ScorePoolInput): ReturnType<typeof aggregatePoolScore> {
   const freshness = scoreFreshness(input.touchCount);
-  // Departure: synthesise from the most recent touch's next candle
-  // (simplified for v1 — full base detection comes later)
   const departure = computeDepartureScore(input);
   const volume = scoreVolumeProfile(input.volumePercentile);
   const depth = scoreOrderBookDepth(0); // stubbed
   const liquidation = scoreLiquidationCluster(null); // stubbed
   const tfConf = scoreTimeframeConfluence(1); // stubbed: single TF
-  const touchQuality = scoreTouchQuality({ qualityScores: [] }); // simplified
+  const touchQuality = scoreTouchQuality({ qualityScores: [] });
 
   return aggregatePoolScore({
     freshness,
@@ -256,8 +329,6 @@ function scorePool(input: ScorePoolInput): ReturnType<typeof aggregatePoolScore>
 }
 
 function computeDepartureScore(input: ScorePoolInput): number {
-  // Find the most recent candle that touched the level and use the candle after
-  // it as the departure. Use 1 base candle as a simplification for v1.
   const tolerance = 0.005;
   const upper = input.candidatePrice * (1 + tolerance);
   const lower = input.candidatePrice * (1 - tolerance);

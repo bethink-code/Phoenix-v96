@@ -6,7 +6,8 @@
 import { useEffect, useRef } from "react";
 import type { AnalysisStateClient } from "./types";
 
-// Palette — extracted from the mockup
+// Palette — extracted from the mockup. Dead-pool opacities added per the
+// "translucent alive / opaque taken" visual contract.
 const C = {
   bg: "#f8f7f4",
   grid: "rgba(0,0,0,0.035)",
@@ -16,10 +17,16 @@ const C = {
   bodyDn: "rgba(226,75,74,0.88)",
   wickUp: "rgba(29,158,117,0.5)",
   wickDn: "rgba(226,75,74,0.5)",
-  res: "rgba(226,75,74,0.13)",
-  resBdr: "rgba(226,75,74,0.65)",
-  sup: "rgba(29,158,117,0.13)",
-  supBdr: "rgba(29,158,117,0.65)",
+  // Active pools — translucent so candles show through
+  resAlive: "rgba(226,75,74,0.13)",
+  resAliveBdr: "rgba(226,75,74,0.65)",
+  supAlive: "rgba(29,158,117,0.13)",
+  supAliveBdr: "rgba(29,158,117,0.65)",
+  // Taken pools — opaque so they mask the candles underneath
+  resDead: "rgba(226,75,74,0.55)",
+  resDeadBdr: "rgba(226,75,74,0.95)",
+  supDead: "rgba(29,158,117,0.55)",
+  supDeadBdr: "rgba(29,158,117,0.95)",
   level: "rgba(61,61,58,0.25)",
   nowLine: "rgba(61,61,58,0.45)",
 };
@@ -129,14 +136,22 @@ function drawScene(
     ctx.stroke();
   }
 
-  // ---- POOLS (translucent rectangles, behind candles) ----
-  for (const pool of state.pools) {
+  // ---- POOLS ----
+  // Render active pools first (translucent, behind candles), then dead pools
+  // on top (opaque, so they visibly mask candles in their range).
+  // The opacity contrast IS the insight: scan the chart and you immediately
+  // see which pools were taken vs which are still alive.
+  const activePools = state.pools.filter((p) => p.status === "active");
+  const deadPools = state.pools.filter((p) => p.status === "dead");
+
+  // Active first — drawn before candles in the apparent Z stack
+  for (const pool of activePools) {
     const yTop = toY(pool.wickHigh);
     const yBot = toY(pool.wickLow);
     const x1 = toX(Math.max(0, pool.birthCandleIndex));
     const x2 = pad.l + cw; // active pools extend to "now"
-    const fill = pool.type === "RESISTANCE" ? C.res : C.sup;
-    const border = pool.type === "RESISTANCE" ? C.resBdr : C.supBdr;
+    const fill = pool.type === "RESISTANCE" ? C.resAlive : C.supAlive;
+    const border = pool.type === "RESISTANCE" ? C.resAliveBdr : C.supAliveBdr;
     ctx.fillStyle = fill;
     ctx.fillRect(x1, yTop, x2 - x1, yBot - yTop);
     ctx.strokeStyle = border;
@@ -145,6 +160,9 @@ function drawScene(
   }
 
   // ---- CANDLES ----
+  // (drawn between active and dead pools — dead pools come AFTER candles
+  // so they visibly mask the candles inside their range)
+
   for (let i = 0; i < N; i++) {
     const c = state.candles[i];
     const x = toX(i);
@@ -171,6 +189,24 @@ function drawScene(
     const bH = Math.max(1.5, Math.abs(yC - yO));
     ctx.fillStyle = isUp ? C.bodyUp : C.bodyDn;
     ctx.fillRect(x - halfWidth, bT, halfWidth * 2, bH);
+  }
+
+  // ---- DEAD POOLS — drawn on top of candles so the opacity masks the bars ----
+  for (const pool of deadPools) {
+    const yTop = toY(pool.wickHigh);
+    const yBot = toY(pool.wickLow);
+    const x1 = toX(Math.max(0, pool.birthCandleIndex));
+    const x2 =
+      pool.deathCandleIndex !== null
+        ? toX(pool.deathCandleIndex)
+        : pad.l + cw;
+    const fill = pool.type === "RESISTANCE" ? C.resDead : C.supDead;
+    const border = pool.type === "RESISTANCE" ? C.resDeadBdr : C.supDeadBdr;
+    ctx.fillStyle = fill;
+    ctx.fillRect(x1, yTop, x2 - x1, yBot - yTop);
+    ctx.strokeStyle = border;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x1, yTop, x2 - x1, yBot - yTop);
   }
 
   // Border around the chart area
