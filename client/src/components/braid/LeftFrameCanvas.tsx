@@ -83,14 +83,14 @@ function drawScene(
     return;
   }
 
-  // Y axis from candle range + extend to cover any off-screen level prices
-  const allPrices: number[] = state.candles.flatMap((c) => [c.high, c.low]);
-  for (const level of state.levels) {
-    if (!Number.isFinite(level.price)) continue;
-    allPrices.push(level.price);
-  }
-  let minP = Math.min(...allPrices);
-  let maxP = Math.max(...allPrices);
+  // Y axis derived ONLY from candles. Level prices outside this range are
+  // simply not drawn — including them in the bounds would squish the candles
+  // into a tiny band when a higher-TF level is far away (e.g. a Monthly $108k
+  // level on a 15m chart with current price $71k). This matches every
+  // standard charting tool.
+  const candlePrices: number[] = state.candles.flatMap((c) => [c.high, c.low]);
+  let minP = Math.min(...candlePrices);
+  let maxP = Math.max(...candlePrices);
   const padPrice = (maxP - minP) * 0.02;
   minP -= padPrice;
   maxP += padPrice;
