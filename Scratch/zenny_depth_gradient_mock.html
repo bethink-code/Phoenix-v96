@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Zenny — depth gradient cross-check mockup</title>
+<style>
+  body {
+    font-family: -apple-system, system-ui, sans-serif;
+    background: #f8f7f4;
+    color: #3d3d3a;
+    margin: 0;
+    padding: 24px;
+  }
+  h1 { font-size: 16px; font-weight: 600; margin: 0 0 4px 0; }
+  .subtitle { font-size: 12px; color: #888780; margin-bottom: 16px; }
+  .chart-frame {
+    background: #fff;
+    border: 1px solid #e8e6df;
+    border-radius: 6px;
+    padding: 16px;
+    max-width: 1200px;
+  }
+  .chart-row { display: flex; align-items: stretch; }
+  svg { display: block; }
+  .legend {
+    margin-top: 12px;
+    font-size: 11px;
+    color: #888780;
+    display: flex;
+    gap: 24px;
+  }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .swatch {
+    display: inline-block;
+    width: 14px;
+    height: 4px;
+    border-radius: 1px;
+  }
+  .controls {
+    margin-top: 16px;
+    display: flex;
+    gap: 16px;
+    font-size: 12px;
+  }
+  .controls label { display: flex; align-items: center; gap: 6px; }
+  .annotation {
+    font-size: 11px;
+    color: #534ab7;
+    margin-top: 12px;
+    line-height: 1.5;
+    max-width: 900px;
+  }
+  #depth { cursor: pointer; }
+  #depth:hover { filter: brightness(0.92); }
+  .detail-panel {
+    position: fixed;
+    top: 24px;
+    right: 24px;
+    width: 360px;
+    max-height: calc(100vh - 48px);
+    overflow-y: auto;
+    background: #fff;
+    border: 1px solid #d4d2cb;
+    border-radius: 6px;
+    padding: 16px 18px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.12);
+    font-size: 12px;
+    display: none;
+    z-index: 100;
+  }
+  .detail-panel.open { display: block; }
+  .detail-panel h2 {
+    font-size: 13px;
+    margin: 0 0 4px 0;
+    color: #534ab7;
+  }
+  .detail-panel .meta {
+    font-size: 10px;
+    color: #888780;
+    margin-bottom: 12px;
+  }
+  .detail-panel .close {
+    position: absolute;
+    top: 12px;
+    right: 14px;
+    background: none;
+    border: 0;
+    font-size: 16px;
+    cursor: pointer;
+    color: #888780;
+  }
+  .detail-section {
+    margin-bottom: 14px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid #f0eee7;
+  }
+  .detail-section:last-child { border: 0; }
+  .detail-section h3 {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #888780;
+    margin: 0 0 6px 0;
+    font-weight: 600;
+  }
+  .ladder {
+    font-family: ui-monospace, monospace;
+    font-size: 10px;
+    line-height: 1.5;
+  }
+  .ladder-row { display: flex; justify-content: space-between; }
+  .ladder-row.bid { color: #0F6E56; }
+  .ladder-row.ask { color: #a83332; }
+  .ladder-row .bar {
+    display: inline-block;
+    height: 6px;
+    margin-left: 6px;
+    vertical-align: middle;
+  }
+  .ladder-row.bid .bar { background: rgba(29,158,117,0.4); }
+  .ladder-row.ask .bar { background: rgba(226,75,74,0.4); }
+  .history-strip {
+    display: flex;
+    align-items: flex-end;
+    height: 50px;
+    gap: 2px;
+  }
+  .history-strip .bar {
+    flex: 1;
+    background: rgba(127,119,221,0.55);
+    border-radius: 1px 1px 0 0;
+  }
+  .history-strip .bar.spoofed { background: rgba(226,75,74,0.55); }
+  .history-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 9px;
+    color: #888780;
+    margin-top: 3px;
+  }
+  .verdict {
+    margin-top: 8px;
+    padding: 6px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    line-height: 1.4;
+  }
+  .verdict.stable { background: rgba(29,158,117,0.10); color: #0F6E56; }
+  .verdict.spoofed { background: rgba(226,75,74,0.10); color: #a83332; }
+  .verdict.growing { background: rgba(127,119,221,0.10); color: #534ab7; }
+</style>
+</head>
+<body>
+
+<h1>Zenny — depth gradient cross-check</h1>
+<div class="subtitle">BTCUSDT Monthly · 80 candles · simulated Binance depth snapshot @ now</div>
+
+<div class="chart-frame">
+  <div class="chart-row">
+    <svg id="chart" width="1100" height="500"></svg>
+    <svg id="depth" width="60" height="500"></svg>
+    <svg id="axis" width="60" height="500"></svg>
+  </div>
+
+  <div class="controls">
+    <label><input type="checkbox" id="show-levels" checked> Detected levels</label>
+    <label><input type="checkbox" id="show-depth" checked> Depth gradient</label>
+    <label><input type="checkbox" id="show-walls" checked> Wall callouts</label>
+  </div>
+
+  <div class="legend">
+    <div class="legend-item"><span class="swatch" style="background:rgba(226,75,74,0.7)"></span>Resistance level (from ZigZag)</div>
+    <div class="legend-item"><span class="swatch" style="background:rgba(29,158,117,0.7)"></span>Support level (from ZigZag)</div>
+    <div class="legend-item"><span class="swatch" style="background:rgba(127,119,221,0.6)"></span>Live depth size (Binance order book)</div>
+  </div>
+
+  <div class="annotation">
+    The depth column on the right is binned bid+ask size from a (faked) Binance depth snapshot.
+    Fat purple stripes = walls. Each detected level (horizontal line) crosses the depth column at its price —
+    where it crosses a fat stripe, the level has live size sitting on it right now (high conviction).
+    Where it crosses empty space, the level is historical only with no current liquidity (deprioritise).
+    <strong>Click any wall in the depth column to inspect the bid/ask ladder, recent size history, and a spoofing verdict.</strong>
+  </div>
+</div>
+
+<div class="detail-panel" id="detail-panel">
+  <button class="close" id="detail-close">×</button>
+  <h2 id="detail-title"></h2>
+  <div class="meta" id="detail-meta"></div>
+
+  <div class="detail-section">
+    <h3>Live ladder</h3>
+    <div class="ladder" id="detail-ladder"></div>
+  </div>
+
+  <div class="detail-section">
+    <h3>Size history (last 30 min, 1-min bins)</h3>
+    <div class="history-strip" id="detail-history"></div>
+    <div class="history-labels"><span>30 min ago</span><span>now</span></div>
+    <div class="verdict" id="detail-verdict"></div>
+  </div>
+
+  <div class="detail-section">
+    <h3>Cross-check</h3>
+    <div id="detail-crosscheck"></div>
+  </div>
+</div>
+
+<script>
+// -------- chart geometry --------
+const W = 1100, H = 500;
+const padL = 50, padR = 10, padT = 20, padB = 30;
+const plotW = W - padL - padR;
+const plotH = H - padT - padB;
+
+// -------- fake price series shaped like the user's Monthly chart --------
+// 80 monthly closes from 2019 to 2026, shaped roughly like the screenshot.
+const closes = [
+  6500, 7200, 8500, 9100, 8800, 7100, 9300, 10800, 11200, 10400, 11800, 13200,
+  29000, 33000, 47000, 58000, 35000, 41000, 47000, 43000, 61000, 57000, 47000,
+  38000, 43000, 38000, 30000, 32000, 23000, 19000, 20000, 21000, 17000, 16000,
+  21000, 23000, 28000, 27000, 28000, 30000, 29000, 27000, 26000, 26500, 28000,
+  34000, 38000, 42000, 43000, 38000, 39000, 37000, 42000, 51000, 60000, 62000,
+  63000, 65000, 68000, 60000, 64000, 71000, 68000, 67000, 65000, 67000, 95000,
+  103000, 108000, 116000, 109000, 107000, 96000, 88000, 73000, 69000, 67000, 70000, 74000
+];
+
+const minP = 1170;
+const maxP = 128700;
+
+const xOf = i => padL + (i / (closes.length - 1)) * plotW;
+const yOf = p => padT + (1 - (p - minP) / (maxP - minP)) * plotH;
+
+// -------- ZigZag-detected levels (from the Monthly fix we just shipped) --------
+const levels = [
+  { price: 6407, type: 'support', label: '#6 LOW $6,407' },
+  { price: 61349, type: 'resistance', label: '#25 HIGH $61,349' },
+  { price: 16538, type: 'support', label: '#39 LOW $16,538' },
+  { price: 115697, type: 'resistance', label: '#70 HIGH $115,697' },
+  { price: 66937, type: 'support', label: '#77 LOW $66,937' }
+];
+
+// -------- fake Binance depth snapshot --------
+// Real shape: { bids: [[price, qty], ...], asks: [[price, qty], ...] }
+// Faked here so the walls line up with some-but-not-all of the levels —
+// to demonstrate the visual cross-check working both ways.
+const depthBuckets = []; // array of { priceLow, priceHigh, sizeUsd }
+const N_BUCKETS = 80;
+const bucketStep = (maxP - minP) / N_BUCKETS;
+
+// Background depth — small random size everywhere
+for (let i = 0; i < N_BUCKETS; i++) {
+  const priceLow = minP + i * bucketStep;
+  depthBuckets.push({
+    priceLow,
+    priceHigh: priceLow + bucketStep,
+    sizeUsd: Math.random() * 3_000_000 + 500_000
+  });
+}
+
+// Add walls at specific prices
+const walls = [
+  { center: 73000, sizeUsd: 95_000_000, spread: 4000, note: 'spot price wall' },
+  { center: 67000, sizeUsd: 60_000_000, spread: 3000, note: 'aligns with #77 support' },
+  { center: 115000, sizeUsd: 45_000_000, spread: 5000, note: 'aligns with #70 resistance' },
+  { center: 88000, sizeUsd: 35_000_000, spread: 3500, note: 'unaligned wall — pure book signal' },
+  { center: 100000, sizeUsd: 28_000_000, spread: 3000, note: 'round-number wall' },
+  { center: 60000, sizeUsd: 18_000_000, spread: 2500, note: 'partially aligns with #25' },
+];
+
+walls.forEach(w => {
+  depthBuckets.forEach(b => {
+    const dist = Math.abs((b.priceLow + b.priceHigh) / 2 - w.center);
+    if (dist < w.spread) {
+      const falloff = 1 - (dist / w.spread);
+      b.sizeUsd += w.sizeUsd * falloff;
+    }
+  });
+});
+
+const maxSize = Math.max(...depthBuckets.map(b => b.sizeUsd));
+
+// -------- render the chart --------
+const chart = document.getElementById('chart');
+
+// price line
+const path = closes.map((c, i) => `${i === 0 ? 'M' : 'L'} ${xOf(i)} ${yOf(c)}`).join(' ');
+chart.innerHTML += `<path d="${path}" fill="none" stroke="rgba(61,61,58,0.8)" stroke-width="1.5"/>`;
+
+// detected levels
+levels.forEach(l => {
+  const y = yOf(l.price);
+  const color = l.type === 'resistance' ? 'rgba(226,75,74,0.65)' : 'rgba(29,158,117,0.65)';
+  chart.innerHTML += `<line class="level" x1="${padL}" y1="${y}" x2="${W-padR}" y2="${y}" stroke="${color}" stroke-width="1"/>`;
+  chart.innerHTML += `<text x="${padL+6}" y="${y-3}" font-size="9" fill="${l.type === 'resistance' ? '#a83332' : '#0F6E56'}">${l.label}</text>`;
+});
+
+// y-axis price labels
+[1170, 26700, 52200, 77700, 103200, 128700].forEach(p => {
+  const y = yOf(p);
+  chart.innerHTML += `<text x="${padL-6}" y="${y+3}" font-size="9" fill="#888780" text-anchor="end">$${(p/1000).toFixed(1)}K</text>`;
+  chart.innerHTML += `<line x1="${padL}" y1="${y}" x2="${W-padR}" y2="${y}" stroke="rgba(0,0,0,0.035)" stroke-width="0.5"/>`;
+});
+
+// -------- render depth gradient column --------
+const depth = document.getElementById('depth');
+const depthCol = `<rect x="0" y="${padT}" width="60" height="${plotH}" fill="rgba(127,119,221,0.04)"/>`;
+const depthBars = depthBuckets.map(b => {
+  const yTop = yOf(b.priceHigh);
+  const yBot = yOf(b.priceLow);
+  const opacity = (b.sizeUsd / maxSize) * 0.85 + 0.05;
+  return `<rect x="0" y="${yTop}" width="60" height="${yBot - yTop}" fill="rgba(127,119,221,${opacity})"/>`;
+}).join('');
+depth.innerHTML = depthCol + depthBars;
+
+// wall callouts on the axis SVG
+const axis = document.getElementById('axis');
+walls.forEach(w => {
+  const y = yOf(w.center);
+  axis.innerHTML += `<line x1="0" y1="${y}" x2="6" y2="${y}" stroke="rgba(127,119,221,0.7)" stroke-width="1.5"/>`;
+  axis.innerHTML += `<text x="9" y="${y+3}" font-size="9" fill="#534ab7">$${(w.center/1000).toFixed(0)}K · $${(w.sizeUsd/1_000_000).toFixed(0)}M</text>`;
+});
+
+// -------- detail data per wall --------
+// Each wall gets a mocked story: stable, spoofed, or growing.
+// In production this would come from a rolling snapshot history of /fapi/v1/depth.
+const wallDetails = {
+  73000: {
+    title: '$73K wall · spot price gravity',
+    meta: 'Wall age: 47 minutes · Total size: $95M (bids $52M / asks $43M)',
+    bids: [[72980, 8.2], [72950, 12.5], [72920, 6.1], [72880, 4.8], [72850, 9.3]],
+    asks: [[73020, 7.8], [73050, 11.2], [73080, 5.4], [73120, 6.7], [73150, 8.1]],
+    history: [42, 45, 51, 48, 53, 58, 62, 67, 71, 78, 82, 88, 91, 93, 95, 95, 94, 96, 95, 93, 95, 96, 97, 95, 95, 94, 95, 95, 95, 95],
+    spoofed: false,
+    verdict: { type: 'stable', text: 'Stable wall — size has grown steadily over 30 min and held. High-conviction liquidity zone.' },
+    crosscheck: 'No detected level here. This is a pure book signal — current spot price is sitting on a real wall not yet captured by the historical ZigZag. Worth flagging as an emerging level.'
+  },
+  67000: {
+    title: '$67K wall · aligned with #77 support',
+    meta: 'Wall age: 2.5 hours · Total size: $60M (bids $58M / asks $2M)',
+    bids: [[66980, 6.5], [66950, 9.2], [66900, 11.4], [66850, 8.8], [66800, 7.6]],
+    asks: [[67020, 0.4], [67050, 0.6], [67080, 0.5], [67100, 0.3], [67150, 0.4]],
+    history: [55, 56, 58, 59, 60, 61, 60, 60, 61, 62, 60, 60, 61, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60],
+    spoofed: false,
+    verdict: { type: 'stable', text: 'Stable wall, ~95% bids. Real defensive support sitting where the ZigZag flagged #77. High-conviction pool — both signals agree.' },
+    crosscheck: 'Aligns with detected level #77 LOW $66,937. Two independent signals (historical + live book) agree. This is the textbook case for a high-conviction pool.'
+  },
+  115000: {
+    title: '$115K wall · aligned with #70 resistance',
+    meta: 'Wall age: 1.2 hours · Total size: $45M (bids $3M / asks $42M)',
+    bids: [[114980, 0.5], [114950, 0.4], [114900, 0.6], [114850, 0.3], [114800, 0.4]],
+    asks: [[115020, 5.2], [115050, 8.1], [115100, 11.4], [115150, 9.8], [115200, 7.6]],
+    history: [40, 41, 42, 43, 43, 44, 44, 44, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45],
+    spoofed: false,
+    verdict: { type: 'stable', text: 'Stable ask wall. Aligns with the #70 cycle peak. High-conviction resistance.' },
+    crosscheck: 'Aligns with detected level #70 HIGH $115,697. Both signals agree. Textbook high-conviction pool.'
+  },
+  88000: {
+    title: '$88K wall · UNALIGNED · pure book signal',
+    meta: 'Wall age: 18 minutes · Total size: $35M (bids $20M / asks $15M)',
+    bids: [[87980, 4.5], [87950, 5.2], [87900, 6.1], [87850, 4.8], [87800, 3.6]],
+    asks: [[88020, 3.5], [88050, 4.1], [88100, 4.4], [88150, 3.8], [88200, 2.6]],
+    history: [5, 6, 7, 8, 12, 18, 25, 33, 42, 51, 58, 62, 65, 68, 70, 72, 73, 74, 75, 75, 35, 12, 8, 28, 32, 35, 35, 35, 35, 35],
+    spoofed: true,
+    verdict: { type: 'spoofed', text: 'POSSIBLE SPOOFING. Wall pulled mid-history (orange spike), then re-formed at smaller size. Size pattern is inconsistent with a real defensive wall. Treat as low-conviction.' },
+    crosscheck: 'No detected level here. The ZigZag did not flag this price. Combined with the spoofing pattern in the history strip, this wall should NOT be treated as a tradeable pool. The cross-check just saved you from a bad setup.'
+  },
+  100000: {
+    title: '$100K wall · round number',
+    meta: 'Wall age: 4 hours · Total size: $28M (bids $14M / asks $14M)',
+    bids: [[99980, 3.5], [99950, 4.2], [99900, 5.1], [99850, 3.8], [99800, 2.6]],
+    asks: [[100020, 3.5], [100050, 4.1], [100100, 5.4], [100150, 3.8], [100200, 2.6]],
+    history: [22, 23, 23, 24, 24, 25, 25, 25, 26, 26, 26, 27, 27, 27, 27, 27, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28],
+    spoofed: false,
+    verdict: { type: 'growing', text: 'Slowly growing wall at a round number. Likely passive HFT / market-maker quoting around $100K. Real, but not strong defense.' },
+    crosscheck: 'No detected level here. Round-number walls are common psychological levels that the historical ZigZag misses. Worth tracking as a soft level.'
+  },
+  60000: {
+    title: '$60K wall · partial alignment with #25',
+    meta: 'Wall age: 6 hours · Total size: $18M (bids $12M / asks $6M)',
+    bids: [[59980, 2.5], [59950, 3.2], [59900, 3.1], [59850, 2.8], [59800, 1.6]],
+    asks: [[60020, 1.5], [60050, 2.1], [60100, 1.4], [60150, 1.8], [60200, 0.6]],
+    history: [16, 16, 16, 17, 17, 17, 17, 17, 17, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18],
+    spoofed: false,
+    verdict: { type: 'stable', text: 'Stable wall, slightly bid-heavy. Aligns approximately with the #25 cycle peak ($61.3K) — close enough to count as confluence.' },
+    crosscheck: 'Partial alignment with detected level #25 HIGH $61,349 ($1.3K offset, ~2%). The two signals agree on the zone but disagree on the exact price. Treat as a confluence pool centred between the two.'
+  }
+};
+
+function showWallDetail(centerPrice) {
+  const detail = wallDetails[centerPrice];
+  if (!detail) return;
+
+  document.getElementById('detail-title').textContent = detail.title;
+  document.getElementById('detail-meta').textContent = detail.meta;
+
+  // Ladder render — interleave bids and asks around the center
+  const ladderHtml = [
+    ...detail.asks.slice().reverse().map(([p, q]) => {
+      const barW = (q / 12) * 80;
+      return `<div class="ladder-row ask"><span>${p.toFixed(0)} · ${q.toFixed(2)} BTC</span><span class="bar" style="width:${barW}px"></span></div>`;
+    }),
+    `<div style="border-top: 1px dashed #d4d2cb; margin: 4px 0;"></div>`,
+    ...detail.bids.map(([p, q]) => {
+      const barW = (q / 12) * 80;
+      return `<div class="ladder-row bid"><span>${p.toFixed(0)} · ${q.toFixed(2)} BTC</span><span class="bar" style="width:${barW}px"></span></div>`;
+    })
+  ].join('');
+  document.getElementById('detail-ladder').innerHTML = ladderHtml;
+
+  // History strip — colour spoofed bins differently
+  const maxH = Math.max(...detail.history);
+  const historyHtml = detail.history.map((v, i) => {
+    const isSpike = detail.spoofed && (i === 19 || i === 20 || i === 21 || i === 22);
+    return `<div class="bar${isSpike ? ' spoofed' : ''}" style="height:${(v/maxH)*100}%"></div>`;
+  }).join('');
+  document.getElementById('detail-history').innerHTML = historyHtml;
+
+  const v = document.getElementById('detail-verdict');
+  v.className = 'verdict ' + detail.verdict.type;
+  v.textContent = detail.verdict.text;
+
+  document.getElementById('detail-crosscheck').textContent = detail.crosscheck;
+
+  document.getElementById('detail-panel').classList.add('open');
+}
+
+document.getElementById('depth').addEventListener('click', e => {
+  const rect = e.currentTarget.getBoundingClientRect();
+  const yClick = e.clientY - rect.top;
+  // Find the closest wall by y-distance
+  let closest = null;
+  let closestDist = Infinity;
+  walls.forEach(w => {
+    const wy = yOf(w.center);
+    const d = Math.abs(wy - yClick);
+    if (d < closestDist && d < 30) {
+      closest = w;
+      closestDist = d;
+    }
+  });
+  if (closest) showWallDetail(closest.center);
+});
+
+document.getElementById('detail-close').addEventListener('click', () => {
+  document.getElementById('detail-panel').classList.remove('open');
+});
+
+// -------- toggle controls --------
+document.getElementById('show-levels').addEventListener('change', e => {
+  chart.querySelectorAll('.level').forEach(el => el.style.display = e.target.checked ? '' : 'none');
+});
+document.getElementById('show-depth').addEventListener('change', e => {
+  depth.style.display = e.target.checked ? '' : 'none';
+});
+document.getElementById('show-walls').addEventListener('change', e => {
+  axis.style.display = e.target.checked ? '' : 'none';
+});
+</script>
+
+</body>
+</html>

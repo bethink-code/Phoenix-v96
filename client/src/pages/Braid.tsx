@@ -4,12 +4,36 @@
 // Per the plan: this is the "first visual proof that pool detection is sensible".
 
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { LeftFrameCanvas } from "@/components/braid/LeftFrameCanvas";
 import { LevelPanel } from "@/components/braid/LevelPanel";
 import { ValidationPanel } from "@/components/braid/ValidationPanel";
 import { ScoringPanel } from "@/components/braid/ScoringPanel";
 import type { AnalysisStateClient } from "@/components/braid/types";
+
+// Tiny localStorage-backed useState. Reads on init, writes on change.
+// Silent on quota or parse errors — never blocks the page.
+function usePersistedState<T>(key: string, defaultValue: T) {
+  const [value, setValue] = useState<T>(() => {
+    try {
+      const stored = localStorage.getItem(key);
+      if (stored !== null) return JSON.parse(stored) as T;
+    } catch {
+      // ignore corrupt JSON / disabled storage
+    }
+    return defaultValue;
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch {
+      // ignore quota errors
+    }
+  }, [key, value]);
+
+  return [value, setValue] as const;
+}
 
 const TIMEFRAMES: Array<{ value: string; label: string }> = [
   { value: "M", label: "Monthly" },
@@ -21,14 +45,50 @@ const TIMEFRAMES: Array<{ value: string; label: string }> = [
 ];
 
 export default function Braid() {
-  const [symbol, setSymbol] = useState("BTCUSDT");
-  const [timeframe, setTimeframe] = useState("D");
-  const [count, setCount] = useState(200);
+  const [symbol, setSymbol] = usePersistedState("zenny.braid.symbol", "BTCUSDT");
+  const [timeframe, setTimeframe] = usePersistedState(
+    "zenny.braid.timeframe",
+    "D",
+  );
+  const [count, setCount] = usePersistedState("zenny.braid.count", 200);
+  const [chartType, setChartType] = usePersistedState<"candles" | "line">(
+    "zenny.braid.chartType",
+    "candles",
+  );
+  // Target structural point count for line-chart simplification, stored
+  // per-TF so switching timeframes remembers the count you tuned for each.
+  // Defaults come from the 2026-04-15 visual-validation pass across 6 TFs.
+  const [targetPointsByTf, setTargetPointsByTf] = usePersistedState<
+    Record<string, number>
+  >("zenny.braid.targetPointsByTf", {
+    M: 40,
+    W: 25,
+    D: 30,
+    "4H": 25,
+    "1H": 25,
+    "15m": 30,
+  });
+  const targetPoints = targetPointsByTf[timeframe] ?? 15;
+  const setTargetPoints = (v: number) =>
+    setTargetPointsByTf({ ...targetPointsByTf, [timeframe]: v });
+  const [showCurrentTf, setShowCurrentTf] = usePersistedState(
+    "zenny.braid.showCurrentTf",
+    true,
+  );
+  const [showOtherTfs, setShowOtherTfs] = usePersistedState(
+    "zenny.braid.showOtherTfs",
+    true,
+  );
+  const [showPools, setShowPools] = usePersistedState(
+    "zenny.braid.showPools",
+    true,
+  );
 
   const queryKey = `/api/zenny/braid-view-model?symbol=${symbol}&timeframe=${timeframe}&count=${count}`;
-  const { data, isLoading, error, refetch } = useQuery<AnalysisStateClient>({
-    queryKey: [queryKey],
-  });
+  const { data, isLoading, isFetching, error, refetch } =
+    useQuery<AnalysisStateClient>({
+      queryKey: [queryKey],
+    });
 
   return (
     <div className="min-h-screen bg-[#f8f7f4] text-[#3d3d3a]">
@@ -73,11 +133,69 @@ export default function Braid() {
               className="border border-black/15 rounded px-2 py-1 w-20 bg-white"
             />
           </label>
+          <label className="flex items-center gap-2">
+            <span className="text-[#888780]">Chart</span>
+            <select
+              value={chartType}
+              onChange={(e) =>
+                setChartType(e.target.value as "candles" | "line")
+              }
+              className="border border-black/15 rounded px-2 py-1 bg-white"
+            >
+              <option value="candles">Candles</option>
+              <option value="line">Line</option>
+            </select>
+          </label>
+          {chartType === "line" && (
+            <label className="flex items-center gap-2">
+              <span className="text-[#888780]">Points</span>
+              <input
+                type="number"
+                min={4}
+                max={50}
+                step={1}
+                value={targetPoints}
+                onChange={(e) =>
+                  setTargetPoints(parseInt(e.target.value, 10) || 15)
+                }
+                className="border border-black/15 rounded px-2 py-1 w-16 bg-white tabular-nums"
+              />
+            </label>
+          )}
+          <label className="flex items-center gap-1.5 text-[#3d3d3a]">
+            <input
+              type="checkbox"
+              checked={showCurrentTf}
+              onChange={(e) => setShowCurrentTf(e.target.checked)}
+            />
+            <span>Current TF</span>
+          </label>
+          <label className="flex items-center gap-1.5 text-[#3d3d3a]">
+            <input
+              type="checkbox"
+              checked={showOtherTfs}
+              onChange={(e) => setShowOtherTfs(e.target.checked)}
+            />
+            <span>Higher TFs</span>
+          </label>
+          <label className="flex items-center gap-1.5 text-[#3d3d3a]">
+            <input
+              type="checkbox"
+              checked={showPools}
+              onChange={(e) => setShowPools(e.target.checked)}
+            />
+            <span>Pools</span>
+          </label>
           <button
             onClick={() => refetch()}
-            className="border border-black/15 rounded px-3 py-1 hover:bg-[#f1efe8] transition-colors"
+            disabled={isFetching}
+            className={`border rounded px-3 py-1 transition-colors min-w-[88px] ${
+              isFetching
+                ? "border-black/10 bg-[#f1efe8] text-[#888780] cursor-wait"
+                : "border-black/15 hover:bg-[#f1efe8]"
+            }`}
           >
-            Refresh
+            {isFetching ? "Refreshing…" : "Refresh"}
           </button>
         </div>
       </header>
@@ -94,7 +212,14 @@ export default function Braid() {
             </div>
           )}
           {data && (
-            <LeftFrameCanvas state={data} />
+            <LeftFrameCanvas
+              state={data}
+              chartType={chartType}
+              targetPoints={targetPoints}
+              showCurrentTf={showCurrentTf}
+              showOtherTfs={showOtherTfs}
+              showPools={showPools}
+            />
           )}
         </section>
 

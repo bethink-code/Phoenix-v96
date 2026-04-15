@@ -32,6 +32,10 @@ export interface AnalysisLevelClient {
   recency: number;
   strength: LevelStrengthClient;
   graduatedToPoolId: string | null;
+  // True if a subsequent candle close on the source TF has gone past this
+  // level's price. Broken levels represent consumed liquidity and should
+  // not render as tradeable.
+  broken: boolean;
 }
 
 export interface AnalysisPoolClient {

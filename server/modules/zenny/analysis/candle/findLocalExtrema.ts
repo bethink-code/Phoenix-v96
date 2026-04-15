@@ -35,6 +35,13 @@ export interface FindLocalExtremaInput {
   // subsequent reversal exceeded this multiple of ATR within lookaheadCandles.
   minReversalAtrMultiple?: number; // e.g. 2.5 for swing trading
   lookaheadCandles?: number; // e.g. 5
+  // Optional excursion filter. If set, the pivot's BODY extreme must be at
+  // least this multiple of ATR away from the median body extreme of its 2N
+  // neighbours. Catches "shallow chop pivots" — candles that pass the strict
+  // local extremum test but only barely (e.g. dojis or small-body bars in
+  // tight consolidation). The user's eye reads these as noise; the math
+  // says they aren't meaningful enough to be levels.
+  minExcursionAtrMultiple?: number; // e.g. 1.0
 }
 
 export function findLocalExtrema(
@@ -44,9 +51,11 @@ export function findLocalExtrema(
   const candles = input.candles;
   const result: SwingExtremum[] = [];
 
-  // Compute ATR once per call if the follow-through filter is active
-  const filterActive = input.minReversalAtrMultiple !== undefined;
-  const atr = filterActive ? computeAtr14(candles, 14) : 0;
+  // Compute ATR once per call if any ATR-based filter is active
+  const followThroughActive = input.minReversalAtrMultiple !== undefined;
+  const excursionActive = input.minExcursionAtrMultiple !== undefined;
+  const atr =
+    followThroughActive || excursionActive ? computeAtr14(candles, 14) : 0;
 
   for (let i = N; i < candles.length - N; i++) {
     if (isSwingHigh(candles, i, N)) {
@@ -57,7 +66,13 @@ export function findLocalExtrema(
         wickPrice: candles[i].high,
         type: "swing_high",
       };
-      if (!filterActive || passesFollowThroughFilter(pivot, candles, atr, input)) {
+      const passesFollow =
+        !followThroughActive ||
+        passesFollowThroughFilter(pivot, candles, atr, input);
+      const passesExcursion =
+        !excursionActive ||
+        passesExcursionFilter(pivot, candles, N, atr, input);
+      if (passesFollow && passesExcursion) {
         result.push(pivot);
       }
     }
@@ -69,7 +84,13 @@ export function findLocalExtrema(
         wickPrice: candles[i].low,
         type: "swing_low",
       };
-      if (!filterActive || passesFollowThroughFilter(pivot, candles, atr, input)) {
+      const passesFollow =
+        !followThroughActive ||
+        passesFollowThroughFilter(pivot, candles, atr, input);
+      const passesExcursion =
+        !excursionActive ||
+        passesExcursionFilter(pivot, candles, N, atr, input);
+      if (passesFollow && passesExcursion) {
         result.push(pivot);
       }
     }
@@ -98,4 +119,52 @@ function passesFollowThroughFilter(
     followThrough.reversalAsAtrMultiple !== null &&
     followThrough.reversalAsAtrMultiple >= minMultiple
   );
+}
+
+// Excursion filter: how meaningful is this pivot relative to its neighbours?
+// Computes the median BODY extreme of the 2N neighbouring candles (N on each
+// side, excluding the pivot itself), then requires the pivot's own body
+// extreme to be at least minExcursionAtrMultiple × ATR away from it.
+//
+// Why body-based when detection is wick-based: a doji or small-body candle
+// can have a wick that's the local high (so isSwingHigh fires) but its body
+// barely moves — that's chop noise, not structure. Body-based excursion
+// rejects them. Real swings have bodies that meaningfully break out of the
+// surrounding consolidation level.
+function passesExcursionFilter(
+  pivot: SwingExtremum,
+  candles: Candle[],
+  N: number,
+  atr: number,
+  input: FindLocalExtremaInput,
+): boolean {
+  if (atr <= 0) return true;
+  const minMultiple = input.minExcursionAtrMultiple ?? 1.0;
+
+  const neighbourBodies: number[] = [];
+  for (let j = pivot.index - N; j <= pivot.index + N; j++) {
+    if (j === pivot.index) continue;
+    if (j < 0 || j >= candles.length) continue;
+    const c = candles[j];
+    if (pivot.type === "swing_high") {
+      neighbourBodies.push(Math.max(c.open, c.close));
+    } else {
+      neighbourBodies.push(Math.min(c.open, c.close));
+    }
+  }
+  if (neighbourBodies.length === 0) return true;
+
+  const sorted = [...neighbourBodies].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+
+  const pivotCandle = candles[pivot.index];
+  const pivotBody =
+    pivot.type === "swing_high"
+      ? Math.max(pivotCandle.open, pivotCandle.close)
+      : Math.min(pivotCandle.open, pivotCandle.close);
+
+  const excursion =
+    pivot.type === "swing_high" ? pivotBody - median : median - pivotBody;
+
+  return excursion >= minMultiple * atr;
 }

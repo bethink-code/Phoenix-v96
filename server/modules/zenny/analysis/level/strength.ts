@@ -38,22 +38,28 @@ export function strengthFromConfluence(confluenceCount: number): LevelStrength {
 
 // Map recency (0 = oldest in window, 1 = newest) to strength tier.
 // Recent untested swings are "untaken liquidity" — targets for stop hunts.
-// Research default: last 5% → very_strong, last 15% → strong, last 30% → medium.
+// Last 5% → very_strong, last 15% → strong, last 30% → medium, last 60% → weak.
 export function strengthFromRecency(recency: number): LevelStrength {
   if (recency >= 0.95) return "very_strong";
   if (recency >= 0.85) return "strong";
   if (recency >= 0.7) return "medium";
+  if (recency >= 0.4) return "weak";
   return "trivial";
 }
 
-// Combined = max of confluence tier and recency tier. Pure.
-// A level is strong if EITHER it's multi-TF confluent OR it's recent and
-// untested. Both matter; render the higher tier.
+// Combined = max of confluence tier, recency tier, and (optionally) a
+// primary-TF floor. The TF you're viewing always shows its own structure
+// at minimum "weak" so its pivots aren't rendered into nothing.
 export function combinedLevelStrength(
   confluenceCount: number,
   recency: number,
+  isPrimaryTimeframe: boolean = false,
 ): LevelStrength {
   const a = strengthFromConfluence(confluenceCount);
   const b = strengthFromRecency(recency);
-  return STRENGTH_RANK[a] >= STRENGTH_RANK[b] ? a : b;
+  const max = STRENGTH_RANK[a] >= STRENGTH_RANK[b] ? a : b;
+  if (isPrimaryTimeframe && STRENGTH_RANK[max] < STRENGTH_RANK.weak) {
+    return "weak";
+  }
+  return max;
 }

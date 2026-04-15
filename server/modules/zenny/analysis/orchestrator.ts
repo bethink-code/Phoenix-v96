@@ -22,6 +22,12 @@ import {
 } from "./candle/findLocalExtrema";
 import { computeAtr14 } from "./candle/measureFollowThrough";
 import { selectMostRecent } from "./level/selectMostRecent";
+import { dedupeSwingPivots } from "./level/dedupeSwingPivots";
+import { findBodyClusters } from "./level/findBodyClusters";
+import { filterBrokenPivots } from "./level/filterBrokenPivots";
+import { findStructuralLevels } from "./level/findStructuralLevels";
+import { findRdpLevels } from "./level/findRdpLevels";
+import { findZigZagLevels } from "./level/findZigZagLevels";
 import {
   detectConfluence,
   type LevelInput,
@@ -52,6 +58,28 @@ function followThroughFor(tf: Timeframe): number {
   return FOLLOW_THROUGH_BY_TF[tf] ?? 2.5;
 }
 
+// Per-TF reversal thresholds for findZigZagLevels, expressed as a fraction
+// of the running extreme. A swing high (or low) is confirmed when price
+// reverses from the running max (or min) by more than this much.
+//
+// ZigZag was chosen over RDP on 2026-04-15 after verification against real
+// BTCUSDT Monthly data showed RDP picks intermediate wobbles (March 2021
+// first peak) instead of cycle extremes (October 2021 actual ATH). ZigZag's
+// "running extreme" naturally captures the absolute peak of each direction.
+//
+// Verified against user's hand-annotated Monthly vertices: 40% threshold
+// gets 4/5 match (#25, #39, #70, #77 all correct; misses #12 which is not
+// a swing low by any algorithm). Other TFs are first-pass guesses.
+const ZIGZAG_PCT_BY_TF: Partial<Record<Timeframe, number>> = {
+  M: 0.4, // 40% — cycle-scale reversals only (verified against Monthly)
+  W: 0.25, // 25%
+  D: 0.12, // 12%
+  "12H": 0.05,
+  "4H": 0.03, // 3%
+  "1H": 0.02, // 2%
+  "15m": 0.01, // 1%
+};
+
 // ---------------------------------------------------------------------------
 // Output types
 
@@ -80,6 +108,12 @@ export interface AnalysisLevel {
   // Derived strength
   strength: LevelStrength;
   graduatedToPoolId: string | null;
+  // Invalidation flag: true if any subsequent candle on the SOURCE TF closed
+  // past this level's price (body close past — wick tests don't count). Once
+  // broken, the level represents consumed liquidity and should not render as
+  // tradeable. Computed during level construction by walking forward through
+  // the source TF's candles from the level's swing index.
+  broken: boolean;
 }
 
 export interface AnalysisPool {
@@ -166,14 +200,27 @@ export async function runAnalysis(
     analysedTfs.push(tf);
     perTfCandles.set(tf, candles);
 
-    const allPivots = findLocalExtrema({
+    // findZigZagLevels — THE authoritative level detector. Walks the
+    // candle closes in alternating directions, tracking the running
+    // extreme of each direction, and confirms vertices when price
+    // reverses by more than the per-TF threshold. The running extreme
+    // IS the cycle extreme (highest close in a bull leg, lowest in a
+    // bear leg), so double-top cycles correctly pick the higher peak.
+    //
+    // Replaces findRdpLevels which was structurally wrong: RDP's
+    // "farthest from chord" recursion picks intermediate wobbles instead
+    // of cycle extremes. See findZigZagLevels.ts header for the full
+    // rationale.
+    const levels = findZigZagLevels({
       candles,
-      n: swingN,
-      minReversalAtrMultiple: followThroughFor(tf),
-      lookaheadCandles: 5,
+      reversalPct: ZIGZAG_PCT_BY_TF[tf] ?? 0.05,
     });
-    const recent = selectMostRecent({ extrema: allPivots, perSide });
-    perTfPivots.set(tf, recent);
+    perTfPivots.set(tf, levels);
+
+    // Legacy pipeline retained in the codebase (findLocalExtrema,
+    // dedupeSwingPivots, findBodyClusters, filterBrokenPivots,
+    // findStructuralLevels) but no longer called from the orchestrator.
+    // They remain as building blocks in case future evolution wants them.
   }
 
   const primaryCandles =
@@ -195,15 +242,35 @@ export async function runAnalysis(
 
   // 3. Build flat level list across TFs. Each level's index is mapped onto
   //    the primary TF's candle array so the renderer has a clean X coordinate.
+  //    Also compute the `broken` flag by walking forward through the source
+  //    TF's candles from the pivot — any close past the pivot's price
+  //    (body close, not wick) invalidates the level.
   const flatLevels: AnalysisLevel[] = [];
   for (const tf of analysedTfs) {
     const pivots = perTfPivots.get(tf) ?? [];
+    const sourceCandles = perTfCandles.get(tf) ?? [];
     for (const pivot of pivots) {
       const side: "RESISTANCE" | "SUPPORT" =
         pivot.type === "swing_high" ? "RESISTANCE" : "SUPPORT";
       const swingCandleTime = pivot.candleOpenTime;
       const primaryIdx = findClosestCandleIndex(primaryCandles, swingCandleTime);
-      const recency = primaryIdx / Math.max(1, primaryCandles.length - 1);
+      const recency =
+        primaryIdx < 0 ? 0 : primaryIdx / Math.max(1, primaryCandles.length - 1);
+
+      // Compute broken: for a swing high, broken if any subsequent close
+      // on the source TF went above pivot.price. Mirror for swing low.
+      let broken = false;
+      for (let j = pivot.index + 1; j < sourceCandles.length; j++) {
+        const close = sourceCandles[j].close;
+        if (side === "RESISTANCE" && close > pivot.price) {
+          broken = true;
+          break;
+        }
+        if (side === "SUPPORT" && close < pivot.price) {
+          broken = true;
+          break;
+        }
+      }
 
       flatLevels.push({
         id: `lvl-${input.symbol}-${tf}-${pivot.index}-${Math.round(pivot.price)}`,
@@ -219,6 +286,7 @@ export async function runAnalysis(
         recency,
         strength: "trivial",
         graduatedToPoolId: null,
+        broken,
       });
     }
   }
@@ -241,7 +309,11 @@ export async function runAnalysis(
       level.confluenceCount = info.confluenceCount;
       level.clusterMemberIds = info.clusterMemberIds;
     }
-    level.strength = combinedLevelStrength(level.confluenceCount, level.recency);
+    level.strength = combinedLevelStrength(
+      level.confluenceCount,
+      level.recency,
+      level.sourceTimeframe === input.primaryTimeframe,
+    );
   }
 
   // 5. Graduate levels into pools. A level becomes a pool if its strength

@@ -26,10 +26,14 @@ describe("strengthFromConfluence", () => {
 });
 
 describe("strengthFromRecency", () => {
-  it("trivial for old levels", () => {
+  it("trivial for ancient levels", () => {
     expect(strengthFromRecency(0)).toBe("trivial");
-    expect(strengthFromRecency(0.5)).toBe("trivial");
-    expect(strengthFromRecency(0.69)).toBe("trivial");
+    expect(strengthFromRecency(0.39)).toBe("trivial");
+  });
+  it("weak at 0.40 (boundary)", () => {
+    expect(strengthFromRecency(0.4)).toBe("weak");
+    expect(strengthFromRecency(0.5)).toBe("weak");
+    expect(strengthFromRecency(0.69)).toBe("weak");
   });
   it("medium at 0.70 (boundary)", () => {
     expect(strengthFromRecency(0.7)).toBe("medium");
@@ -66,8 +70,25 @@ describe("combinedLevelStrength", () => {
     expect(combinedLevelStrength(3, 0.5)).toBe("strong");
   });
 
-  it("trivial when both are weak", () => {
-    expect(combinedLevelStrength(0, 0.5)).toBe("trivial");
+  it("weak when both dimensions are mid (recency 0.5 falls in weak band)", () => {
+    expect(combinedLevelStrength(0, 0.5)).toBe("weak");
+  });
+
+  it("trivial when level is non-confluent and very old", () => {
+    expect(combinedLevelStrength(0, 0.1)).toBe("trivial");
+  });
+
+  describe("primary-TF floor", () => {
+    it("floors trivial primary-TF levels at weak", () => {
+      expect(combinedLevelStrength(0, 0.1, true)).toBe("weak");
+    });
+    it("does not lift levels already above weak", () => {
+      expect(combinedLevelStrength(2, 0.1, true)).toBe("medium");
+      expect(combinedLevelStrength(0, 0.95, true)).toBe("very_strong");
+    });
+    it("does not affect non-primary levels", () => {
+      expect(combinedLevelStrength(0, 0.1, false)).toBe("trivial");
+    });
   });
 });
 
