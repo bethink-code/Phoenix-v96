@@ -458,6 +458,32 @@ export interface RegimeAssessmentResultClient {
   perTimeframe: Partial<Record<Timeframe, TfRegimeAssessmentClient>>;
 }
 
+// === Decision module (mirrors server/modules/zenny/decision/types) ==========
+// Per-TF concrete trade plan derived from the regime assessment's
+// recommended playbook. The execution module (when built) consumes
+// these and turns them into orders.
+
+export type TradeSideClient = "long" | "short";
+
+export interface TradePlanClient {
+  timeframe: Timeframe;
+  playbook: PlaybookClient;
+  side: TradeSideClient;
+  entry: number;
+  stop: number;
+  target: number;
+  riskRewardRatio: number;
+  riskPct: number;
+  sizeMultiplier: number;
+  anchorPoolId: string | null;
+  rationale: string[];
+}
+
+export interface TradePlanResultClient {
+  primary: TradePlanClient | null;
+  perTimeframe: Partial<Record<Timeframe, TradePlanClient>>;
+}
+
 // One row per primary candle that has wire-angle data. Drives the
 // timeline strip — recommended-playbook colour at each bar.
 export interface BarRegimeSnapshotClient {
@@ -509,6 +535,9 @@ export interface AnalysisStateClient {
       }
     >
   >;
+  // Decision module output — concrete TradePlan per TF.
+  tradePlan: TradePlanClient | null;
+  tradePlanResult: TradePlanResultClient;
   depth: DepthSnapshotClient | null;
   orderFlow: OrderFlowSnapshotClient | null;
   computedAtMs: number;

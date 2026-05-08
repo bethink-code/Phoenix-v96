@@ -63,6 +63,8 @@ import type {
   RegimeAssessmentResult,
   TfRegimeAssessment,
 } from "./regime/types";
+import { assembleTradePlans } from "../decision/assembleTradePlans";
+import type { TradePlan, TradePlanResult } from "../decision/types";
 
 // TF rank ordering — higher number = higher (slower) timeframe. Used to
 // filter pools per-TF: a TF chart should consider only pools at or above
@@ -193,6 +195,11 @@ export interface AnalysisState {
       }
     >
   >;
+  // Decision module output — concrete TradePlan per TF where the
+  // recommended playbook produces resolvable geometry. tradePlan is
+  // the convenience alias for the primary TF's plan.
+  tradePlan: TradePlan | null;
+  tradePlanResult: TradePlanResult;
   depth: null; // out of brief; stays null until the user asks for it back
   orderFlow: null;
   computedAtMs: number;
@@ -267,6 +274,8 @@ export async function runAnalysis(
       regimeHistory: [],
       regimeHistoryPerTimeframe: {},
       feedHealthPerTimeframe: {},
+      tradePlan: null,
+      tradePlanResult: { primary: null, perTimeframe: {} },
       depth: null,
       orderFlow: null,
       computedAtMs: Date.now(),
@@ -587,6 +596,24 @@ export async function runAnalysis(
     }
   }
 
+  // 8. Decision module — once per TF where the regime layer recommends
+  //    a playbook, build a concrete TradePlan (entry/stop/target/side/
+  //    size/rationale). Pure derivation from regime assessment + arms +
+  //    pools; no order placement happens here.
+  const tradePlanResult: TradePlanResult =
+    regimeAssessmentPerTimeframe[input.primaryTimeframe]
+      ? assembleTradePlans({
+          primaryTimeframe: input.primaryTimeframe,
+          perTfCandles,
+          armsPerTimeframe,
+          enrichedPoolsPerTimeframe,
+          regimeAssessment: {
+            primary: regimeAssessmentPerTimeframe[input.primaryTimeframe]!,
+            perTimeframe: regimeAssessmentPerTimeframe,
+          },
+        })
+      : { primary: null, perTimeframe: {} };
+
   // Top-level convenience fields — alias the primary TF's per-TF entries
   // so existing consumers (right-frame canvas, current strip render) keep
   // working without indexing through the maps.
@@ -622,6 +649,8 @@ export async function runAnalysis(
     regimeHistory: primaryRegimeHistory,
     regimeHistoryPerTimeframe,
     feedHealthPerTimeframe,
+    tradePlan: tradePlanResult.primary,
+    tradePlanResult,
     depth: null,
     orderFlow: null,
     computedAtMs: Date.now(),
