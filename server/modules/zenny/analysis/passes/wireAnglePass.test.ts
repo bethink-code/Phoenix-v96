@@ -5,8 +5,12 @@ import {
   classifyDirection,
   computeAgreement,
   computeAngleFor,
+  computeDwell,
+  computePerBarRegime,
   runWireAnglePass,
   smoothCloses,
+  type GannBracket,
+  type PerBarRegime,
   type WireAnglePassInfo,
 } from "./wireAnglePass";
 import type { PassRunInput } from "./types";
@@ -71,7 +75,11 @@ function rampForSmoothedPct(
   return Array.from({ length: totalRaw }, (_, i) => base + slope * i);
 }
 
-const enabledConfig = { enabled: true, lookbackCandles: 14 };
+const enabledConfig = {
+  enabled: true,
+  lookbackCandles: 14,
+  dwellBarsRequired: 3,
+};
 
 describe("classifyBracket", () => {
   it("uses |angle| for bracket selection", () => {
@@ -133,6 +141,7 @@ describe("runWireAnglePass — primary TF", () => {
     const result = runWireAnglePass(input([100, 101, 102, 103, 104]), {
       enabled: false,
       lookbackCandles: 14,
+      dwellBarsRequired: 3,
     });
     expect(result).toBeNull();
   });
@@ -360,5 +369,189 @@ describe("computeAngleFor", () => {
     );
     const viaRun = runWireAnglePass(input(closes), enabledConfig);
     expect(direct).toEqual(viaRun!.primary);
+  });
+});
+
+describe("computePerBarRegime", () => {
+  it("returns empty for fewer candles than smoothing + lookback need", () => {
+    // Need >= 18 candles (4 chopped + 14 lookback) for a single entry.
+    const closes = Array.from({ length: 17 }, (_, i) => 100 + i);
+    const candles = closes.map((p, i) => c(i, p));
+    expect(computePerBarRegime(candles, 14)).toHaveLength(0);
+  });
+
+  it("first entry's candleIndex equals N + 1 (smoothing chops 2 + N-1 lookback)", () => {
+    // 30 candles is plenty. First viable smoothed index = N-1 = 13;
+    // candle index = 13 + 2 = 15. With N=14 → first candleIndex should be 15.
+    const candles = Array.from({ length: 30 }, (_, i) => c(i, 100 + i * 0.5));
+    const history = computePerBarRegime(candles, 14);
+    expect(history.length).toBeGreaterThan(0);
+    expect(history[0].candleIndex).toBe(15);
+  });
+
+  it("last entry corresponds to the right edge of the smoothed series", () => {
+    // smoothed length = 30 - 4 = 26. Last smoothed index = 25.
+    // candle index = 25 + 2 = 27.
+    const candles = Array.from({ length: 30 }, (_, i) => c(i, 100 + i * 0.5));
+    const history = computePerBarRegime(candles, 14);
+    expect(history[history.length - 1].candleIndex).toBe(27);
+  });
+
+  it("classifies a strong uptrend ramp as TRENDING/BREAKOUT all the way", () => {
+    const closes = rampForSmoothedPct(100, 14, 14); // 45° at the right edge
+    const candles = closes.map((p, i) => c(i, p));
+    const history = computePerBarRegime(candles, 14);
+    expect(history.length).toBe(1); // 18 candles → exactly one entry
+    expect(history[0].bracket).toBe("TRENDING");
+    expect(history[0].direction).toBe("up");
+  });
+
+  it("flat market produces NO_TRADE entries throughout", () => {
+    const candles = Array.from({ length: 25 }, (_, i) => c(i, 100));
+    const history = computePerBarRegime(candles, 14);
+    expect(history.length).toBeGreaterThan(0);
+    history.forEach((h) => {
+      expect(h.bracket).toBe("NO_TRADE");
+      expect(h.direction).toBe("flat");
+    });
+  });
+});
+
+describe("computeDwell", () => {
+  // Synthesise a history of bars with explicit brackets and angles so the
+  // dwell logic can be tested directly without relying on the smoothing
+  // kernel. candleIndex is monotonically increasing but otherwise arbitrary.
+  function bars(seq: Array<[GannBracket, number]>): PerBarRegime[] {
+    return seq.map(([bracket, angleDeg], i) => ({
+      candleIndex: 100 + i,
+      angleDeg,
+      bracket,
+      direction:
+        Math.abs(angleDeg) < 0.5 ? "flat" : angleDeg > 0 ? "up" : "down",
+    }));
+  }
+
+  it("locks immediately when the candidate run already meets dwell", () => {
+    const history = bars([
+      ["RANGING", 30],
+      ["RANGING", 30],
+      ["RANGING", 30],
+    ]);
+    const d = computeDwell(history, 3);
+    expect(d.lockedBracket).toBe("RANGING");
+    expect(d.candidateBracket).toBe("RANGING");
+    expect(d.candidateBarsObserved).toBe(3);
+    expect(d.pendingFlip).toBe(false);
+    expect(d.lockedTradePermitted).toBe(true);
+  });
+
+  it("pendingFlip=true when a new bracket has not yet held for dwell", () => {
+    const history = bars([
+      ["RANGING", 30],
+      ["RANGING", 30],
+      ["RANGING", 30],
+      ["TRENDING", 50],
+    ]);
+    const d = computeDwell(history, 3);
+    expect(d.lockedBracket).toBe("RANGING"); // previous run still locked
+    expect(d.candidateBracket).toBe("TRENDING");
+    expect(d.candidateBarsObserved).toBe(1);
+    expect(d.pendingFlip).toBe(true);
+    expect(d.lockedTradePermitted).toBe(true); // RANGING permits
+  });
+
+  it("locked flips once new bracket completes dwell", () => {
+    const history = bars([
+      ["RANGING", 30],
+      ["RANGING", 30],
+      ["RANGING", 30],
+      ["TRENDING", 50],
+      ["TRENDING", 50],
+      ["TRENDING", 50],
+    ]);
+    const d = computeDwell(history, 3);
+    expect(d.lockedBracket).toBe("TRENDING");
+    expect(d.candidateBracket).toBe("TRENDING");
+    expect(d.candidateBarsObserved).toBe(3);
+    expect(d.pendingFlip).toBe(false);
+  });
+
+  it("brief excursion does not unlock — locked stays at prior bracket", () => {
+    // Three bars TRENDING locked → 2 bars dip into RANGING (insufficient
+    // dwell) → back to TRENDING. Locked should never have left TRENDING.
+    const history = bars([
+      ["TRENDING", 50],
+      ["TRENDING", 50],
+      ["TRENDING", 50],
+      ["RANGING", 30],
+      ["RANGING", 30],
+      ["TRENDING", 50],
+    ]);
+    const d = computeDwell(history, 3);
+    expect(d.lockedBracket).toBe("TRENDING");
+    expect(d.candidateBracket).toBe("TRENDING");
+    expect(d.candidateBarsObserved).toBe(1);
+    // candidate matches locked → not pending
+    expect(d.pendingFlip).toBe(false);
+  });
+
+  it("dwell of 1 means every bar locks immediately", () => {
+    const history = bars([
+      ["RANGING", 30],
+      ["TRENDING", 50],
+    ]);
+    const d = computeDwell(history, 1);
+    expect(d.lockedBracket).toBe("TRENDING");
+    expect(d.candidateBarsObserved).toBe(1);
+    expect(d.pendingFlip).toBe(false);
+  });
+
+  it("locks NO_TRADE/ACCUMULATION → lockedTradePermitted=false", () => {
+    const history = bars([
+      ["ACCUMULATION", 20],
+      ["ACCUMULATION", 20],
+      ["ACCUMULATION", 20],
+      ["RANGING", 30],
+    ]);
+    const d = computeDwell(history, 3);
+    expect(d.lockedBracket).toBe("ACCUMULATION");
+    expect(d.lockedTradePermitted).toBe(false);
+    expect(d.pendingFlip).toBe(true);
+  });
+
+  it("history with no qualifying run falls back to candidate as locked", () => {
+    // No run ever reaches dwell. The walk falls off the start of the array;
+    // locked just stays as the initial candidate value.
+    const history = bars([
+      ["RANGING", 30],
+      ["TRENDING", 50],
+      ["RANGING", 30],
+    ]);
+    const d = computeDwell(history, 3);
+    // Last bar is RANGING; no run of length 3 anywhere → locked = candidate.
+    expect(d.lockedBracket).toBe("RANGING");
+    expect(d.candidateBracket).toBe("RANGING");
+    expect(d.pendingFlip).toBe(false);
+  });
+});
+
+describe("runWireAnglePass — dwell + history integration", () => {
+  it("returns primaryHistory aligned to candle indices", () => {
+    const closes = rampForSmoothedPct(100, 14, 14);
+    const result = runWireAnglePass(input(closes), enabledConfig);
+    expect(result).not.toBeNull();
+    expect(result!.primaryHistory.length).toBeGreaterThan(0);
+    // First entry's candleIndex = N + 1 = 15.
+    expect(result!.primaryHistory[0].candleIndex).toBe(15);
+  });
+
+  it("primaryDwell exposes locked + candidate state", () => {
+    const closes = rampForSmoothedPct(100, 14, 14);
+    const result = runWireAnglePass(input(closes), enabledConfig);
+    expect(result!.primaryDwell.dwellBarsRequired).toBe(3);
+    expect(["NO_TRADE", "ACCUMULATION", "RANGING", "TRENDING", "BREAKOUT"]).toContain(
+      result!.primaryDwell.lockedBracket,
+    );
+    expect(typeof result!.primaryDwell.pendingFlip).toBe("boolean");
   });
 });

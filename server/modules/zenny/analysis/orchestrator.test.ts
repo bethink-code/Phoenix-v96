@@ -240,7 +240,7 @@ describe("runAnalysis (orchestrator integration)", () => {
           brokenPenalty: 0.15,
           strengthThreshold: 0,
         },
-        wireAngle: { enabled: false, lookbackCandles: 14 },
+        wireAngle: { enabled: false, lookbackCandles: 14, dwellBarsRequired: 3 },
       },
     });
 

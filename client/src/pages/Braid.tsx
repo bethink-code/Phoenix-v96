@@ -62,6 +62,7 @@ const LEGACY_DEFAULT_PASS_CONFIG: PassConfigClient = {
   wireAngle: {
     enabled: true,
     lookbackCandles: 14,
+    dwellBarsRequired: 3,
   },
 };
 

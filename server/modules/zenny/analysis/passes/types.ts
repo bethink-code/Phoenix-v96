@@ -66,6 +66,9 @@ export interface WireAnglePassConfig extends PassConfigBase {
   // RSI/ROC/ADX standard. Exposed as a knob for research; production should
   // leave it at 14.
   lookbackCandles: number;
+  // Hysteresis: candidate bracket must hold for this many bars before the
+  // locked bracket flips. Default 3.
+  dwellBarsRequired: number;
 }
 
 export interface AggregatePassConfig extends PassConfigBase {

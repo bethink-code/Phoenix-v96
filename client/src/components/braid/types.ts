@@ -127,6 +127,7 @@ export interface AggregatePassConfigClient {
 export interface WireAnglePassConfigClient {
   enabled: boolean;
   lookbackCandles: number;
+  dwellBarsRequired: number;
 }
 
 export interface PassConfigClient {
@@ -289,10 +290,33 @@ export interface WireAngleAgreementClient {
   htfConfirms: "yes" | "mixed" | "no";
 }
 
+// Per-bar regime classification — one entry per primary candle index that
+// has enough lookback. Drives the regime overlay strip on the left frame.
+export interface PerBarRegimeClient {
+  candleIndex: number;
+  angleDeg: number;
+  bracket: GannBracketClient;
+  direction: WireDirectionClient;
+}
+
+// Locked vs candidate state (primary TF only). The decision module gates
+// on locked; UI shows candidate alongside so a pending flip is visible.
+export interface WireAngleDwellClient {
+  lockedBracket: GannBracketClient;
+  lockedTradePermitted: boolean;
+  candidateBracket: GannBracketClient;
+  candidateBarsObserved: number;
+  dwellBarsRequired: number;
+  pendingFlip: boolean;
+}
+
 // Mirror of WireAnglePassResult on the server. Primary is the spec gate;
-// perTimeframe is sparse (TFs with too few candles are absent).
+// perTimeframe is sparse (TFs with too few candles are absent); dwell +
+// history are primary-TF only.
 export interface WireAnglePassResultClient {
   primary: WireAnglePassInfoClient;
+  primaryDwell: WireAngleDwellClient;
+  primaryHistory: PerBarRegimeClient[];
   perTimeframe: Partial<Record<Timeframe, WireAnglePassInfoClient>>;
   agreement: WireAngleAgreementClient;
 }

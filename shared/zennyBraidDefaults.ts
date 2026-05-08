@@ -27,6 +27,11 @@ export interface BraidPolarityFlipPassConfig {
 export interface BraidWireAnglePassConfig {
   enabled: boolean;
   lookbackCandles: number;
+  // Hysteresis — the candidate bracket must hold for this many primary-TF
+  // bars before the locked (gate) bracket flips. Stops oscillation at the
+  // 14°/26.25°/45°/63.75° boundaries. Candidate updates every tick;
+  // locked only changes when the dwell condition is met.
+  dwellBarsRequired: number;
 }
 
 export interface BraidAggregatePassConfig {
@@ -173,6 +178,7 @@ function makeLiquidityPoolPassConfig(
     wireAngle: {
       enabled: true,
       lookbackCandles: 14,
+      dwellBarsRequired: 3,
     },
   };
 }

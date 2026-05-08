@@ -20,6 +20,13 @@
 // in `agreement` — but never act as a separate gate. The decision module
 // can read `agreement.htfConfirms` to size or weight a trade, but the
 // permit boundary stays at the primary TF.
+//
+// Dwell / hysteresis (primary TF only): every bar in the visible window
+// has a bracket. The CANDIDATE bracket is the right-edge bar's. The LOCKED
+// bracket is the most recent bracket that has held for >= dwellBarsRequired
+// consecutive bars. Decision module reads `primaryDwell.lockedBracket` for
+// the gate; the candidate is what the operator sees as "where we're
+// heading." Stops the regime from flickering at the fixed thresholds.
 
 import type { Candle, Timeframe } from "../../../../../shared/zennyTypes";
 import type { PassRunInput, WireAnglePassConfig } from "./types";
@@ -46,32 +53,49 @@ export interface WireAnglePassInfo {
 
 // Multi-TF agreement summary. Derived once per run from the per-TF angles
 // so the renderer + decision module don't reimplement the comparison logic.
-//
-// "Aligned" = same sign as primary (flat is treated as neutral and excluded
-// from both numerator and denominator). The verdict is HTF-only — primary
-// is excluded from `htfConfirms` because the primary IS the thing being
-// confirmed.
 export interface WireAngleAgreement {
-  // Direction match across analysed TFs (primary included).
   matchingDirectionCount: number;
   totalAnalysed: number;
-  matchingDirectionRatio: number; // 0..1; 0 if totalAnalysed === 0
-
-  // Of the directionally-aligned TFs, how many ALSO clear |angle|≥26.25?
-  // Useful as a conviction multiplier — many TFs in trade-permit territory
-  // pulling the same way is a stronger setup than one TF doing it alone.
+  matchingDirectionRatio: number;
   alignedTradePermittedCount: number;
-
-  // Weakest bracket among directionally-aligned TFs. If only primary is
-  // aligned, this is just primary's bracket. Null when no TF is aligned
-  // (primary is flat, or there are no analysed TFs).
   weakestAlignedBracket: GannBracket | null;
-
-  // HTF-only verdict (primary excluded). Drives the conviction signal.
-  //   "yes"   = every HTF that has an opinion (non-flat) agrees with primary
-  //   "no"    = every opinionated HTF opposes primary
-  //   "mixed" = some agree, some oppose, OR no HTFs had data, OR primary is flat
   htfConfirms: "yes" | "mixed" | "no";
+}
+
+// Per-bar regime classification for the canvas overlay. One entry per
+// PRIMARY-TF candle index that has enough lookback to compute an angle.
+// Bars before the first viable index simply don't appear — the renderer
+// treats them as "no data" (no strip drawn) and leaves the chart blank.
+export interface PerBarRegime {
+  candleIndex: number;
+  angleDeg: number;
+  bracket: GannBracket;
+  direction: WireDirection;
+}
+
+// Locked vs candidate state (primary TF only). The decision module gates
+// on `lockedBracket` / `lockedTradePermitted`; the operator UI shows
+// candidate alongside so they can see a flip about to happen.
+export interface WireAngleDwell {
+  lockedBracket: GannBracket;
+  lockedTradePermitted: boolean;
+  candidateBracket: GannBracket;
+  candidateBarsObserved: number;
+  dwellBarsRequired: number;
+  pendingFlip: boolean;
+}
+
+export interface WireAnglePassResult {
+  primary: WireAnglePassInfo;
+  primaryDwell: WireAngleDwell;
+  // Aligned to primary candle indices — sparse on the left edge.
+  primaryHistory: PerBarRegime[];
+  // Per-TF candidate classification. HTF dwell is intentionally NOT
+  // computed: HTFs are a conviction signal, not a gate, so flicker on
+  // higher TFs is harmless and the cost of dwell-tracking everywhere is
+  // wasted complexity.
+  perTimeframe: Partial<Record<Timeframe, WireAnglePassInfo>>;
+  agreement: WireAngleAgreement;
 }
 
 // Spec-fixed thresholds. These come straight from §1.3 and are not tunables —
@@ -84,7 +108,6 @@ const BRACKET_TRENDING = 63.75;
 
 const FLAT_EPSILON_DEG = 0.5; // below this magnitude, direction = "flat"
 
-// Bracket ordering for "weakest aligned" lookup. Lower = weaker.
 const BRACKET_RANK: Record<GannBracket, number> = {
   NO_TRADE: 0,
   ACCUMULATION: 1,
@@ -93,13 +116,6 @@ const BRACKET_RANK: Record<GannBracket, number> = {
   BREAKOUT: 4,
 };
 
-export interface WireAnglePassResult {
-  primary: WireAnglePassInfo;
-  // Sparse map — only TFs with enough candles for the lookback are present.
-  perTimeframe: Partial<Record<Timeframe, WireAnglePassInfo>>;
-  agreement: WireAngleAgreement;
-}
-
 export function runWireAnglePass(
   input: PassRunInput,
   config: WireAnglePassConfig,
@@ -107,12 +123,11 @@ export function runWireAnglePass(
   if (!config.enabled) return null;
 
   const N = Math.max(2, Math.floor(config.lookbackCandles));
+  const dwellBarsRequired = Math.max(1, Math.floor(config.dwellBarsRequired));
 
   const primary = computeAngleFor(input.primaryCandles, N);
   if (primary === null) return null;
 
-  // Per-TF: same computation against each analysed TF's candle series.
-  // A TF with too few candles is just absent from the map (sparse).
   const perTimeframe: Partial<Record<Timeframe, WireAnglePassInfo>> = {};
   for (const [tf, candles] of input.perTfCandles) {
     const info =
@@ -120,18 +135,21 @@ export function runWireAnglePass(
     if (info !== null) perTimeframe[tf] = info;
   }
 
+  const primaryHistory = computePerBarRegime(input.primaryCandles, N);
+  const primaryDwell = computeDwell(primaryHistory, dwellBarsRequired);
+
   const agreement = computeAgreement(
     primary,
     input.primaryTimeframe,
     perTimeframe,
   );
 
-  return { primary, perTimeframe, agreement };
+  return { primary, primaryDwell, primaryHistory, perTimeframe, agreement };
 }
 
 // Pure helper: candles + lookback → WireAnglePassInfo or null when there
-// aren't enough smoothed values for the lookback window. Extracted so the
-// per-TF loop can reuse the exact same logic that drives the primary.
+// aren't enough smoothed values for the lookback window. Right-edge bar
+// only. Used for the per-TF candidate state.
 export function computeAngleFor(
   candles: Candle[],
   N: number,
@@ -143,19 +161,123 @@ export function computeAngleFor(
   const closeNAgo = smoothed[smoothed.length - N];
   if (closeNAgo === 0) return null;
 
-  const pctChange = ((closeNow - closeNAgo) / closeNAgo) * 100;
-  const slope = pctChange / N;
-  const angleDeg = Math.atan(slope) * (180 / Math.PI);
+  return makeInfo(closeNow, closeNAgo, N);
+}
+
+// Per-bar regime history for the primary TF. Computes an angle/bracket at
+// every bar index that has enough smoothed lookback. The first viable
+// candle index is `(N + 1)` because the [1,2,3,2,1]/9 kernel discards 2
+// bars at each end, and the lookback then needs (N-1) more bars.
+//
+// Output is in candle-index space (not smoothed-array space) so the canvas
+// renderer can align the strip to the visible candles directly.
+export function computePerBarRegime(
+  candles: Candle[],
+  N: number,
+): PerBarRegime[] {
+  const smoothed = smoothCloses(candles);
+  if (smoothed.length < N) return [];
+
+  const out: PerBarRegime[] = [];
+  // Walk every position in the smoothed array that has N smoothed values
+  // available behind it. smoothed[i] corresponds to candle[i + 2] because
+  // smoothCloses chops 2 from the left.
+  for (let s = N - 1; s < smoothed.length; s++) {
+    const closeNow = smoothed[s];
+    const closeNAgo = smoothed[s - (N - 1)];
+    if (closeNAgo === 0) continue;
+    const info = makeInfo(closeNow, closeNAgo, N);
+    out.push({
+      candleIndex: s + 2,
+      angleDeg: info.angleDeg,
+      bracket: info.gannBracket,
+      direction: info.direction,
+    });
+  }
+  return out;
+}
+
+// Walks the per-bar history backwards from the right edge to determine
+// the locked bracket. Locked = most recent bracket that holds for >=
+// dwellBarsRequired consecutive bars at any point in the history;
+// transitions in progress (run length < required) leave the previous
+// locked state intact while marking pendingFlip = true.
+//
+// Examples (dwellBarsRequired = 3):
+//   [R, R, R]               → locked=R, candidate=R, observed=3, no pending
+//   [R, R, R, T]            → locked=R, candidate=T, observed=1, pending
+//   [R, R, R, T, T, T]      → locked=T, candidate=T, observed=3, no pending
+//   [T, T, T, T, R, T]      → locked=T (last fully-locked run), candidate=T,
+//                             observed=1 (last R broke the run), pending=false
+//                             because candidate matches locked
+export function computeDwell(
+  history: PerBarRegime[],
+  dwellBarsRequired: number,
+): WireAngleDwell {
+  if (history.length === 0) {
+    // Defensive default — only reachable if the pass was called with
+    // insufficient candles, but runWireAnglePass returns null in that case
+    // so this branch is mostly for type completeness.
+    return {
+      lockedBracket: "NO_TRADE",
+      lockedTradePermitted: false,
+      candidateBracket: "NO_TRADE",
+      candidateBarsObserved: 0,
+      dwellBarsRequired,
+      pendingFlip: false,
+    };
+  }
+
+  const candidate = history[history.length - 1];
+
+  // Count consecutive bars at the right edge sharing the candidate bracket.
+  let observed = 1;
+  for (let i = history.length - 2; i >= 0; i--) {
+    if (history[i].bracket === candidate.bracket) observed++;
+    else break;
+  }
+
+  // Walk backwards to find the most recent run of length >= required.
+  // Start with the candidate run; if it qualifies, that's locked.
+  // Otherwise, skip it and look at the run before it.
+  let lockedBracket: GannBracket = candidate.bracket;
+  let lockedAngleDeg = candidate.angleDeg;
+
+  if (observed >= dwellBarsRequired) {
+    // Candidate run already qualifies — locked == candidate.
+    // Use the angle at the lock-bar (the bar that completed dwell, i.e.
+    // dwellBarsRequired bars back from the end of the run start).
+    const lockBarIdx = history.length - observed + (dwellBarsRequired - 1);
+    lockedAngleDeg = history[lockBarIdx].angleDeg;
+  } else {
+    // Search prior runs.
+    let i = history.length - observed - 1;
+    while (i >= 0) {
+      const runEnd = i;
+      const runBracket = history[i].bracket;
+      let runLen = 1;
+      while (i - 1 >= 0 && history[i - 1].bracket === runBracket) {
+        runLen++;
+        i--;
+      }
+      if (runLen >= dwellBarsRequired) {
+        lockedBracket = runBracket;
+        // Lock-bar is the bar that completed dwell within this run.
+        const runStart = runEnd - runLen + 1;
+        lockedAngleDeg = history[runStart + (dwellBarsRequired - 1)].angleDeg;
+        break;
+      }
+      i--;
+    }
+  }
 
   return {
-    angleDeg,
-    gannBracket: classifyBracket(angleDeg),
-    direction: classifyDirection(angleDeg),
-    tradePermitted: Math.abs(angleDeg) >= BRACKET_ACCUMULATION,
-    lookback: N,
-    smoothedClose: closeNow,
-    smoothedCloseNAgo: closeNAgo,
-    pctChange,
+    lockedBracket,
+    lockedTradePermitted: Math.abs(lockedAngleDeg) >= BRACKET_ACCUMULATION,
+    candidateBracket: candidate.bracket,
+    candidateBarsObserved: observed,
+    dwellBarsRequired,
+    pendingFlip: lockedBracket !== candidate.bracket,
   };
 }
 
@@ -187,10 +309,6 @@ export function computeAgreement(
     }
   }
 
-  // HTF verdict. Examine every TF other than primary, ignoring flats
-  // (no-opinion). If every opinionated HTF agrees with primary → "yes".
-  // If every opinionated HTF opposes → "no". Anything else (including
-  // "no HTF had data" or "primary itself is flat") → "mixed".
   let htfConfirms: WireAngleAgreement["htfConfirms"] = "mixed";
   if (primary.direction !== "flat") {
     let agreeCount = 0;
@@ -246,4 +364,24 @@ export function classifyBracket(angleDeg: number): GannBracket {
 export function classifyDirection(angleDeg: number): WireDirection {
   if (Math.abs(angleDeg) < FLAT_EPSILON_DEG) return "flat";
   return angleDeg > 0 ? "up" : "down";
+}
+
+function makeInfo(
+  closeNow: number,
+  closeNAgo: number,
+  N: number,
+): WireAnglePassInfo {
+  const pctChange = ((closeNow - closeNAgo) / closeNAgo) * 100;
+  const slope = pctChange / N;
+  const angleDeg = Math.atan(slope) * (180 / Math.PI);
+  return {
+    angleDeg,
+    gannBracket: classifyBracket(angleDeg),
+    direction: classifyDirection(angleDeg),
+    tradePermitted: Math.abs(angleDeg) >= BRACKET_ACCUMULATION,
+    lookback: N,
+    smoothedClose: closeNow,
+    smoothedCloseNAgo: closeNAgo,
+    pctChange,
+  };
 }
