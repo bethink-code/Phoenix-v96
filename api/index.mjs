@@ -5923,7 +5923,7 @@ function makePositionId(symbol, timeframe, bar) {
 
 // server/routes/zennyRoutes.ts
 var PAPER_TRADE_WATCHLIST = [
-  { symbol: "BTCUSDT", timeframe: "1H" }
+  { symbol: "BTCUSDT", timeframe: "15m" }
 ];
 var sharedProvider = null;
 function getProvider() {

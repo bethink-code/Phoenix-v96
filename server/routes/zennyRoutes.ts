@@ -19,7 +19,7 @@ import {
 
 // Pairs to tick on each cron run. Keep small in v0; extend later.
 const PAPER_TRADE_WATCHLIST: Array<{ symbol: string; timeframe: Timeframe }> = [
-  { symbol: "BTCUSDT", timeframe: "1H" },
+  { symbol: "BTCUSDT", timeframe: "15m" },
 ];
 
 // Single shared provider per process (Observer pattern — multi-tenant friendly).
