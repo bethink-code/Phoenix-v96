@@ -128,6 +128,7 @@ export interface WireAnglePassConfigClient {
   enabled: boolean;
   lookbackCandles: number;
   dwellBarsRequired: number;
+  volNormalisationK: number;
 }
 
 export interface PassConfigClient {
@@ -271,11 +272,14 @@ export interface WireAnglePassInfoClient {
   angleDeg: number;
   gannBracket: GannBracketClient;
   direction: WireDirectionClient;
-  tradePermitted: boolean;
   lookback: number;
   smoothedClose: number;
   smoothedCloseNAgo: number;
   pctChange: number;
+  // Vol-normalisation transparency — see server's WireAnglePassInfo.
+  realizedVolPct: number;
+  expectedWindowMovePct: number;
+  zScore: number;
 }
 
 // Multi-TF agreement summary — mirrors WireAngleAgreement on the server.
@@ -299,26 +303,168 @@ export interface PerBarRegimeClient {
   direction: WireDirectionClient;
 }
 
-// Locked vs candidate state (primary TF only). The decision module gates
-// on locked; UI shows candidate alongside so a pending flip is visible.
+// Locked vs candidate state (per-TF). Tradeability is a downstream
+// composite (see RegimeAssessmentResultClient); this just tracks pattern
+// stability — has the candidate held long enough to call it locked?
 export interface WireAngleDwellClient {
   lockedBracket: GannBracketClient;
-  lockedTradePermitted: boolean;
   candidateBracket: GannBracketClient;
   candidateBarsObserved: number;
   dwellBarsRequired: number;
   pendingFlip: boolean;
 }
 
-// Mirror of WireAnglePassResult on the server. Primary is the spec gate;
-// perTimeframe is sparse (TFs with too few candles are absent); dwell +
-// history are primary-TF only.
+// Per-TF regime state — info + dwell + history per analysed timeframe.
+// Each TF carries its own gate (decision module gates per-TF, not just
+// primary). Mirrors TfRegime on the server.
+export interface TfRegimeClient {
+  info: WireAnglePassInfoClient;
+  dwell: WireAngleDwellClient;
+  history: PerBarRegimeClient[];
+}
+
+// Mirror of WireAnglePassResult on the server. perTimeframe is sparse
+// (TFs without enough candles for the lookback window are absent). The
+// caller indexes by primaryTimeframe for the chart-level primary regime.
 export interface WireAnglePassResultClient {
-  primary: WireAnglePassInfoClient;
-  primaryDwell: WireAngleDwellClient;
-  primaryHistory: PerBarRegimeClient[];
-  perTimeframe: Partial<Record<Timeframe, WireAnglePassInfoClient>>;
+  perTimeframe: Partial<Record<Timeframe, TfRegimeClient>>;
   agreement: WireAngleAgreementClient;
+}
+
+// === Regime assessment (mirrors server/modules/zenny/analysis/regime/types) ==
+// The regime layer's per-playbook output. The card renders this; the
+// trading module consumes it. Each playbook gets a verdict (tradeable
+// + strength + confidence + reasons + driver breakdown).
+
+export type PlaybookClient =
+  | "accumulation"
+  | "ranging"
+  | "trending"
+  | "breakout";
+
+export interface RegimeInputClient<T> {
+  available: boolean;
+  value?: T;
+  reason?: string;
+}
+
+// Available-today input value shapes — mirror server types loosely.
+export type RegimeInputAngleValue = {
+  angleDeg: number;
+  bracket: GannBracketClient;
+  direction: WireDirectionClient;
+};
+export type RegimeInputDwellValue = {
+  lockedBracket: GannBracketClient;
+  candidateBracket: GannBracketClient;
+  observedBars: number;
+  requiredBars: number;
+  locked: boolean;
+  pendingFlip: boolean;
+};
+export type RegimeInputBoundaryDistanceValue = {
+  degreesToNearest: number;
+  centerness: number;
+};
+export type RegimeInputHtfAgreementValue = {
+  matchingDirectionCount: number;
+  totalAnalysed: number;
+  matchingDirectionRatio: number;
+  htfConfirms: "yes" | "mixed" | "no";
+  alignedTradePermittedCount: number;
+};
+export type RegimeInputArmPullValue = {
+  upperPull: number | null;
+  lowerPull: number | null;
+  dominantSide: "upper" | "lower" | "neither";
+  hasUsableArm: boolean;
+};
+export type RegimeInputPoolStrengthValue = {
+  activeNearbyCount: number;
+  weightedStrengthScore: number;
+  hasStrongNearby: boolean;
+};
+export type RegimeInputPolarityFlipsValue = { recentFlipCount: number };
+export type RegimeInputTouchQualityValue = {
+  averageTouchCount: number;
+  strongPoolCount: number;
+};
+export type RegimeInputRecencyValue = { averageRecency: number };
+export type RegimeInputFeedHealthValue = {
+  status: "healthy" | "degraded" | "unknown";
+};
+export type RegimeInputLiquidationProximityValue = {
+  nearestDistancePct: number | null;
+  withinOnePct: number;
+};
+
+// Not-yet-wired input value shapes — kept as never since the slot is
+// always { available: false } on the wire, but typed so the card can
+// render placeholder rows with the same generic component.
+export type RegimeInputUnwiredValue = unknown;
+
+// The full input contract — every signal that contributes to a playbook
+// assessment, available or placeholder.
+export interface RegimeInputsClient {
+  angle: RegimeInputClient<RegimeInputAngleValue>;
+  dwell: RegimeInputClient<RegimeInputDwellValue>;
+  boundaryDistance: RegimeInputClient<RegimeInputBoundaryDistanceValue>;
+  htfAgreement: RegimeInputClient<RegimeInputHtfAgreementValue>;
+  armPull: RegimeInputClient<RegimeInputArmPullValue>;
+  poolStrength: RegimeInputClient<RegimeInputPoolStrengthValue>;
+  polarityFlips: RegimeInputClient<RegimeInputPolarityFlipsValue>;
+  touchQuality: RegimeInputClient<RegimeInputTouchQualityValue>;
+  recency: RegimeInputClient<RegimeInputRecencyValue>;
+  feedHealth: RegimeInputClient<RegimeInputFeedHealthValue>;
+  liquidationProximity: RegimeInputClient<RegimeInputLiquidationProximityValue>;
+  spread: RegimeInputClient<RegimeInputUnwiredValue>;
+  depth: RegimeInputClient<RegimeInputUnwiredValue>;
+  ofi: RegimeInputClient<RegimeInputUnwiredValue>;
+  volumeDelta: RegimeInputClient<RegimeInputUnwiredValue>;
+  cancelPullRatio: RegimeInputClient<RegimeInputUnwiredValue>;
+  realizedVolatility: RegimeInputClient<RegimeInputUnwiredValue>;
+  tickDensity: RegimeInputClient<RegimeInputUnwiredValue>;
+  absorption: RegimeInputClient<RegimeInputUnwiredValue>;
+}
+
+export interface AssessmentDriverClient {
+  input: keyof RegimeInputsClient;
+  weight: number;
+  signal: number;
+  contribution: number;
+  available: boolean;
+}
+
+export interface PlaybookAssessmentClient {
+  playbook: PlaybookClient;
+  tradeable: boolean;
+  strength: number;
+  confidence: number;
+  reasons: string[];
+  drivers: AssessmentDriverClient[];
+}
+
+export interface TfRegimeAssessmentClient {
+  timeframe: Timeframe;
+  pattern: GannBracketClient;
+  playbooks: Record<PlaybookClient, PlaybookAssessmentClient>;
+  recommended: { playbook: PlaybookClient; strength: number } | null;
+  inputs: RegimeInputsClient;
+}
+
+export interface RegimeAssessmentResultClient {
+  primary: TfRegimeAssessmentClient;
+  perTimeframe: Partial<Record<Timeframe, TfRegimeAssessmentClient>>;
+}
+
+// One row per primary candle that has wire-angle data. Drives the
+// timeline strip — recommended-playbook colour at each bar.
+export interface BarRegimeSnapshotClient {
+  candleIndex: number;
+  candleOpenTime: number;
+  bracket: GannBracketClient;
+  recommended: { playbook: PlaybookClient; strength: number } | null;
+  playbookStrengths: Record<PlaybookClient, number>;
 }
 
 // Global pass output — non-per-level data the renderer consumes directly.
@@ -339,6 +485,8 @@ export interface AnalysisStateClient {
   pools: AnalysisPoolClient[];
   passInfo: PassInfoClient;
   arms: ExtractedArmsClient;
+  regimeAssessment: RegimeAssessmentResultClient | null;
+  regimeHistory: BarRegimeSnapshotClient[];
   depth: DepthSnapshotClient | null;
   orderFlow: OrderFlowSnapshotClient | null;
   computedAtMs: number;

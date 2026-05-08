@@ -12,6 +12,18 @@ import { useEffect, useRef, useState, useMemo } from "react";
 import type { AnalysisStateClient, LevelStrengthClient } from "./types";
 import { CHART_PAD, PRICE_PAD_FRACTION } from "./chartGeometry";
 
+// Regime strip palette — coloured by *recommended playbook* per bar, not
+// raw wire-angle bracket. Bars where no playbook is recommended (NO_TRADE
+// vetoes everything, or all playbook composites fall below threshold)
+// render blank — the chart background shows through. The strip becomes
+// "where was a playbook applicable?" rather than "what was the angle?"
+const PLAYBOOK_STRIP_COLOR: Record<string, string> = {
+  accumulation: "rgba(200,154,74,0.55)",
+  ranging: "rgba(58,141,101,0.55)",
+  trending: "rgba(29,158,117,0.55)",
+  breakout: "rgba(42,109,163,0.55)",
+};
+
 // Palette — extracted from the mockup
 const C = {
   bg: "#f8f7f4",
@@ -72,6 +84,14 @@ interface Props {
   // 0 = show all (default), 1 = only the strongest. Driven by the slider
   // in PassPlayground.
   strengthThreshold?: number;
+  // Top-edge regime strip — coloured per-candle band from the wire-angle
+  // pass's per-bar history. Tied to the REGIME column's expanded state so
+  // the chart stays clean when the operator isn't focused on regime.
+  showRegimeStrip?: boolean;
+  // Gate all level-line + level-tag + swing-marker + off-screen-indicator
+  // rendering. Default true; set to false in scoped views (REGIME/ORDERS/
+  // TRADES) where levels would be noise. The LEVELS scope sets this true.
+  showLevels?: boolean;
 }
 
 // Off-screen indicator cap — only show the N closest to the visible range
@@ -105,6 +125,8 @@ export function LeftFrameCanvas({
   showDeadPools = false,
   height: H = DEFAULT_H,
   strengthThreshold = 0,
+  showRegimeStrip = false,
+  showLevels = true,
 }: Props) {
   const wrapperRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -174,6 +196,7 @@ export function LeftFrameCanvas({
       showDeadPools,
       chartType,
       targetPoints,
+      showRegimeStrip,
     });
   }, [
     state,
@@ -182,6 +205,7 @@ export function LeftFrameCanvas({
     showDeadPools,
     chartType,
     targetPoints,
+    showRegimeStrip,
     dims,
   ]);
 
@@ -327,14 +351,16 @@ export function LeftFrameCanvas({
               data-candle-index={selectedCandleIndex}
             />
           )}
-          {partitioned.onScreen.map((level) => (
-            <LevelLine key={level.id} level={level} dims={dims} />
-          ))}
+          {showLevels &&
+            partitioned.onScreen.map((level) => (
+              <LevelLine key={level.id} level={level} dims={dims} />
+            ))}
           {/* Swing-candle markers — outline rects around the candles the
               algorithm identified as swing pivots. Red = swing high,
               green = swing low. Only shown in candles mode: on the line
               chart they would pollute the alignment view. */}
-          {chartType === "candles" &&
+          {showLevels &&
+            chartType === "candles" &&
             swingMarkerLevels.map((level) => (
               <SwingMarker
                 key={`mark-${level.id}`}
@@ -410,34 +436,39 @@ export function LeftFrameCanvas({
           style={{ pointerEvents: "none" }}
           data-codesign-layer="text-overlay"
         >
-          {partitioned.onScreen.map((level) => (
-            <LevelTag
-              key={level.id}
-              level={level}
-              dims={dims}
-              primaryTimeframe={state.primaryTimeframe}
-            />
-          ))}
-          <OffScreenStack
-            levels={partitioned.offAbove.slice(0, OFF_SCREEN_LIMIT)}
-            extraCount={Math.max(
-              0,
-              partitioned.offAbove.length - OFF_SCREEN_LIMIT,
-            )}
-            dims={dims}
-            position="above"
-            primaryTimeframe={state.primaryTimeframe}
-          />
-          <OffScreenStack
-            levels={partitioned.offBelow.slice(0, OFF_SCREEN_LIMIT)}
-            extraCount={Math.max(
-              0,
-              partitioned.offBelow.length - OFF_SCREEN_LIMIT,
-            )}
-            dims={dims}
-            position="below"
-            primaryTimeframe={state.primaryTimeframe}
-          />
+          {showLevels &&
+            partitioned.onScreen.map((level) => (
+              <LevelTag
+                key={level.id}
+                level={level}
+                dims={dims}
+                primaryTimeframe={state.primaryTimeframe}
+              />
+            ))}
+          {showLevels && (
+            <>
+              <OffScreenStack
+                levels={partitioned.offAbove.slice(0, OFF_SCREEN_LIMIT)}
+                extraCount={Math.max(
+                  0,
+                  partitioned.offAbove.length - OFF_SCREEN_LIMIT,
+                )}
+                dims={dims}
+                position="above"
+                primaryTimeframe={state.primaryTimeframe}
+              />
+              <OffScreenStack
+                levels={partitioned.offBelow.slice(0, OFF_SCREEN_LIMIT)}
+                extraCount={Math.max(
+                  0,
+                  partitioned.offBelow.length - OFF_SCREEN_LIMIT,
+                )}
+                dims={dims}
+                position="below"
+                primaryTimeframe={state.primaryTimeframe}
+              />
+            </>
+          )}
         </div>
       )}
       {/* Selected candle popup — copyable info card. Position flips left/right
@@ -899,6 +930,7 @@ function drawCanvas(
     showDeadPools: boolean;
     chartType: "candles" | "line";
     targetPoints: number;
+    showRegimeStrip: boolean;
   },
 ): void {
   ctx.fillStyle = C.bg;
@@ -1132,6 +1164,29 @@ function drawCanvas(
     ctx.fillStyle = "#ffffff";
     ctx.textAlign = "left";
     ctx.fillText(rhsLabel, rhsX + 7, rhsY + 13);
+  }
+
+  // Regime strip — top-edge band, one segment per primary candle. Each
+  // segment is coloured by the recommended playbook at that bar (from the
+  // full per-bar regime composite, not just the wire-angle bracket). Bars
+  // where no playbook is recommended render blank — chart background shows
+  // through. The first ~16 bars (smoothing + lookback) and the last 2 bars
+  // (smoothing tail) have no data and also render blank — honest about
+  // the lookback boundary rather than fabricating a value.
+  if (opts.showRegimeStrip && state.regimeHistory.length > 0) {
+    const stripTop = 6;
+    const stripHeight = 6;
+    for (const entry of state.regimeHistory) {
+      if (entry.candleIndex < 0 || entry.candleIndex >= dims.N) continue;
+      if (!entry.recommended) continue; // blank when no playbook applies
+      const cx = dims.toX(entry.candleIndex);
+      const x = cx - dims.halfWidth;
+      const w = Math.max(1, dims.candleWidth);
+      const fill = PLAYBOOK_STRIP_COLOR[entry.recommended.playbook];
+      if (!fill) continue;
+      ctx.fillStyle = fill;
+      ctx.fillRect(x, stripTop, w, stripHeight);
+    }
   }
 
   // Border

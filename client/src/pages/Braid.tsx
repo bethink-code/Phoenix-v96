@@ -22,6 +22,11 @@ import {
   getDefaultPassConfigForTimeframeClient,
 } from "@/components/braid/types";
 import { computePriceRange, CHART_PAD } from "@/components/braid/chartGeometry";
+import {
+  resolveChartView,
+  type ChartScope,
+  type ChartViewProps,
+} from "@/components/braid/chartScope";
 import type { Timeframe } from "@shared/zennyTypes";
 import {
   DEFAULT_BRAID_COUNT,
@@ -63,6 +68,7 @@ const LEGACY_DEFAULT_PASS_CONFIG: PassConfigClient = {
     enabled: true,
     lookbackCandles: 14,
     dwellBarsRequired: 3,
+    volNormalisationK: 1,
   },
 };
 
@@ -112,11 +118,33 @@ export default function Braid() {
   const [showLiqHeatmap, setShowLiqHeatmap] = usePersistedState("zenny.braid.showLiqHeatmap", true);
   const [refreshNonce, setRefreshNonce] = useState(0);
 
-  // NOW column expand states
-  const [regimeExpanded, setRegimeExpanded] = useState(false);
-  const [levelsExpanded, setLevelsExpanded] = useState(false);
-  const [ordersExpanded, setOrdersExpanded] = useState(false);
-  const [tradesExpanded, setTradesExpanded] = useState(false);
+  // NOW column expand state — single source of truth. Only ONE column can
+  // be expanded at a time; opening another collapses the current one. This
+  // keeps the chart's scope unambiguous — the chart mirrors whichever
+  // column is open, scoped to that column's purpose.
+  const [expandedTab, setExpandedTab] = useState<ChartScope>("default");
+  const toggleTab = (tab: Exclude<ChartScope, "default">) => {
+    setExpandedTab((prev) => (prev === tab ? "default" : tab));
+  };
+  const regimeExpanded = expandedTab === "regime";
+  const levelsExpanded = expandedTab === "levels";
+  const ordersExpanded = expandedTab === "orders";
+  const tradesExpanded = expandedTab === "trades";
+
+  // Default chart view — built from the operator's manual Settings toggles.
+  // When no column is expanded, this is what the chart renders. When a
+  // column expands, its scoped preset overrides this entirely.
+  const defaultChartView: ChartViewProps = {
+    showCandles: true,
+    showCurrentTf,
+    showOtherTfs,
+    showPools,
+    showSweptPools,
+    showDeadPools,
+    showLevels: true,
+    showRegimeStrip: false,
+  };
+  const chartView = resolveChartView(expandedTab, defaultChartView);
 
   // Liq overlay (separate from column expand)
   const [liqOverlayOpen, setLiqOverlayOpen] = useState(false);
@@ -444,11 +472,13 @@ export default function Braid() {
                 state={data}
                 chartType={chartType}
                 targetPoints={targetPoints}
-                showCurrentTf={showCurrentTf}
-                showOtherTfs={showOtherTfs}
-                showPools={showPools}
-                showSweptPools={showSweptPools}
-                showDeadPools={showDeadPools}
+                showCurrentTf={chartView.showCurrentTf}
+                showOtherTfs={chartView.showOtherTfs}
+                showPools={chartView.showPools}
+                showSweptPools={chartView.showSweptPools}
+                showDeadPools={chartView.showDeadPools}
+                showLevels={chartView.showLevels}
+                showRegimeStrip={chartView.showRegimeStrip}
                 height={chartHeight}
                 strengthThreshold={
                   passConfig.aggregate.enabled
@@ -487,18 +517,22 @@ export default function Braid() {
             <NowColumn
               label="REGIME"
               expanded={regimeExpanded}
-              onToggle={() => setRegimeExpanded(!regimeExpanded)}
+              onToggle={() => toggleTab("regime")}
               chartHeight={chartHeight}
               markPriceY={markPriceY}
               collapsedContent={
                 <NowBadgeCollapsed
-                  wireAngle={data.passInfo?.wireAngle?.primary ?? null}
+                  result={data.passInfo?.wireAngle ?? null}
+                  assessment={data.regimeAssessment ?? null}
+                  primaryTf={data.primaryTimeframe}
                   chartHeight={chartHeight}
                 />
               }
               expandedContent={
                 <NowBadgeExpanded
-                  wireAngle={data.passInfo?.wireAngle?.primary ?? null}
+                  result={data.passInfo?.wireAngle ?? null}
+                  assessment={data.regimeAssessment ?? null}
+                  primaryTf={data.primaryTimeframe}
                   chartHeight={chartHeight}
                 />
               }
@@ -506,7 +540,7 @@ export default function Braid() {
             <NowColumn
               label="LEVELS"
               expanded={levelsExpanded}
-              onToggle={() => setLevelsExpanded(!levelsExpanded)}
+              onToggle={() => toggleTab("levels")}
               chartHeight={chartHeight}
               markPriceY={markPriceY}
               collapsedContent={
@@ -532,9 +566,9 @@ export default function Braid() {
               expanded={ordersExpanded}
               markPriceY={markPriceY}
               onToggle={() => {
-                setOrdersExpanded(!ordersExpanded);
-                if (!ordersExpanded) setLiqOverlayOpen(true);
-                else setLiqOverlayOpen(false);
+                const willOpen = !ordersExpanded;
+                toggleTab("orders");
+                setLiqOverlayOpen(willOpen);
               }}
               chartHeight={chartHeight}
               collapsedContent={
@@ -564,7 +598,7 @@ export default function Braid() {
             <NowColumn
               label="TRADES"
               expanded={tradesExpanded}
-              onToggle={() => setTradesExpanded(!tradesExpanded)}
+              onToggle={() => toggleTab("trades")}
               chartHeight={chartHeight}
               markPriceY={markPriceY}
               collapsedContent={<TradesColumnCollapsed chartHeight={chartHeight} />}
