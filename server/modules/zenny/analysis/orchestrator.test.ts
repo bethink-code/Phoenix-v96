@@ -106,20 +106,20 @@ describe("runAnalysis (orchestrator integration)", () => {
     });
 
     expect(state.passInfo.wireAngle).toBeDefined();
-    const wa = state.passInfo.wireAngle!.primary;
+    const result = state.passInfo.wireAngle!;
+    const primary = result.perTimeframe[state.primaryTimeframe];
+    expect(primary).toBeDefined();
+    const wa = primary!.info;
     expect(typeof wa.angleDeg).toBe("number");
     expect(["NO_TRADE", "ACCUMULATION", "RANGING", "TRENDING", "BREAKOUT"]).toContain(
       wa.gannBracket,
     );
     expect(["up", "down", "flat"]).toContain(wa.direction);
-    expect(typeof wa.tradePermitted).toBe("boolean");
     expect(wa.lookback).toBeGreaterThanOrEqual(2);
 
-    // Multi-TF: every TF the orchestrator actually analysed should appear
-    // in perTimeframe (when it has enough candles). Primary is always there
-    // because we've already asserted the result is defined.
-    const result = state.passInfo.wireAngle!;
-    expect(result.perTimeframe[state.primaryTimeframe]).toBeDefined();
+    // Per-TF: every analysed TF carries its own info + dwell + history.
+    expect(primary!.dwell).toBeDefined();
+    expect(Array.isArray(primary!.history)).toBe(true);
     expect(typeof result.agreement.matchingDirectionRatio).toBe("number");
     expect(["yes", "mixed", "no"]).toContain(result.agreement.htfConfirms);
   });
@@ -240,7 +240,7 @@ describe("runAnalysis (orchestrator integration)", () => {
           brokenPenalty: 0.15,
           strengthThreshold: 0,
         },
-        wireAngle: { enabled: false, lookbackCandles: 14, dwellBarsRequired: 3 },
+        wireAngle: { enabled: false, lookbackCandles: 14, dwellBarsRequired: 3, volNormalisationK: 1 },
       },
     });
 

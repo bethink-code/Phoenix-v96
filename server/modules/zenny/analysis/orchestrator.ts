@@ -51,6 +51,12 @@ import {
   type PassConfig,
 } from "./passes/types";
 import type { LastLegSwing } from "./passes/lastLegPass";
+import { assembleRegimeAssessment } from "./regime/assembleAssessment";
+import {
+  computeRegimeHistory,
+  type BarRegimeSnapshot,
+} from "./regime/regimeHistory";
+import type { RegimeAssessmentResult } from "./regime/types";
 
 // ---------------------------------------------------------------------------
 // Output types — kept compatible with the Braid's AnalysisStateClient.
@@ -136,6 +142,15 @@ export interface AnalysisState {
   // below current price, gated by ARM_MINIMUM_PULL=15.0. Drives the
   // right-frame canvas. Both null when no qualifying pools exist.
   arms: ExtractedArms;
+  // Regime layer's per-playbook output for the trading module + the UI.
+  // Null when wire-angle pass didn't run on the primary TF (insufficient
+  // candles). See server/modules/zenny/analysis/regime/.
+  regimeAssessment: RegimeAssessmentResult | null;
+  // Per-bar regime snapshots — full playbook composite at every primary
+  // candle that has wire-angle data, so the timeline strip shows what
+  // playbook (if any) applied at each bar. Cached forever per
+  // (symbol, tf, candleOpenTime).
+  regimeHistory: BarRegimeSnapshot[];
   depth: null; // out of brief; stays null until the user asks for it back
   orderFlow: null;
   computedAtMs: number;
@@ -201,6 +216,8 @@ export async function runAnalysis(
       pools: [],
       passInfo: {},
       arms: { upper: null, lower: null, dominantSide: "neither" },
+      regimeAssessment: null,
+      regimeHistory: [],
       depth: null,
       orderFlow: null,
       computedAtMs: Date.now(),
@@ -437,6 +454,40 @@ export async function runAnalysis(
       : 0;
   const arms = extractArms({ pools: enrichedPools, currentPrice });
 
+  // 6. Regime assessment — composite per-playbook verdict for the trading
+  //    module + the UI. Reads wire-angle bracket, dwell, HTF agreement,
+  //    arms, pool structure; flags every signal not yet wired (tick
+  //    processing, market quality) as `available: false` so the card can
+  //    surface what evidence is missing without fabricating values.
+  const regimeAssessment =
+    passResult.passInfo.wireAngle !== undefined
+      ? assembleRegimeAssessment({
+          primaryTimeframe: input.primaryTimeframe,
+          wireAngle: passResult.passInfo.wireAngle,
+          arms,
+          pools: enrichedPools,
+          levels: passResult.levels,
+          currentPrice,
+          totalCandles: primaryCandles.length,
+        })
+      : null;
+
+  // 7. Per-bar regime history — runs the full playbook composite at every
+  //    primary candle for the timeline strip. Cached per
+  //    (symbol, tf, candleOpenTime); first run computes everything,
+  //    subsequent runs only compute new bars.
+  const regimeHistory =
+    passResult.passInfo.wireAngle !== undefined
+      ? computeRegimeHistory({
+          symbol: input.symbol,
+          primaryTimeframe: input.primaryTimeframe,
+          primaryCandles,
+          pools: enrichedPools,
+          levels: passResult.levels,
+          wireAngle: passResult.passInfo.wireAngle,
+        })
+      : [];
+
   return {
     symbol: input.symbol,
     primaryTimeframe: input.primaryTimeframe,
@@ -446,6 +497,8 @@ export async function runAnalysis(
     pools: enrichedPools,
     passInfo: passResult.passInfo,
     arms,
+    regimeAssessment,
+    regimeHistory,
     depth: null,
     orderFlow: null,
     computedAtMs: Date.now(),

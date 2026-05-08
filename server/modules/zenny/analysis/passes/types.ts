@@ -62,13 +62,16 @@ export interface PolarityFlipPassConfig extends PassConfigBase {
 }
 
 export interface WireAnglePassConfig extends PassConfigBase {
-  // Lookback window for the % change. Spec §1.2 fixes this at N=14 to match
-  // RSI/ROC/ADX standard. Exposed as a knob for research; production should
-  // leave it at 14.
+  // Lookback window for the % change AND for σ. N=14 matches RSI/ROC/ADX/
+  // Wilder convention. Stays constant across TFs — TF-invariance comes
+  // from volatility normalisation, not from changing N.
   lookbackCandles: number;
   // Hysteresis: candidate bracket must hold for this many bars before the
   // locked bracket flips. Default 3.
   dwellBarsRequired: number;
+  // Volatility-normalisation constant. slope = pct / (k · σ · √N).
+  // Default 1.0; lower = more sensitive, higher = more conservative.
+  volNormalisationK: number;
 }
 
 export interface AggregatePassConfig extends PassConfigBase {

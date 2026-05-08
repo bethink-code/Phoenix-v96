@@ -1,32 +1,50 @@
-// Wire angle pass — global to the primary timeframe, not per-level.
+// Wire angle pass — answers Q1 of the regime layer: which pattern are we in.
 //
-// Implements zenny_math.docx §1.2 (MeasureWireAngle), §1.3 (Gann brackets),
-// §1.5 (SmoothWire). Output lives in passInfo.wireAngle, consumed by the
-// Now badge and downstream by the pull/arm/tendency passes.
+// FORMULA (deviation from spec §1.2, 2026-05-08):
 //
-// The wire angle is the spec's first regime gate: trades are only permitted
-// when |angle| ≥ 26.25° (RANGING bracket and above). NO_TRADE and
-// ACCUMULATION suppress decisions globally.
+//   angle_deg = atan(pct_change_over_N / (k · σ · √N)) × (180/π)
 //
-//   angle_deg = atan(pct_change / N) × (180/π)
-//     pct_change = (close[0] − close[N-1]) / close[N-1] × 100
-//     N = 14 (matches RSI/ROC/ADX standard lookback per spec)
+//   pct_change = (smoothed[0] − smoothed[N-1]) / smoothed[N-1] × 100
+//   σ          = std deviation of per-bar % returns over the lookback
+//   √N · σ     = expected % move over N bars (random-walk scaling)
+//   k          = volatility-normalisation constant (default 1.0; tunable)
+//   N          = 14 (matches RSI/ROC/ADX/Wilder convention across all TFs)
+//
+// The slope is the **Z-score** of the smoothed move — "how many standard
+// deviations did price travel over N bars." With k=1 and N=14 this gives:
+//   45°   ↔ ~1σ move (a "typical" 14-bar excursion)
+//   63.75° ↔ ~2σ move (statistically uncommon — breakout territory)
+//
+// Why the spec's `pct/N` was wrong: it normalised by bar count, not by the
+// asset's typical move size. Result: 14-bar moves on Daily produced
+// reasonable angles (the calibration TF) but on 15m/4H most moves
+// collapsed below the NO_TRADE threshold because the same bar count
+// covers very different % moves on different TFs. Z-score normalisation
+// makes the degree thresholds genuinely TF-invariant. Cross-checked
+// against RSI/ADX/Wilder/linreg-slope conventions, none of which divide
+// by N — they normalise by other measures of expected move. See research
+// in this conversation 2026-05-08.
+//
+// SMOOTHING is unchanged: 5-tap [1,2,3,2,1]/9 kernel applied to closes
+// before measuring pct_change. The volatility σ is computed on the
+// raw closes (not smoothed) — smoothing the input we're trying to
+// measure variance of would understate σ.
 //
 // Brackets use |angle|; sign of angle is preserved for trade direction.
 //
 // Multi-TF: the same computation runs against every analysed timeframe in
-// the stack. The primary TF drives the spec's RegimeGuard (tradePermitted).
-// Higher timeframes contribute a confluence/conviction signal — captured
-// in `agreement` — but never act as a separate gate. The decision module
-// can read `agreement.htfConfirms` to size or weight a trade, but the
-// permit boundary stays at the primary TF.
+// the stack — including dwell + per-bar history. Each TF gets its own
+// independent gate (deviation from spec §2.9: the user overrode the
+// "primary TF is the only gate" rule on 2026-05-08 — see memory note
+// `zenny_wire_angle`). A setup is tradeable if its OWN TF's gate is open
+// AND locked. HTF agreement remains a conviction signal, not a gate input.
 //
-// Dwell / hysteresis (primary TF only): every bar in the visible window
-// has a bracket. The CANDIDATE bracket is the right-edge bar's. The LOCKED
-// bracket is the most recent bracket that has held for >= dwellBarsRequired
-// consecutive bars. Decision module reads `primaryDwell.lockedBracket` for
-// the gate; the candidate is what the operator sees as "where we're
-// heading." Stops the regime from flickering at the fixed thresholds.
+// Dwell / hysteresis: every bar in the visible window has a bracket. The
+// CANDIDATE bracket is the right-edge bar's. The LOCKED bracket is the most
+// recent bracket that has held for >= dwellBarsRequired consecutive bars.
+// Decision module reads `dwell.lockedBracket` for the gate; the candidate
+// is what the operator sees as "where we're heading." Stops the regime
+// from flickering at the fixed thresholds.
 
 import type { Candle, Timeframe } from "../../../../../shared/zennyTypes";
 import type { PassRunInput, WireAnglePassConfig } from "./types";
@@ -40,15 +58,26 @@ export type GannBracket =
 
 export type WireDirection = "up" | "down" | "flat";
 
+// The wire-angle pass answers Q1 of the regime layer: which pattern are we
+// in. Whether a setup is *tradeable* is a separate composite question
+// answered by the regime/assessment module, which combines this bracket
+// with arm pull, HTF agreement, market quality, and other inputs. Don't
+// add a `tradePermitted` flag here — the bracket itself routes; the
+// tradeable question lives downstream.
 export interface WireAnglePassInfo {
   angleDeg: number; // signed
   gannBracket: GannBracket; // based on |angle|
   direction: WireDirection; // sign of angle
-  tradePermitted: boolean; // |angle| ≥ 26.25 per spec §2.9 RegimeGuard
   lookback: number; // N
   smoothedClose: number; // smoothed close at right edge
   smoothedCloseNAgo: number; // smoothed close N-1 bars ago
   pctChange: number; // for debugging / Now badge breakdown
+  // Vol-normalisation transparency — surface the σ used in the slope so
+  // the operator can see "what counts as a typical move on this TF" and
+  // why a given pct produced a given angle.
+  realizedVolPct: number; // per-bar σ of returns, expressed as %
+  expectedWindowMovePct: number; // σ × √N — "typical" % move over N bars
+  zScore: number; // pct_change / expectedWindowMovePct — slope before atan
 }
 
 // Multi-TF agreement summary. Derived once per run from the per-TF angles
@@ -74,27 +103,31 @@ export interface PerBarRegime {
 }
 
 // Locked vs candidate state (primary TF only). The decision module gates
-// on `lockedBracket` / `lockedTradePermitted`; the operator UI shows
+// on `lockedBracket` (and the regime/assessment module decides tradeability
+// using lockedBracket + many other inputs); the operator UI shows
 // candidate alongside so they can see a flip about to happen.
 export interface WireAngleDwell {
   lockedBracket: GannBracket;
-  lockedTradePermitted: boolean;
   candidateBracket: GannBracket;
   candidateBarsObserved: number;
   dwellBarsRequired: number;
   pendingFlip: boolean;
 }
 
+// Per-TF regime state — every analysed TF carries its own info + dwell +
+// history. The decision module reads `dwell.lockedBracket` per TF and
+// gates trades independently per TF.
+export interface TfRegime {
+  info: WireAnglePassInfo;
+  dwell: WireAngleDwell;
+  history: PerBarRegime[];
+}
+
 export interface WireAnglePassResult {
-  primary: WireAnglePassInfo;
-  primaryDwell: WireAngleDwell;
-  // Aligned to primary candle indices — sparse on the left edge.
-  primaryHistory: PerBarRegime[];
-  // Per-TF candidate classification. HTF dwell is intentionally NOT
-  // computed: HTFs are a conviction signal, not a gate, so flicker on
-  // higher TFs is harmless and the cost of dwell-tracking everywhere is
-  // wasted complexity.
-  perTimeframe: Partial<Record<Timeframe, WireAnglePassInfo>>;
+  // Sparse — TFs without enough candles for the lookback window are
+  // absent. Caller indexes by `primaryTimeframe` for the chart-level
+  // primary regime, or iterates the entries for cross-TF views.
+  perTimeframe: Partial<Record<Timeframe, TfRegime>>;
   agreement: WireAngleAgreement;
 }
 
@@ -124,27 +157,32 @@ export function runWireAnglePass(
 
   const N = Math.max(2, Math.floor(config.lookbackCandles));
   const dwellBarsRequired = Math.max(1, Math.floor(config.dwellBarsRequired));
+  const k = config.volNormalisationK > 0 ? config.volNormalisationK : 1;
 
-  const primary = computeAngleFor(input.primaryCandles, N);
-  if (primary === null) return null;
-
-  const perTimeframe: Partial<Record<Timeframe, WireAnglePassInfo>> = {};
+  // Every TF computes its own regime independently — info, history, dwell.
+  // TFs without enough candles for the lookback window are simply absent
+  // from the output; downstream code treats absent as "no regime data."
+  const perTimeframe: Partial<Record<Timeframe, TfRegime>> = {};
   for (const [tf, candles] of input.perTfCandles) {
-    const info =
-      tf === input.primaryTimeframe ? primary : computeAngleFor(candles, N);
-    if (info !== null) perTimeframe[tf] = info;
+    const info = computeAngleFor(candles, N, k);
+    if (info === null) continue;
+    const history = computePerBarRegime(candles, N, k);
+    const dwell = computeDwell(history, dwellBarsRequired);
+    perTimeframe[tf] = { info, dwell, history };
   }
 
-  const primaryHistory = computePerBarRegime(input.primaryCandles, N);
-  const primaryDwell = computeDwell(primaryHistory, dwellBarsRequired);
+  // Primary TF must have computed for the regime card to render. If it
+  // didn't (insufficient candles on the primary), bail — there's nothing
+  // sensible to show.
+  if (!perTimeframe[input.primaryTimeframe]) return null;
 
   const agreement = computeAgreement(
-    primary,
+    perTimeframe[input.primaryTimeframe]!.info,
     input.primaryTimeframe,
     perTimeframe,
   );
 
-  return { primary, primaryDwell, primaryHistory, perTimeframe, agreement };
+  return { perTimeframe, agreement };
 }
 
 // Pure helper: candles + lookback → WireAnglePassInfo or null when there
@@ -153,6 +191,7 @@ export function runWireAnglePass(
 export function computeAngleFor(
   candles: Candle[],
   N: number,
+  k = 1,
 ): WireAnglePassInfo | null {
   const smoothed = smoothCloses(candles);
   if (smoothed.length < N) return null;
@@ -161,7 +200,11 @@ export function computeAngleFor(
   const closeNAgo = smoothed[smoothed.length - N];
   if (closeNAgo === 0) return null;
 
-  return makeInfo(closeNow, closeNAgo, N);
+  // Volatility from RAW closes over the same N-bar window — smoothing the
+  // input we're measuring variance of would understate σ.
+  const volPct = computeRealizedVolPct(candles, N);
+
+  return makeInfo(closeNow, closeNAgo, N, volPct, k);
 }
 
 // Per-bar regime history for the primary TF. Computes an angle/bracket at
@@ -174,6 +217,7 @@ export function computeAngleFor(
 export function computePerBarRegime(
   candles: Candle[],
   N: number,
+  k = 1,
 ): PerBarRegime[] {
   const smoothed = smoothCloses(candles);
   if (smoothed.length < N) return [];
@@ -182,13 +226,20 @@ export function computePerBarRegime(
   // Walk every position in the smoothed array that has N smoothed values
   // available behind it. smoothed[i] corresponds to candle[i + 2] because
   // smoothCloses chops 2 from the left.
+  //
+  // Volatility for bar i is computed from the RAW close window ending at
+  // candle[s + 2] (so as-of-bar-i, not look-ahead). This makes the
+  // per-bar regime an honest "what would the gate have said at this bar."
   for (let s = N - 1; s < smoothed.length; s++) {
     const closeNow = smoothed[s];
     const closeNAgo = smoothed[s - (N - 1)];
     if (closeNAgo === 0) continue;
-    const info = makeInfo(closeNow, closeNAgo, N);
+    const candleIndex = s + 2;
+    const candlesUpToBar = candles.slice(0, candleIndex + 1);
+    const volPct = computeRealizedVolPct(candlesUpToBar, N);
+    const info = makeInfo(closeNow, closeNAgo, N, volPct, k);
     out.push({
-      candleIndex: s + 2,
+      candleIndex,
       angleDeg: info.angleDeg,
       bracket: info.gannBracket,
       direction: info.direction,
@@ -220,7 +271,6 @@ export function computeDwell(
     // so this branch is mostly for type completeness.
     return {
       lockedBracket: "NO_TRADE",
-      lockedTradePermitted: false,
       candidateBracket: "NO_TRADE",
       candidateBarsObserved: 0,
       dwellBarsRequired,
@@ -241,19 +291,11 @@ export function computeDwell(
   // Start with the candidate run; if it qualifies, that's locked.
   // Otherwise, skip it and look at the run before it.
   let lockedBracket: GannBracket = candidate.bracket;
-  let lockedAngleDeg = candidate.angleDeg;
 
-  if (observed >= dwellBarsRequired) {
-    // Candidate run already qualifies — locked == candidate.
-    // Use the angle at the lock-bar (the bar that completed dwell, i.e.
-    // dwellBarsRequired bars back from the end of the run start).
-    const lockBarIdx = history.length - observed + (dwellBarsRequired - 1);
-    lockedAngleDeg = history[lockBarIdx].angleDeg;
-  } else {
+  if (observed < dwellBarsRequired) {
     // Search prior runs.
     let i = history.length - observed - 1;
     while (i >= 0) {
-      const runEnd = i;
       const runBracket = history[i].bracket;
       let runLen = 1;
       while (i - 1 >= 0 && history[i - 1].bracket === runBracket) {
@@ -262,9 +304,6 @@ export function computeDwell(
       }
       if (runLen >= dwellBarsRequired) {
         lockedBracket = runBracket;
-        // Lock-bar is the bar that completed dwell within this run.
-        const runStart = runEnd - runLen + 1;
-        lockedAngleDeg = history[runStart + (dwellBarsRequired - 1)].angleDeg;
         break;
       }
       i--;
@@ -273,7 +312,6 @@ export function computeDwell(
 
   return {
     lockedBracket,
-    lockedTradePermitted: Math.abs(lockedAngleDeg) >= BRACKET_ACCUMULATION,
     candidateBracket: candidate.bracket,
     candidateBarsObserved: observed,
     dwellBarsRequired,
@@ -284,23 +322,32 @@ export function computeDwell(
 export function computeAgreement(
   primary: WireAnglePassInfo,
   primaryTf: Timeframe,
-  perTimeframe: Partial<Record<Timeframe, WireAnglePassInfo>>,
+  perTimeframe: Partial<Record<Timeframe, TfRegime>>,
 ): WireAngleAgreement {
-  const entries = Object.entries(perTimeframe) as Array<
-    [Timeframe, WireAnglePassInfo]
-  >;
+  const entries = Object.entries(perTimeframe) as Array<[Timeframe, TfRegime]>;
   const totalAnalysed = entries.length;
 
   let matchingDirectionCount = 0;
   let alignedTradePermittedCount = 0;
   let weakestAlignedBracket: GannBracket | null = null;
 
-  for (const [, info] of entries) {
+  for (const [, regime] of entries) {
+    const info = regime.info;
     if (info.direction === "flat" || primary.direction === "flat") continue;
     if (info.direction !== primary.direction) continue;
 
     matchingDirectionCount += 1;
-    if (info.tradePermitted) alignedTradePermittedCount += 1;
+    // "Trade-strength bracket" = RANGING/TRENDING/BREAKOUT. Kept as a count
+    // of aligned TFs at trade-strength angles so the regime/assessment
+    // module can use it as a conviction multiplier; the regime layer no
+    // longer treats this as a permit/block decision.
+    if (
+      info.gannBracket === "RANGING" ||
+      info.gannBracket === "TRENDING" ||
+      info.gannBracket === "BREAKOUT"
+    ) {
+      alignedTradePermittedCount += 1;
+    }
     if (
       weakestAlignedBracket === null ||
       BRACKET_RANK[info.gannBracket] < BRACKET_RANK[weakestAlignedBracket]
@@ -313,10 +360,10 @@ export function computeAgreement(
   if (primary.direction !== "flat") {
     let agreeCount = 0;
     let opposeCount = 0;
-    for (const [tf, info] of entries) {
+    for (const [tf, regime] of entries) {
       if (tf === primaryTf) continue;
-      if (info.direction === "flat") continue;
-      if (info.direction === primary.direction) agreeCount += 1;
+      if (regime.info.direction === "flat") continue;
+      if (regime.info.direction === primary.direction) agreeCount += 1;
       else opposeCount += 1;
     }
     if (agreeCount > 0 && opposeCount === 0) htfConfirms = "yes";
@@ -370,18 +417,58 @@ function makeInfo(
   closeNow: number,
   closeNAgo: number,
   N: number,
+  volPct: number,
+  k: number,
 ): WireAnglePassInfo {
   const pctChange = ((closeNow - closeNAgo) / closeNAgo) * 100;
-  const slope = pctChange / N;
-  const angleDeg = Math.atan(slope) * (180 / Math.PI);
+  // Expected % move over N bars assuming random-walk scaling: σ × √N.
+  // This is what we normalise against — the slope becomes the Z-score
+  // of the actual move vs the expected move size on this TF.
+  const expectedWindowMovePct = volPct * Math.sqrt(N);
+  // Floor the denominator so a flat candle series (σ=0) doesn't divide
+  // by zero. A tiny floor (0.01% per bar × √14 ≈ 0.037%) means flat
+  // series produce NO_TRADE — the right answer.
+  const denom = Math.max(0.01, k * expectedWindowMovePct);
+  const zScore = pctChange / denom;
+  const angleDeg = Math.atan(zScore) * (180 / Math.PI);
   return {
     angleDeg,
     gannBracket: classifyBracket(angleDeg),
     direction: classifyDirection(angleDeg),
-    tradePermitted: Math.abs(angleDeg) >= BRACKET_ACCUMULATION,
     lookback: N,
     smoothedClose: closeNow,
     smoothedCloseNAgo: closeNAgo,
     pctChange,
+    realizedVolPct: volPct,
+    expectedWindowMovePct,
+    zScore,
   };
+}
+
+// Realized volatility: standard deviation of per-bar % returns over the
+// trailing N bars. Expressed as % (i.e., a typical 1% per-bar move shows
+// as 1.0, not 0.01). Computed on RAW closes — smoothing the input we're
+// trying to measure variance of would understate σ.
+//
+// Returns 0 when there isn't enough data — the caller treats that as
+// "no volatility info, fall back to floor in the slope denominator."
+export function computeRealizedVolPct(
+  candles: Candle[],
+  lookback: number,
+): number {
+  if (candles.length < lookback + 1) return 0;
+  const startIdx = candles.length - lookback;
+  const returns: number[] = [];
+  for (let i = startIdx; i < candles.length; i++) {
+    if (i === 0) continue;
+    const prev = candles[i - 1].close;
+    const curr = candles[i].close;
+    if (prev === 0) continue;
+    returns.push(((curr - prev) / prev) * 100);
+  }
+  if (returns.length === 0) return 0;
+  const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
+  const variance =
+    returns.reduce((sum, r) => sum + (r - mean) ** 2, 0) / returns.length;
+  return Math.sqrt(variance);
 }

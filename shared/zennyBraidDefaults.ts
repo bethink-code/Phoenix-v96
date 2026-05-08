@@ -32,6 +32,13 @@ export interface BraidWireAnglePassConfig {
   // 14°/26.25°/45°/63.75° boundaries. Candidate updates every tick;
   // locked only changes when the dwell condition is met.
   dwellBarsRequired: number;
+  // Volatility-normalisation constant. The slope formula is
+  //   slope = pct_change / (k · σ · √N)
+  // so the angle is the Z-score of the move vs the TF's typical N-bar
+  // excursion. k=1 means 45° fires at ~1σ moves, 63.75° at ~2σ. Lower k
+  // makes the gate more sensitive (brackets fire more often); higher k
+  // makes it more conservative.
+  volNormalisationK: number;
 }
 
 export interface BraidAggregatePassConfig {
@@ -173,12 +180,15 @@ function makeLiquidityPoolPassConfig(
       // Reset/default is a recovery view: score everything, hide nothing.
       strengthThreshold: 0,
     },
-    // Spec §1.2 fixes the wire-angle lookback at 14. Production should not
-    // change this; the knob exists only for research.
+    // N=14 stays constant across TFs (matches RSI/ADX/Wilder convention).
+    // The TF-invariance comes from volatility normalisation in the slope
+    // formula, not from per-TF N. k=1 sets RANGING/TRENDING/BREAKOUT
+    // thresholds at standard statistical multiples of σ.
     wireAngle: {
       enabled: true,
       lookbackCandles: 14,
       dwellBarsRequired: 3,
+      volNormalisationK: 1,
     },
   };
 }
