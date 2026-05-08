@@ -254,23 +254,55 @@ export function extractRecency(
 // operator can see what evidence is missing without the regime pretending
 // to know.
 
-export function extractFeedHealth(): RegimeInput<FeedHealthValue> {
-  // Today: continuity scheduler runs but its state isn't surfaced into
-  // AnalysisState. Until that wiring lands, mark unknown — neither healthy
-  // nor degraded, just not visible.
-  return {
-    available: false,
-    reason: "feed health not surfaced into AnalysisState yet",
-  };
+export function extractFeedHealth(
+  // When present (live assessment for the present moment), the orchestrator
+  // computed this from candle freshness on the TF being assessed. When
+  // absent (per-bar regime history — we can't backfill historical feed
+  // status), the input lands as unavailable.
+  health?: { status: "healthy" | "degraded" | "unknown" } | null,
+): RegimeInput<FeedHealthValue> {
+  if (!health) {
+    return {
+      available: false,
+      reason: "feed health not available for this bar (no historical record)",
+    };
+  }
+  return { available: true, value: { status: health.status } };
 }
 
-export function extractLiquidationProximity(): RegimeInput<LiquidationProximityValue> {
-  // orderFlow is hard-null in the current orchestrator output. When the
-  // OrderFlowColumn data feeds back in, this will compute proximity from
-  // orderFlow.liqLevels.
+export function extractLiquidationProximity(
+  // Optional events list — fetched by the route layer from
+  // binance_liquidations and threaded through analysis input. When
+  // absent (per-bar history), the input lands as unavailable since
+  // historical proximity-as-of-bar isn't yet derivable from the
+  // event timeline (would need full event replay per bar).
+  events: Array<{ price: number; usdValue: number }> | undefined,
+  currentPrice: number | undefined,
+): RegimeInput<LiquidationProximityValue> {
+  if (!events || events.length === 0 || !currentPrice || currentPrice <= 0) {
+    return {
+      available: false,
+      reason:
+        events && events.length === 0
+          ? "no recent liquidation events for this symbol"
+          : "liquidations not provided to assessment",
+    };
+  }
+  let nearestDistancePct = Infinity;
+  let withinOnePct = 0;
+  for (const e of events) {
+    const distancePct =
+      (Math.abs(e.price - currentPrice) / currentPrice) * 100;
+    if (distancePct < nearestDistancePct) nearestDistancePct = distancePct;
+    if (distancePct <= 1) withinOnePct += e.usdValue;
+  }
   return {
-    available: false,
-    reason: "orderFlow not in AnalysisState (Coinglass / Hyblock liq feed)",
+    available: true,
+    value: {
+      nearestDistancePct:
+        nearestDistancePct === Infinity ? null : nearestDistancePct,
+      withinOnePct,
+    },
   };
 }
 

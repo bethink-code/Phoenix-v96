@@ -511,6 +511,7 @@ describe("computeDwell", () => {
   function bars(seq: Array<[GannBracket, number]>): PerBarRegime[] {
     return seq.map(([bracket, angleDeg], i) => ({
       candleIndex: 100 + i,
+      candleOpenTime: 1_700_000_000_000 + i * 60_000,
       angleDeg,
       bracket,
       direction:

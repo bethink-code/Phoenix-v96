@@ -21,6 +21,20 @@ export const DEFAULT_TIMEFRAME_STACK: Timeframe[] = [
 // into confluence count.
 export const CONFLUENCE_TIMEFRAMES: Timeframe[] = ["4H", "D", "W", "M"];
 
+// Expected duration of one bar on each timeframe, in milliseconds.
+// Used for candle-freshness checks (feedHealth): if the most recent
+// candle's openTime is older than ~2× this duration, the feed is
+// considered degraded. M is approximated at 30 days.
+export const TF_BAR_DURATION_MS: Record<Timeframe, number> = {
+  "15m": 15 * 60 * 1000,
+  "1H": 60 * 60 * 1000,
+  "4H": 4 * 60 * 60 * 1000,
+  "12H": 12 * 60 * 60 * 1000,
+  D: 24 * 60 * 60 * 1000,
+  W: 7 * 24 * 60 * 60 * 1000,
+  M: 30 * 24 * 60 * 60 * 1000,
+};
+
 export interface Candle {
   openTime: number; // ms epoch, candle open
   closeTime: number; // ms epoch, candle close (exclusive)

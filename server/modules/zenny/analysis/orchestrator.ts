@@ -16,7 +16,10 @@
 // detection, return the AnalysisState the route serializes.
 
 import type { Candle, Timeframe } from "../../../../shared/zennyTypes";
-import { DEFAULT_TIMEFRAME_STACK } from "../../../../shared/zennyTypes";
+import {
+  DEFAULT_TIMEFRAME_STACK,
+  TF_BAR_DURATION_MS,
+} from "../../../../shared/zennyTypes";
 import type { MarketDataProvider } from "../infrastructure/providers/providerInterface";
 import { getCandles } from "./data/getCandles";
 import {
@@ -176,6 +179,20 @@ export interface AnalysisState {
   // every analysed TF. Cached forever per (symbol, tf, candleOpenTime).
   // Lets any TF's chart render its own timeline strip without a refetch.
   regimeHistoryPerTimeframe: Partial<Record<Timeframe, BarRegimeSnapshot[]>>;
+  // Per-TF feed health — candle freshness check. Each TF marks itself
+  // healthy when the last candle is within ~2 expected bar durations of
+  // the analysis time, degraded otherwise. Surfaced into the regime
+  // assessment's feedHealth input and into the card's input rows.
+  feedHealthPerTimeframe: Partial<
+    Record<
+      Timeframe,
+      {
+        status: "healthy" | "degraded" | "unknown";
+        lastCandleAgeMs: number;
+        expectedBarMs: number;
+      }
+    >
+  >;
   depth: null; // out of brief; stays null until the user asks for it back
   orderFlow: null;
   computedAtMs: number;
@@ -194,6 +211,10 @@ export interface RunAnalysisInput {
   timeframeStack?: Timeframe[];
   pivotN?: number; // bars on each side of swing (default 2 → 5-bar swing)
   passConfig?: PassConfig; // overrides DEFAULT_PASS_CONFIG
+  // Optional recent liquidation events for the symbol — fetched by the
+  // route layer from binance_liquidations and threaded in. Used by the
+  // regime layer's liquidationProximity input. Absent → input unavailable.
+  liquidations?: Array<{ price: number; usdValue: number }>;
 }
 
 export async function runAnalysis(
@@ -245,6 +266,7 @@ export async function runAnalysis(
       regimeAssessment: null,
       regimeHistory: [],
       regimeHistoryPerTimeframe: {},
+      feedHealthPerTimeframe: {},
       depth: null,
       orderFlow: null,
       computedAtMs: Date.now(),
@@ -476,12 +498,36 @@ export async function runAnalysis(
   const regimeHistoryPerTimeframe: Partial<
     Record<Timeframe, BarRegimeSnapshot[]>
   > = {};
+  const feedHealthPerTimeframe: Partial<
+    Record<
+      Timeframe,
+      {
+        status: "healthy" | "degraded" | "unknown";
+        lastCandleAgeMs: number;
+        expectedBarMs: number;
+      }
+    >
+  > = {};
+  const nowMs = Date.now();
 
   for (const tf of analysedTfs) {
     const tfCandles = perTfCandles.get(tf);
     if (!tfCandles || tfCandles.length === 0) continue;
     const tfPrice = tfCandles[tfCandles.length - 1].close;
     if (tfPrice <= 0) continue;
+
+    // Feed health for this TF — last candle within 2× expected bar
+    // duration is "healthy"; older is "degraded". Captures both stale
+    // feeds and gappy feeds (a missing candle pushes the last-seen
+    // openTime further back than expected).
+    const lastOpenTime = tfCandles[tfCandles.length - 1].openTime;
+    const lastCandleAgeMs = Math.max(0, nowMs - lastOpenTime);
+    const expectedBarMs = TF_BAR_DURATION_MS[tf];
+    feedHealthPerTimeframe[tf] = {
+      status: lastCandleAgeMs <= expectedBarMs * 2 ? "healthy" : "degraded",
+      lastCandleAgeMs,
+      expectedBarMs,
+    };
 
     // Pools at or above this TF's rank. A 4H trader doesn't care about
     // 15m / 1H pools (sub-resolution); a Daily trader cares about D/W/M
@@ -520,6 +566,8 @@ export async function runAnalysis(
         levels: passResult.levels,
         currentPrice: tfPrice,
         totalCandles: tfCandles.length,
+        feedHealth: feedHealthPerTimeframe[tf],
+        liquidations: input.liquidations,
       });
       if (tfAssessment) {
         regimeAssessmentPerTimeframe[tf] = tfAssessment.primary;
@@ -573,6 +621,7 @@ export async function runAnalysis(
     regimeAssessment,
     regimeHistory: primaryRegimeHistory,
     regimeHistoryPerTimeframe,
+    feedHealthPerTimeframe,
     depth: null,
     orderFlow: null,
     computedAtMs: Date.now(),

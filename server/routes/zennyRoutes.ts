@@ -7,6 +7,7 @@ import { isAuthenticated } from "../auth";
 import { BinanceProvider } from "../modules/zenny/infrastructure/providers/binanceProvider";
 import { DEFAULT_INFRASTRUCTURE_CONFIG } from "../modules/zenny/infrastructure/types";
 import { runAnalysis } from "../modules/zenny/analysis/orchestrator";
+import { fetchRecentLiquidations } from "../modules/zenny/analysis/data/fetchRecentLiquidations";
 import type { PassConfig } from "../modules/zenny/analysis/passes/types";
 import type { Timeframe } from "../../shared/zennyTypes";
 import { getDefaultBraidCountForTimeframe } from "../../shared/zennyBraidDefaults";
@@ -74,12 +75,23 @@ export function registerZennyRoutes(app: Express) {
         }
 
         const provider = getProvider();
+        // Fetch recent liquidations alongside analysis so the regime
+        // layer's liquidationProximity input can light up. Failure here
+        // shouldn't fail the whole analysis — the regime input will just
+        // mark itself unavailable if events don't show up.
+        let liquidations: Array<{ price: number; usdValue: number }> = [];
+        try {
+          liquidations = await fetchRecentLiquidations({ symbol });
+        } catch (err) {
+          console.error("[zenny] fetchRecentLiquidations failed", err);
+        }
         const state = await runAnalysis({
           provider,
           symbol,
           primaryTimeframe: timeframe,
           candleCountPerTf: count,
           passConfig,
+          liquidations,
         });
 
         res.json(state);

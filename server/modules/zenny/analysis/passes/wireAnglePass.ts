@@ -95,8 +95,14 @@ export interface WireAngleAgreement {
 // PRIMARY-TF candle index that has enough lookback to compute an angle.
 // Bars before the first viable index simply don't appear — the renderer
 // treats them as "no data" (no strip drawn) and leaves the chart blank.
+//
+// candleOpenTime is the openTime of the candle this entry corresponds to
+// (on whichever TF the history was computed for). Used by regime-history
+// computation to align HTF bars to primary timestamps for as-of-bar HTF
+// agreement.
 export interface PerBarRegime {
   candleIndex: number;
+  candleOpenTime: number;
   angleDeg: number;
   bracket: GannBracket;
   direction: WireDirection;
@@ -240,6 +246,7 @@ export function computePerBarRegime(
     const info = makeInfo(closeNow, closeNAgo, N, volPct, k);
     out.push({
       candleIndex,
+      candleOpenTime: candles[candleIndex].openTime,
       angleDeg: info.angleDeg,
       bracket: info.gannBracket,
       direction: info.direction,

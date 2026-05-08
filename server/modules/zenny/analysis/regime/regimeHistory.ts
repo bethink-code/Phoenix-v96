@@ -14,14 +14,16 @@
 //
 // Pure function. No DB. No side effects beyond the in-memory cache.
 //
-// v1 simplifications (flagged for future tightening):
-//   - HTF agreement uses the current snapshot for every historical bar.
-//     Doing it as-of-bar-i would require per-TF candle openTime arrays
-//     so we can find each TF's bracket at primary[i].openTime. Listed
-//     in the rebuild requirements as a follow-up.
-//   - polarityFlips count uses current snapshot (level passes only run
-//     once at right edge).
-//   - feedHealth + liquidationProximity remain unavailable historically.
+// As-of-bar inputs (made honest 2026-05-08):
+//   - angle / dwell / boundary distance: per-bar
+//   - HTF agreement: now per-bar via per-TF candleOpenTime lookup
+//   - pool strength / arms / pull / touch quality / recency: per-bar
+//
+// Remaining v1 simplifications:
+//   - polarityFlips count uses current snapshot — pass needs to expose
+//     per-level flip-confirmation candle index for true as-of-bar.
+//   - feedHealth + liquidationProximity stay unavailable historically
+//     (no historical record / no event replay).
 
 import type { Candle, Timeframe } from "../../../../../shared/zennyTypes";
 import {
@@ -40,7 +42,9 @@ import type {
   GannBracket,
   PerBarRegime,
   TfRegime,
+  WireAngleAgreement,
   WireAnglePassResult,
+  WireDirection,
 } from "../passes/wireAnglePass";
 import { computeDwell } from "../passes/wireAnglePass";
 import {
@@ -181,14 +185,36 @@ function computeAtBar(
       ...primaryRegime,
       info: { ...primaryRegime.info, angleDeg: histEntry.angleDeg, gannBracket: histEntry.bracket, direction: histEntry.direction },
     }),
-    htfAgreement: extractHtfAgreement(ctx.wireAngle.agreement),
+    // As-of-bar HTF agreement: for each TF in the wireAngle map, find its
+    // history entry whose candleOpenTime is the latest ≤ this bar's
+    // primary openTime. That's the bracket / direction the TF was in at
+    // this point in time. Reconstructs an agreement object the extractor
+    // can format the same way as the present-moment one.
+    htfAgreement: extractHtfAgreement(
+      computeAgreementAtTime(
+        ctx.wireAngle,
+        ctx.primaryTimeframe,
+        candleOpenTime,
+      ),
+    ),
     armPull: extractArmPull(armsAtI),
     poolStrength: extractPoolStrength(enrichedAtI, priceAtI),
+    // V1 LIMITATION: polarityFlip pass currently emits a single
+    // boolean per level (flipped at right edge); it doesn't carry the
+    // confirmation-candle index needed to derive a per-bar count.
+    // Until the pass is extended, the historical count uses the
+    // present-snapshot value — a small bias for older bars (none of
+    // their levels have flipped yet but we count them as if they have).
+    // Polarity-flips weight ~6-8% across the playbooks so the impact
+    // on strength is bounded. Tighten when the pass exposes flip indices.
     polarityFlips: extractPolarityFlips(ctx.levels),
     touchQuality: extractTouchQuality(enrichedAtI, priceAtI),
     recency: extractRecency(enrichedAtI, priceAtI, candlesUpToI.length),
     feedHealth: extractFeedHealth(),
-    liquidationProximity: extractLiquidationProximity(),
+    // Per-bar liquidation proximity isn't derivable from a current
+    // events list — would need event replay as-of-each-bar. Pass undefined
+    // so the input lands as unavailable for historical bars.
+    liquidationProximity: extractLiquidationProximity(undefined, undefined),
     spread: extractSpread(),
     depth: extractDepth(),
     ofi: extractOFI(),
@@ -224,6 +250,116 @@ function computeAtBar(
 }
 
 // === Helpers ===============================================================
+
+// Reconstruct a WireAngleAgreement object as it would have looked at a
+// given primary timestamp. For each TF in the wireAngle map, walk its
+// history backwards to find the latest entry with candleOpenTime ≤ T;
+// use that entry's bracket + direction as the TF's state at time T. Then
+// run the same agreement math the live computeAgreement uses. Result is
+// passed straight to extractHtfAgreement so the regime input shape is
+// identical to live; only the underlying counts shift bar-by-bar.
+function computeAgreementAtTime(
+  wireAngle: WireAnglePassResult,
+  primaryTf: Timeframe,
+  primaryOpenTimeMs: number,
+): WireAngleAgreement {
+  const entries = Object.entries(wireAngle.perTimeframe) as Array<
+    [Timeframe, NonNullable<WireAnglePassResult["perTimeframe"][Timeframe]>]
+  >;
+
+  // For each TF, find its bracket/direction at time T.
+  type Snapshot = { tf: Timeframe; bracket: GannBracket; direction: WireDirection };
+  const snapshots: Snapshot[] = [];
+  for (const [tf, regime] of entries) {
+    let chosen: PerBarRegime | null = null;
+    // Walk backwards: history is in increasing candleIndex order so the
+    // last entry with openTime ≤ T is the most recent one we want.
+    for (let i = regime.history.length - 1; i >= 0; i--) {
+      const h = regime.history[i];
+      if (h.candleOpenTime <= primaryOpenTimeMs) {
+        chosen = h;
+        break;
+      }
+    }
+    if (chosen) {
+      snapshots.push({
+        tf,
+        bracket: chosen.bracket,
+        direction: chosen.direction,
+      });
+    }
+  }
+
+  // Find the primary's snapshot — needed to count "matching direction"
+  // and to drive the htfConfirms verdict.
+  const primarySnap = snapshots.find((s) => s.tf === primaryTf);
+  const totalAnalysed = snapshots.length;
+
+  if (!primarySnap) {
+    return {
+      matchingDirectionCount: 0,
+      totalAnalysed,
+      matchingDirectionRatio: 0,
+      alignedTradePermittedCount: 0,
+      weakestAlignedBracket: null,
+      htfConfirms: "mixed",
+    };
+  }
+
+  const TRADE_STRENGTH_BRACKETS = new Set<GannBracket>([
+    "RANGING",
+    "TRENDING",
+    "BREAKOUT",
+  ]);
+  const BRACKET_RANK_LOCAL: Record<GannBracket, number> = {
+    NO_TRADE: 0,
+    ACCUMULATION: 1,
+    RANGING: 2,
+    TRENDING: 3,
+    BREAKOUT: 4,
+  };
+
+  let matchingDirectionCount = 0;
+  let alignedTradePermittedCount = 0;
+  let weakestAlignedBracket: GannBracket | null = null;
+  for (const s of snapshots) {
+    if (s.direction === "flat" || primarySnap.direction === "flat") continue;
+    if (s.direction !== primarySnap.direction) continue;
+    matchingDirectionCount += 1;
+    if (TRADE_STRENGTH_BRACKETS.has(s.bracket))
+      alignedTradePermittedCount += 1;
+    if (
+      weakestAlignedBracket === null ||
+      BRACKET_RANK_LOCAL[s.bracket] < BRACKET_RANK_LOCAL[weakestAlignedBracket]
+    ) {
+      weakestAlignedBracket = s.bracket;
+    }
+  }
+
+  let htfConfirms: WireAngleAgreement["htfConfirms"] = "mixed";
+  if (primarySnap.direction !== "flat") {
+    let agreeCount = 0;
+    let opposeCount = 0;
+    for (const s of snapshots) {
+      if (s.tf === primaryTf) continue;
+      if (s.direction === "flat") continue;
+      if (s.direction === primarySnap.direction) agreeCount += 1;
+      else opposeCount += 1;
+    }
+    if (agreeCount > 0 && opposeCount === 0) htfConfirms = "yes";
+    else if (opposeCount > 0 && agreeCount === 0) htfConfirms = "no";
+  }
+
+  return {
+    matchingDirectionCount,
+    totalAnalysed,
+    matchingDirectionRatio:
+      totalAnalysed === 0 ? 0 : matchingDirectionCount / totalAnalysed,
+    alignedTradePermittedCount,
+    weakestAlignedBracket,
+    htfConfirms,
+  };
+}
 
 function filterPoolsAliveAt(
   pools: AnalysisPool[],

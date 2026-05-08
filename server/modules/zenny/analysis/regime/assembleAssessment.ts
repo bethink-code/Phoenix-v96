@@ -61,6 +61,16 @@ export interface AssembleInput {
   levels: AnalysisLevel[];
   currentPrice: number;
   totalCandles: number;
+  // Optional feed-health snapshot for this TF. Wired in 2026-05-08 — when
+  // present the regime input becomes available; when absent (back-compat)
+  // it falls back to the placeholder.
+  feedHealth?: {
+    status: "healthy" | "degraded" | "unknown";
+  };
+  // Optional recent-liquidation events. Fetched by the route layer from
+  // binance_liquidations and threaded in. Absent → liquidationProximity
+  // input lands as unavailable.
+  liquidations?: Array<{ price: number; usdValue: number }>;
 }
 
 export function assembleRegimeAssessment(
@@ -110,8 +120,11 @@ function extractInputs(
     polarityFlips: extractPolarityFlips(ctx.levels),
     touchQuality: extractTouchQuality(ctx.pools, ctx.currentPrice),
     recency: extractRecency(ctx.pools, ctx.currentPrice, ctx.totalCandles),
-    feedHealth: extractFeedHealth(),
-    liquidationProximity: extractLiquidationProximity(),
+    feedHealth: extractFeedHealth(ctx.feedHealth),
+    liquidationProximity: extractLiquidationProximity(
+      ctx.liquidations,
+      ctx.currentPrice,
+    ),
 
     // Not yet wired
     spread: extractSpread(),

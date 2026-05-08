@@ -298,6 +298,7 @@ export interface WireAngleAgreementClient {
 // has enough lookback. Drives the regime overlay strip on the left frame.
 export interface PerBarRegimeClient {
   candleIndex: number;
+  candleOpenTime: number;
   angleDeg: number;
   bracket: GannBracketClient;
   direction: WireDirectionClient;
@@ -494,6 +495,19 @@ export interface AnalysisStateClient {
   // every analysed TF. Lets any TF's chart render its own timeline strip.
   regimeHistoryPerTimeframe: Partial<
     Record<Timeframe, BarRegimeSnapshotClient[]>
+  >;
+  // Per-TF feed health — candle freshness signal. Each TF marks itself
+  // healthy when its last candle is within 2× expected bar duration of
+  // analysis time, degraded otherwise.
+  feedHealthPerTimeframe: Partial<
+    Record<
+      Timeframe,
+      {
+        status: "healthy" | "degraded" | "unknown";
+        lastCandleAgeMs: number;
+        expectedBarMs: number;
+      }
+    >
   >;
   depth: DepthSnapshotClient | null;
   orderFlow: OrderFlowSnapshotClient | null;
