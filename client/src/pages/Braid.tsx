@@ -117,6 +117,7 @@ export default function Braid() {
   const [showSweptPools, setShowSweptPools] = usePersistedState("zenny.braid.showSweptPools", false);
   const [showDeadPools, setShowDeadPools] = usePersistedState("zenny.braid.showDeadPools", false);
   const [showSwingMarkers, setShowSwingMarkers] = usePersistedState("zenny.braid.showSwingMarkers", false);
+  const [maxLevelsPerSide, setMaxLevelsPerSide] = usePersistedState("zenny.braid.maxLevelsPerSide", 0);
   const [rightFrameCandleCount, setRightFrameCandleCount] = usePersistedState(
     "zenny.braid.rightFrameCandleCount",
     25,
@@ -370,6 +371,28 @@ export default function Braid() {
             onChange={setShowSwingMarkers}
           />
         </div>
+        <label className="grid grid-cols-[88px_1fr] items-center gap-2 text-xs">
+          <span className="text-[#888780]">Max levels</span>
+          <div className="flex items-center gap-2">
+            <input
+              type="range"
+              min={0}
+              max={20}
+              step={1}
+              value={maxLevelsPerSide}
+              onChange={(e) =>
+                setMaxLevelsPerSide(parseInt(e.target.value, 10) || 0)
+              }
+              className="flex-1"
+            />
+            <span className="w-12 tabular-nums text-[#888780]">
+              {maxLevelsPerSide === 0 ? "all" : `${maxLevelsPerSide}/side`}
+            </span>
+          </div>
+        </label>
+        <div className="grid grid-cols-2 gap-2 text-xs">
+          <div />
+        </div>
         {showLiqHeatmap && (
           <label className="grid grid-cols-[88px_1fr] items-center gap-2 text-xs">
             <span className="text-[#888780]">Liq decay</span>
@@ -490,6 +513,7 @@ export default function Braid() {
                 showDeadPools={chartView.showDeadPools}
                 showLevels={chartView.showLevels}
                 showSwingMarkers={showSwingMarkers}
+                maxLevelsPerSide={maxLevelsPerSide}
                 showRegimeStrip={chartView.showRegimeStrip}
                 height={chartHeight}
                 strengthThreshold={

@@ -96,6 +96,10 @@ interface Props {
   // diagnose "which candle birthed this level" but clutter the chart for
   // operators who just want pools + level lines. Independent toggle.
   showSwingMarkers?: boolean;
+  // Top-N cap on rendered levels per side (above + below current price).
+  // Sorted by aggregate strength desc; if no aggregate score, by source TF
+  // rank then by recency. 0 = no cap. Applied AFTER the strength threshold.
+  maxLevelsPerSide?: number;
 }
 
 // Off-screen indicator cap — only show the N closest to the visible range
@@ -132,6 +136,7 @@ export function LeftFrameCanvas({
   showRegimeStrip = false,
   showLevels = true,
   showSwingMarkers = false,
+  maxLevelsPerSide = 0,
 }: Props) {
   const wrapperRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -254,14 +259,49 @@ export function LeftFrameCanvas({
     }
     offAbove.sort((a, b) => a.price - b.price);
     offBelow.sort((a, b) => b.price - a.price);
+
+    // Top-N cap per side. We're showing the strongest levels above and below
+    // current price independently. Without an aggregate score, fall back to
+    // higher-TF-first (TF_RANK desc) then more recent (recency desc).
+    if (maxLevelsPerSide > 0 && dims) {
+      const lastClose =
+        state.candles.length > 0
+          ? state.candles[state.candles.length - 1].close
+          : (dims.minP + dims.maxP) / 2;
+      const above: typeof onScreen = [];
+      const below: typeof onScreen = [];
+      for (const lvl of onScreen) {
+        if (lvl.price >= lastClose) above.push(lvl);
+        else below.push(lvl);
+      }
+      const rank = (a: (typeof onScreen)[number], b: (typeof onScreen)[number]) => {
+        const aScore = a.passes?.aggregate?.score ?? -1;
+        const bScore = b.passes?.aggregate?.score ?? -1;
+        if (aScore !== bScore) return bScore - aScore;
+        const aTf = TF_RANK[a.sourceTimeframe] ?? 0;
+        const bTf = TF_RANK[b.sourceTimeframe] ?? 0;
+        if (aTf !== bTf) return bTf - aTf;
+        return (b.recency ?? 0) - (a.recency ?? 0);
+      };
+      above.sort(rank);
+      below.sort(rank);
+      const keep = new Set<string>();
+      for (const lvl of above.slice(0, maxLevelsPerSide)) keep.add(lvl.id);
+      for (const lvl of below.slice(0, maxLevelsPerSide)) keep.add(lvl.id);
+      const filtered = onScreen.filter((l) => keep.has(l.id));
+      return { onScreen: filtered, offAbove, offBelow };
+    }
+
     return { onScreen, offAbove, offBelow };
   }, [
     state.levels,
+    state.candles,
     state.primaryTimeframe,
     showCurrentTf,
     showOtherTfs,
     showPools,
     strengthThreshold,
+    maxLevelsPerSide,
     dims,
   ]);
 
