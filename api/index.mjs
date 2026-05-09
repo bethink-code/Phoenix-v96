@@ -5679,7 +5679,7 @@ async function listPositions(symbol, timeframe, limit = 100) {
   return rows.map(fromRow);
 }
 var DEFAULT_ACCOUNT_ID = "default";
-var DEFAULT_STARTING_EQUITY = 1e4;
+var DEFAULT_STARTING_EQUITY = 500;
 async function loadAccount(id = DEFAULT_ACCOUNT_ID) {
   const rows = await db.select().from(zennyPaperAccount).where(eq3(zennyPaperAccount.id, id));
   if (rows.length === 0) {
@@ -6055,7 +6055,29 @@ function registerZennyRoutes(app2) {
           listPositions(symbol, timeframe, limit),
           loadAccount()
         ]);
-        res.json({ symbol, timeframe, positions, account });
+        const pnlAbs = account.currentEquity - account.startingEquity;
+        const pnlPct = account.startingEquity > 0 ? pnlAbs / account.startingEquity * 100 : 0;
+        const closedPositions = positions.filter((p) => p.status === "CLOSED");
+        const winners = closedPositions.filter(
+          (p) => (p.realisedPnl ?? 0) > 0
+        ).length;
+        const losers = closedPositions.filter(
+          (p) => (p.realisedPnl ?? 0) < 0
+        ).length;
+        res.json({
+          symbol,
+          timeframe,
+          account,
+          pnl: {
+            abs: pnlAbs,
+            pct: pnlPct,
+            closedTrades: closedPositions.length,
+            winners,
+            losers,
+            winRate: closedPositions.length > 0 ? winners / closedPositions.length : null
+          },
+          positions
+        });
       } catch (err) {
         res.status(500).json({
           error: "fetch_failed",

@@ -155,7 +155,7 @@ export interface PaperAccountRow {
 }
 
 const DEFAULT_ACCOUNT_ID = "default";
-const DEFAULT_STARTING_EQUITY = 10_000;
+const DEFAULT_STARTING_EQUITY = 500;
 
 export async function loadAccount(
   id: string = DEFAULT_ACCOUNT_ID,

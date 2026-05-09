@@ -194,7 +194,36 @@ export function registerZennyRoutes(app: Express) {
           listPositions(symbol, timeframe, limit),
           loadAccount(),
         ]);
-        res.json({ symbol, timeframe, positions, account });
+        // Convenience PnL fields so callers don't have to compute.
+        const pnlAbs = account.currentEquity - account.startingEquity;
+        const pnlPct =
+          account.startingEquity > 0
+            ? (pnlAbs / account.startingEquity) * 100
+            : 0;
+        const closedPositions = positions.filter((p) => p.status === "CLOSED");
+        const winners = closedPositions.filter(
+          (p) => (p.realisedPnl ?? 0) > 0,
+        ).length;
+        const losers = closedPositions.filter(
+          (p) => (p.realisedPnl ?? 0) < 0,
+        ).length;
+        res.json({
+          symbol,
+          timeframe,
+          account,
+          pnl: {
+            abs: pnlAbs,
+            pct: pnlPct,
+            closedTrades: closedPositions.length,
+            winners,
+            losers,
+            winRate:
+              closedPositions.length > 0
+                ? winners / closedPositions.length
+                : null,
+          },
+          positions,
+        });
       } catch (err) {
         res.status(500).json({
           error: "fetch_failed",
