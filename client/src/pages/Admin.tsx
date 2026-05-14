@@ -17,9 +17,13 @@ export default function Admin() {
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
           <div>
             <h1 className="text-lg font-semibold">Admin Console</h1>
-            <p className="text-xs text-muted-foreground">Phoenix v96 — cross-tenant oversight</p>
+            <p className="text-xs text-muted-foreground">
+              Zenny Braid - access control and oversight
+            </p>
           </div>
-          <Link href="/"><Button variant="outline" size="sm">← Dashboard</Button></Link>
+          <Link href="/">
+            <Button variant="outline" size="sm">Back to Braid</Button>
+          </Link>
         </div>
         <div className="mx-auto flex max-w-6xl gap-1 px-6">
           {(["users", "invites", "requests", "pairs", "audit", "security"] as Tab[]).map((t) => (

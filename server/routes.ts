@@ -1,4 +1,4 @@
-import type { Express, Request, Response } from "express";
+import type { Express, Request } from "express";
 import { z } from "zod";
 import { storage } from "./storage";
 import { isAuthenticated, isAdmin } from "./auth";
@@ -9,7 +9,6 @@ import {
   insertMarketPairSchema,
 } from "../shared/schema";
 import { getBinance } from "./modules/exchange/binance";
-import { tierFor, tierDefaults } from "./modules/portfolioTier";
 
 function getUser(req: Request) {
   return req.user as { id: string; email: string; isAdmin: boolean };
@@ -28,7 +27,6 @@ function pid(req: Request, key: string): string {
 }
 
 export function registerRoutes(app: Express) {
-  // ---------- Auth / current user ----------
   app.get("/api/auth/user", isAuthenticated, async (req, res) => {
     const u = getUser(req);
     const full = await storage.getUserById(u.id);
@@ -47,11 +45,12 @@ export function registerRoutes(app: Express) {
     res.json({ ok: true });
   });
 
-  // ---------- Public access request ----------
   app.post("/api/request-access", async (req, res) => {
     const parsed = insertAccessRequestSchema.safeParse(req.body);
     if (!parsed.success) {
-      return res.status(400).json({ error: "invalid", issues: parsed.error.issues });
+      return res
+        .status(400)
+        .json({ error: "invalid", issues: parsed.error.issues });
     }
     const row = await storage.createAccessRequest(parsed.data);
     audit({
@@ -65,214 +64,6 @@ export function registerRoutes(app: Express) {
     res.json({ ok: true });
   });
 
-  // ---------- Tenant self-service ----------
-  app.get("/api/tenant", isAuthenticated, async (req, res) => {
-    const u = getUser(req);
-    const tenant = await storage.getOrCreateTenantForUser(u.id);
-    const config = await storage.getTenantConfig(tenant.id);
-    res.json({ tenant, config });
-  });
-
-  app.get("/api/tenant/trades", isAuthenticated, async (req, res) => {
-    const u = getUser(req);
-    const tenant = await storage.getOrCreateTenantForUser(u.id);
-    const rows = await storage.listTrades(tenant.id);
-    res.json(rows);
-  });
-
-  app.get("/api/tenant/regime-history", isAuthenticated, async (req, res) => {
-    const u = getUser(req);
-    const tenant = await storage.getOrCreateTenantForUser(u.id);
-    const rows = await storage.listRegimeChanges(tenant.id);
-    res.json(rows);
-  });
-
-  app.get("/api/tenant/decisions", isAuthenticated, async (req, res) => {
-    const u = getUser(req);
-    const tenant = await storage.getOrCreateTenantForUser(u.id);
-    res.json(await storage.listBotDecisions(tenant.id));
-  });
-
-  app.get("/api/tenant/costs", isAuthenticated, async (req, res) => {
-    const u = getUser(req);
-    const tenant = await storage.getOrCreateTenantForUser(u.id);
-    res.json(await storage.getTenantCosts(tenant.id));
-  });
-
-  app.patch("/api/tenant/config", isAuthenticated, async (req, res) => {
-    const schema = z.object({
-      paperStartingCapital: z.string().optional(),
-      riskPercentPerTrade: z.string().optional(),
-      maxConcurrentPositions: z.number().int().min(1).max(10).optional(),
-      dailyDrawdownLimitPct: z.string().optional(),
-      weeklyDrawdownLimitPct: z.string().optional(),
-      minRiskRewardRatio: z.string().optional(),
-      minLevelRank: z.number().int().min(1).max(5).optional(),
-      tradingTimeframe: z.enum(["15m", "1h", "4h", "12h", "1d"]).optional(),
-    });
-    const parsed = schema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: "invalid" });
-    const u = getUser(req);
-    const tenant = await storage.getOrCreateTenantForUser(u.id);
-    const config = await storage.getTenantConfig(tenant.id);
-
-    // If the user is on the auto tier and just changed capital, reapply
-    // tier defaults so the rest of the parameters track the new size.
-    let patch = parsed.data as Record<string, unknown>;
-    if (
-      parsed.data.paperStartingCapital &&
-      config?.portfolioTier === "auto"
-    ) {
-      const newCapital = Number(parsed.data.paperStartingCapital);
-      const newTier = tierFor(newCapital);
-      patch = { ...patch, ...tierDefaults(newTier) };
-    } else if (
-      parsed.data.riskPercentPerTrade ||
-      parsed.data.maxConcurrentPositions ||
-      parsed.data.minRiskRewardRatio ||
-      parsed.data.minLevelRank ||
-      parsed.data.dailyDrawdownLimitPct ||
-      parsed.data.weeklyDrawdownLimitPct
-    ) {
-      // User edited a tuned field directly â€” flip them to manual so we
-      // don't overwrite their changes on the next capital tweak.
-      patch = { ...patch, portfolioTier: "manual" };
-    }
-
-    await storage.updateTenantConfig(tenant.id, patch);
-    audit({
-      userId: u.id,
-      tenantId: tenant.id,
-      action: "update_tenant_config",
-      outcome: "success",
-      detail: patch,
-      ipAddress: getIp(req),
-    });
-    res.json({ ok: true });
-  });
-
-  app.patch("/api/tenant/portfolio-tier", isAuthenticated, async (req, res) => {
-    const { tier } = z
-      .object({ tier: z.enum(["auto", "tiny", "small", "medium", "large"]) })
-      .parse(req.body);
-    const u = getUser(req);
-    const tenant = await storage.getOrCreateTenantForUser(u.id);
-    const config = await storage.getTenantConfig(tenant.id);
-    if (!config) return res.status(404).json({ error: "no_config" });
-    const capital = Number(config.paperStartingCapital);
-    const resolvedTier = tier === "auto" ? tierFor(capital) : tier;
-    const defaults = tierDefaults(resolvedTier);
-    await storage.applyPortfolioTier(
-      tenant.id,
-      tier === "auto" ? "auto" : resolvedTier,
-      defaults
-    );
-    audit({
-      userId: u.id,
-      tenantId: tenant.id,
-      action: "apply_portfolio_tier",
-      outcome: "success",
-      detail: { requestedTier: tier, resolvedTier, capital },
-      ipAddress: getIp(req),
-    });
-    res.json({ ok: true, resolvedTier, defaults });
-  });
-
-  app.patch("/api/tenant/pair", isAuthenticated, async (req, res) => {
-    const { pairId } = z.object({ pairId: z.string().uuid().nullable() }).parse(req.body);
-    const u = getUser(req);
-    const tenant = await storage.getOrCreateTenantForUser(u.id);
-    await storage.setActivePair(tenant.id, pairId);
-    audit({
-      userId: u.id,
-      tenantId: tenant.id,
-      action: "set_active_pair",
-      outcome: "success",
-      detail: { pairId },
-      ipAddress: getIp(req),
-    });
-    res.json({ ok: true });
-  });
-
-  app.patch("/api/tenant/autopilot", isAuthenticated, async (req, res) => {
-    const { autopilot } = z.object({ autopilot: z.boolean() }).parse(req.body);
-    const u = getUser(req);
-    const tenant = await storage.getOrCreateTenantForUser(u.id);
-    await storage.setAutopilot(tenant.id, autopilot);
-    audit({
-      userId: u.id,
-      tenantId: tenant.id,
-      action: "set_autopilot_regime",
-      outcome: "success",
-      detail: { autopilot },
-      ipAddress: getIp(req),
-    });
-    res.json({ ok: true });
-  });
-
-  app.patch("/api/tenant/bot-status", isAuthenticated, async (req, res) => {
-    const { status } = z
-      .object({ status: z.enum(["off", "active", "paused"]) })
-      .parse(req.body);
-    const u = getUser(req);
-    const tenant = await storage.getOrCreateTenantForUser(u.id);
-    // PRD Â§3.2 â€” switching ON requires a conscious regime decision. If the
-    // user has autopilot on, the bot will pick one on its first tick, so
-    // we let it start from NO TRADE. If autopilot is off, they must pick.
-    if (
-      status === "active" &&
-      tenant.activeRegime === "no_trade" &&
-      !tenant.autopilotRegime
-    ) {
-      return res.status(400).json({ error: "regime_required" });
-    }
-    await storage.setBotStatus(tenant.id, status);
-    audit({
-      userId: u.id,
-      tenantId: tenant.id,
-      action: "set_bot_status",
-      outcome: "success",
-      detail: { status },
-      ipAddress: getIp(req),
-    });
-    res.json({ ok: true });
-  });
-
-  app.get("/api/tenant/exchange-keys", isAuthenticated, async (req, res) => {
-    const u = getUser(req);
-    const tenant = await storage.getOrCreateTenantForUser(u.id);
-    res.json(await storage.listExchangeKeyMetadata(tenant.id));
-  });
-
-  app.post("/api/tenant/exchange-keys", isAuthenticated, async (req, res) => {
-    const schema = z.object({
-      exchange: z.enum(["binance", "bybit"]),
-      apiKey: z.string().min(10).max(256),
-      apiSecret: z.string().min(10).max(256),
-    });
-    const parsed = schema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: "invalid" });
-    const u = getUser(req);
-    const tenant = await storage.getOrCreateTenantForUser(u.id);
-    await storage.saveExchangeKey({ ...parsed.data, tenantId: tenant.id });
-    audit({
-      userId: u.id,
-      tenantId: tenant.id,
-      action: "save_exchange_key",
-      resourceType: "exchange_key",
-      outcome: "success",
-      detail: { exchange: parsed.data.exchange },
-      ipAddress: getIp(req),
-    });
-    res.json({ ok: true });
-  });
-
-  // ---------- Market registry (public to tenants, mutations admin) ----------
-  app.get("/api/markets", isAuthenticated, async (_req, res) => {
-    res.json(await storage.listEnabledPairs());
-  });
-
-  // ---------- Admin: users ----------
   app.get("/api/admin/users", isAuthenticated, isAdmin, async (_req, res) => {
     res.json(await storage.listUsers());
   });
@@ -296,7 +87,7 @@ export function registerRoutes(app: Express) {
         ipAddress: getIp(req),
       });
       res.json({ ok: true });
-    }
+    },
   );
 
   app.patch(
@@ -318,29 +109,38 @@ export function registerRoutes(app: Express) {
         ipAddress: getIp(req),
       });
       res.json({ ok: true });
-    }
+    },
   );
 
-  // ---------- Admin: invites ----------
-  app.get("/api/admin/invites", isAuthenticated, isAdmin, async (_req, res) => {
-    res.json(await storage.listInvites());
-  });
+  app.get(
+    "/api/admin/invites",
+    isAuthenticated,
+    isAdmin,
+    async (_req, res) => {
+      res.json(await storage.listInvites());
+    },
+  );
 
-  app.post("/api/admin/invites", isAuthenticated, isAdmin, async (req, res) => {
-    const parsed = insertInviteSchema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: "invalid" });
-    const row = await storage.addInvite(parsed.data.email, getUser(req).id);
-    audit({
-      userId: getUser(req).id,
-      action: "add_invite",
-      resourceType: "invite",
-      resourceId: row?.id,
-      outcome: "success",
-      detail: { email: parsed.data.email },
-      ipAddress: getIp(req),
-    });
-    res.json(row);
-  });
+  app.post(
+    "/api/admin/invites",
+    isAuthenticated,
+    isAdmin,
+    async (req, res) => {
+      const parsed = insertInviteSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: "invalid" });
+      const row = await storage.addInvite(parsed.data.email, getUser(req).id);
+      audit({
+        userId: getUser(req).id,
+        action: "add_invite",
+        resourceType: "invite",
+        resourceId: row?.id,
+        outcome: "success",
+        detail: { email: parsed.data.email },
+        ipAddress: getIp(req),
+      });
+      res.json(row);
+    },
+  );
 
   app.delete(
     "/api/admin/invites/:id",
@@ -357,17 +157,16 @@ export function registerRoutes(app: Express) {
         ipAddress: getIp(req),
       });
       res.json({ ok: true });
-    }
+    },
   );
 
-  // ---------- Admin: access requests ----------
   app.get(
     "/api/admin/access-requests",
     isAuthenticated,
     isAdmin,
     async (_req, res) => {
       res.json(await storage.listAccessRequests());
-    }
+    },
   );
 
   app.patch(
@@ -389,17 +188,16 @@ export function registerRoutes(app: Express) {
         ipAddress: getIp(req),
       });
       res.json({ ok: true });
-    }
+    },
   );
 
-  // ---------- Admin: audit logs + security ----------
   app.get(
     "/api/admin/audit-logs",
     isAuthenticated,
     isAdmin,
     async (_req, res) => {
       res.json(await storage.listAuditLogs(500));
-    }
+    },
   );
 
   app.get(
@@ -408,10 +206,9 @@ export function registerRoutes(app: Express) {
     isAdmin,
     async (_req, res) => {
       res.json(await storage.securityOverview());
-    }
+    },
   );
 
-  // ---------- Admin: market registry ----------
   app.get("/api/admin/pairs", isAuthenticated, isAdmin, async (_req, res) => {
     res.json(await storage.listAllPairs());
   });
@@ -435,38 +232,44 @@ export function registerRoutes(app: Express) {
     res.json(row);
   });
 
-  app.patch("/api/admin/pairs/:id", isAuthenticated, isAdmin, async (req, res) => {
-    await storage.updatePair(pid(req, "id"), req.body);
-    audit({
-      userId: getUser(req).id,
-      action: "update_pair",
-      resourceType: "market_pair",
-      resourceId: pid(req, "id"),
-      outcome: "success",
-      ipAddress: getIp(req),
-    });
-    res.json({ ok: true });
-  });
+  app.patch(
+    "/api/admin/pairs/:id",
+    isAuthenticated,
+    isAdmin,
+    async (req, res) => {
+      await storage.updatePair(pid(req, "id"), req.body);
+      audit({
+        userId: getUser(req).id,
+        action: "update_pair",
+        resourceType: "market_pair",
+        resourceId: pid(req, "id"),
+        outcome: "success",
+        ipAddress: getIp(req),
+      });
+      res.json({ ok: true });
+    },
+  );
 
   app.get(
     "/api/admin/exchanges/binance/symbols",
     isAuthenticated,
     isAdmin,
     async (req, res) => {
-      // Read from the Postgres cache populated by the Railway worker.
-      // Falls back to a live fetch if the cache is empty (first boot).
-      // Optional ?quote=USDT filter to keep payload small.
-      const quote = typeof req.query.quote === "string" ? req.query.quote.toUpperCase() : null;
+      const quote =
+        typeof req.query.quote === "string"
+          ? req.query.quote.toUpperCase()
+          : null;
       const filter = (rows: Array<{ quoteAsset: string }>) =>
         quote ? rows.filter((s) => s.quoteAsset === quote) : rows;
 
       const cached = await storage.getCachedSymbols("binance");
       if (cached) {
         return res.json({
-          symbols: filter(cached.symbols as any),
+          symbols: filter(cached.symbols as Array<{ quoteAsset: string }>),
           refreshedAt: cached.refreshedAt,
         });
       }
+
       try {
         const symbols = await getBinance().fetchSymbols();
         await storage.writeCachedSymbols("binance", symbols);
@@ -474,23 +277,28 @@ export function registerRoutes(app: Express) {
       } catch (err) {
         res.status(502).json({ error: (err as Error).message });
       }
-    }
+    },
   );
 
-  app.delete("/api/admin/pairs/:id", isAuthenticated, isAdmin, async (req, res) => {
-    const id = pid(req, "id");
-    const result = await storage.deletePair(id);
-    if (!result.deleted) {
-      return res.status(409).json({ error: result.reason ?? "cannot_delete" });
-    }
-    audit({
-      userId: getUser(req).id,
-      action: "delete_pair",
-      resourceType: "market_pair",
-      resourceId: id,
-      outcome: "success",
-      ipAddress: getIp(req),
-    });
-    res.json({ ok: true });
-  });
+  app.delete(
+    "/api/admin/pairs/:id",
+    isAuthenticated,
+    isAdmin,
+    async (req, res) => {
+      const id = pid(req, "id");
+      const result = await storage.deletePair(id);
+      if (!result.deleted) {
+        return res.status(409).json({ error: result.reason ?? "cannot_delete" });
+      }
+      audit({
+        userId: getUser(req).id,
+        action: "delete_pair",
+        resourceType: "market_pair",
+        resourceId: id,
+        outcome: "success",
+        ipAddress: getIp(req),
+      });
+      res.json({ ok: true });
+    },
+  );
 }

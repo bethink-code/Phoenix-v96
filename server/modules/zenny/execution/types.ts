@@ -74,9 +74,9 @@ export interface PositionRecord {
   notional: number | null;
 
   // Bar timestamps for lookahead-bias invariants. emittedAtBarTs is the
-  // close timestamp of the bar that produced the TradePlan. submittedAtBarTs
-  // is the open timestamp of the bar that accepted it onto the paper book.
-  // filledAtBarTs and closedAtBarTs are set on later transitions.
+  // signal bar timestamp that produced the TradePlan. submittedAtBarTs is
+  // when the paper order was accepted onto the book. filledAtBarTs and
+  // closedAtBarTs are set on later transitions.
   emittedAtBarTs: number;
   submittedAtBarTs: number | null;
   filledAtBarTs: number | null;

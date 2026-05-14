@@ -1,12 +1,10 @@
 // assembleTradePlans — top-level entry that runs once per analysed TF and
 // produces TradePlans for every playbook family that resolves geometry.
 //
-// V1 (2026-05-09) two-phase split: REACH (Phase 1) AND TAKE (Phase 2) can
-// both fire on the same TF — they're independent setups (one rides toward
-// the pool, the other fades after the sweep). Returns multiple TradePlans
-// per TF in `plansPerTimeframe`. Backward-compat fields `primary` and
-// `perTimeframe` carry the first non-null plan (TAKE preferred — it's the
-// higher-edge half of the cycle).
+// V2 (2026-05-14) the proposers can still emit multiple candidate geometries
+// for the same TF, but the assembler now chooses a single winner per TF.
+// That keeps the paper runner and the ORDERS view focused on the most
+// actionable idea instead of carrying contradictory intents at once.
 //
 // Per the per-TF self-containment model, each TF stands alone: its own
 // regime assessment, its own arms + pools, its own trade plans.
@@ -23,6 +21,7 @@ import type {
 } from "../analysis/regime/types";
 import { proposeReachTrade } from "./reach/proposeReachTrade";
 import type { ReachTradeConfig } from "./reach/types";
+import { selectTradePlansForTimeframe } from "./selectTradePlans";
 import type { TradePlan, TradePlanResult } from "./types";
 import { proposeWickTrade } from "./wick/proposeWickTrade";
 import type { WickTradeConfig } from "./wick/types";
@@ -85,9 +84,10 @@ export function assembleTradePlans(
     });
     if (reachPlan !== null) tfPlans.push(reachPlan);
 
-    if (tfPlans.length > 0) {
-      plansPerTimeframe[tf] = tfPlans;
-      perTimeframe[tf] = tfPlans[0]; // first wins for backward compat
+    const selectedPlans = selectTradePlansForTimeframe(tfPlans, currentPrice);
+    if (selectedPlans.length > 0) {
+      plansPerTimeframe[tf] = selectedPlans;
+      perTimeframe[tf] = selectedPlans[0];
     }
   }
 

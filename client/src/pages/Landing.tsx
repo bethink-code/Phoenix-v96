@@ -31,9 +31,9 @@ export default function Landing() {
     <div className="flex min-h-screen items-center justify-center bg-background p-6">
       <Card className="w-full max-w-md">
         <CardHeader className="space-y-2">
-          <CardTitle className="text-2xl">Phoenix v96</CardTitle>
+          <CardTitle className="text-2xl">Zenny Braid</CardTitle>
           <CardDescription>
-            Crypto liquidity-sweep trading bot. Invite-only access.
+            Chart-first liquidity analysis and paper-trading workspace. Invite-only access.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">

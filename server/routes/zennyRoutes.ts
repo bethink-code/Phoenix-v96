@@ -33,6 +33,27 @@ function getProvider(): BinanceProvider {
   return sharedProvider;
 }
 
+async function runPaperTradeWatchlistTick(provider: BinanceProvider) {
+  const results = [];
+  for (const watch of PAPER_TRADE_WATCHLIST) {
+    try {
+      const r = await runPaperTradeTick({
+        provider,
+        symbol: watch.symbol,
+        timeframe: watch.timeframe,
+      });
+      results.push(r);
+    } catch (e) {
+      results.push({
+        symbol: watch.symbol,
+        timeframe: watch.timeframe,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+  return results;
+}
+
 const VALID_TIMEFRAMES: ReadonlySet<Timeframe> = new Set([
   "15m",
   "1H",
@@ -151,6 +172,30 @@ export function registerZennyRoutes(app: Express) {
     },
   );
 
+  // POST /api/zenny/dev/paper-trade-tick — local/dev helper to advance the
+  // runner from the authenticated UI. This keeps localhost testing honest
+  // without exposing a manual trigger in production.
+  app.post(
+    "/api/zenny/dev/paper-trade-tick",
+    isAuthenticated,
+    async (_req: Request, res: Response) => {
+      if (process.env.NODE_ENV === "production") {
+        return res.status(404).json({ error: "not_found" });
+      }
+      try {
+        const provider = getProvider();
+        const results = await runPaperTradeWatchlistTick(provider);
+        res.json({ ok: true, tickedAt: Date.now(), results });
+      } catch (err) {
+        console.error("[zenny] dev paper-trade-tick failed", err);
+        res.status(500).json({
+          error: "tick_failed",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+  );
+
   // POST /api/zenny/paper-trade-tick — Vercel Cron entrypoint.
   //
   // Auth: Bearer ${process.env.CRON_SECRET}. On Vercel Pro native crons, the
@@ -176,23 +221,7 @@ export function registerZennyRoutes(app: Express) {
       }
       try {
         const provider = getProvider();
-        const results = [];
-        for (const watch of PAPER_TRADE_WATCHLIST) {
-          try {
-            const r = await runPaperTradeTick({
-              provider,
-              symbol: watch.symbol,
-              timeframe: watch.timeframe,
-            });
-            results.push(r);
-          } catch (e) {
-            results.push({
-              symbol: watch.symbol,
-              timeframe: watch.timeframe,
-              error: e instanceof Error ? e.message : String(e),
-            });
-          }
-        }
+        const results = await runPaperTradeWatchlistTick(provider);
         res.json({ ok: true, tickedAt: Date.now(), results });
       } catch (err) {
         console.error("[zenny] paper-trade-tick failed", err);

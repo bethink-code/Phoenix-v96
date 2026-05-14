@@ -1,9 +1,7 @@
 import { Switch, Route, Redirect } from "wouter";
 import { useAuth } from "@/hooks/useAuth";
 import Landing from "@/pages/Landing";
-import Dashboard from "@/pages/Dashboard";
 import Admin from "@/pages/Admin";
-import Settings from "@/pages/Settings";
 import Braid from "@/pages/Braid";
 import NotFound from "@/pages/not-found";
 import TermsModal from "@/components/TermsModal";
@@ -24,16 +22,16 @@ export default function App() {
       {isAuthenticated && user && !user.termsAcceptedAt && <TermsModal />}
       <Switch>
         <Route path="/">
-          {isAuthenticated ? <Dashboard /> : <Landing />}
+          {isAuthenticated ? <Braid /> : <Landing />}
         </Route>
         <Route path="/admin">
           {isAuthenticated && user?.isAdmin ? <Admin /> : <Redirect to="/" />}
         </Route>
-        <Route path="/settings">
-          {isAuthenticated ? <Settings /> : <Redirect to="/" />}
-        </Route>
         <Route path="/braid">
-          {isAuthenticated ? <Braid /> : <Redirect to="/" />}
+          <Redirect to="/" />
+        </Route>
+        <Route path="/settings">
+          <Redirect to="/" />
         </Route>
         <Route component={NotFound} />
       </Switch>

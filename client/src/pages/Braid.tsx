@@ -1,10 +1,11 @@
 // Braid page — PAST | NOW | TRADING layout.
 // PAST: LeftFrameCanvas (chart with candles, levels, pools)
-// NOW: Three expandable columns (Levels, Orders, Trades)
+// NOW: Four expandable columns (Regime, Levels, Orders, Trades)
 // TRADING: future — two branch panels for pre-placed orders
 
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
+import { Link } from "wouter";
 import { LeftFrameCanvas } from "@/components/braid/LeftFrameCanvas";
 import { NowColumn } from "@/components/braid/NowColumn";
 import { LevelsColumnCollapsed, LevelsColumnExpanded } from "@/components/braid/LevelsColumn";
@@ -21,6 +22,8 @@ import { TradeOverlay } from "@/components/braid/TradeOverlay";
 import { ColumnInnerTabs } from "@/components/braid/ColumnInnerTabs";
 import { LevelsSettingsPanel } from "@/components/braid/LevelsSettingsPanel";
 import { PassPlayground } from "@/components/braid/PassPlayground";
+import { useAuth } from "@/hooks/useAuth";
+import { apiRequest } from "@/lib/queryClient";
 import type {
   AnalysisStateClient,
   PassConfigClient,
@@ -102,7 +105,16 @@ const TIMEFRAMES: Array<{ value: string; label: string }> = [
   { value: "15m", label: "15 m" },
 ];
 
+const VIEW_LABEL: Record<ChartScope, string> = {
+  default: "DEFAULT",
+  regime: "REGIME",
+  levels: "LEVELS",
+  orders: "ORDERS",
+  trades: "TRADES",
+};
+
 export default function Braid() {
+  const { user } = useAuth();
   const [symbol, setSymbol] = usePersistedState("zenny.braid.symbol", "BTCUSDT");
   const [timeframe, setTimeframe] = usePersistedState<Timeframe>("zenny.braid.timeframe", DEFAULT_BRAID_TIMEFRAME);
   const [count, setCount] = usePersistedState("zenny.braid.count", DEFAULT_BRAID_COUNT);
@@ -118,6 +130,10 @@ export default function Braid() {
   const [showPools, setShowPools] = usePersistedState("zenny.braid.showPools", true);
   const [showSweptPools, setShowSweptPools] = usePersistedState("zenny.braid.showSweptPools", false);
   const [showDeadPools, setShowDeadPools] = usePersistedState("zenny.braid.showDeadPools", false);
+  const [showTradingAreas, setShowTradingAreas] = usePersistedState(
+    "zenny.braid.showTradingAreas",
+    false,
+  );
   const [showSwingMarkers, setShowSwingMarkers] = usePersistedState("zenny.braid.showSwingMarkers", false);
   const [maxLevelsPerSide, setMaxLevelsPerSide] = usePersistedState("zenny.braid.maxLevelsPerSide", 0);
   const [rightFrameCandleCount, setRightFrameCandleCount] = usePersistedState(
@@ -126,6 +142,7 @@ export default function Braid() {
   );
   const [showLiqHeatmap, setShowLiqHeatmap] = usePersistedState("zenny.braid.showLiqHeatmap", true);
   const [refreshNonce, setRefreshNonce] = useState(0);
+  const [lastTickSummary, setLastTickSummary] = useState<string | null>(null);
 
   // NOW column expand state — single source of truth. Only ONE column can
   // be expanded at a time; opening another collapses the current one. This
@@ -145,6 +162,7 @@ export default function Braid() {
   // column expands, its scoped preset overrides this entirely.
   const defaultChartView: ChartViewProps = {
     showCandles: true,
+    monochromeCandles: false,
     showCurrentTf,
     showOtherTfs,
     showPools,
@@ -152,6 +170,8 @@ export default function Braid() {
     showDeadPools,
     showLevels: true,
     showRegimeStrip: false,
+    showOrderPlans: showTradingAreas,
+    showPaperTrades: showTradingAreas,
   };
   const chartView = resolveChartView(expandedTab, defaultChartView);
 
@@ -255,8 +275,52 @@ export default function Braid() {
 
   const passConfigParam = encodeURIComponent(JSON.stringify(passConfig));
   const queryKey = `/api/zenny/braid-view-model?symbol=${symbol}&timeframe=${timeframe}&count=${count}&passConfig=${passConfigParam}&refresh=${refreshNonce}`;
-  const { data, isLoading, isFetching, error, refetch } = useQuery<AnalysisStateClient>({
+  const { data, isLoading, isFetching, error } = useQuery<AnalysisStateClient>({
     queryKey: [queryKey],
+  });
+
+  const logout = async () => {
+    try {
+      await apiRequest("/auth/logout", { method: "POST" });
+    } catch {
+      /* still force navigation even if the call fails */
+    }
+    window.location.href = "/";
+  };
+
+  const runPaperTick = useMutation({
+    mutationFn: async () => {
+      const r = await apiRequest("/api/zenny/dev/paper-trade-tick", {
+        method: "POST",
+      });
+      return r.json();
+    },
+    onSuccess: (payload: any) => {
+      const results: any[] = Array.isArray(payload?.results) ? payload.results : [];
+      const created = results.filter((r: any) => r?.newPositionId).length;
+      const transitions = results.reduce(
+        (n: number, r: any) => n + (Array.isArray(r?.transitions) ? r.transitions.length : 0),
+        0,
+      );
+      const blocked = results
+        .map((r: any) => r?.noTransitionReason)
+        .filter((v: any): v is string => typeof v === "string");
+      setLastTickSummary(
+        created > 0
+          ? `Paper tick: ${created} new ${created === 1 ? "position" : "positions"}`
+          : transitions > 0
+            ? `Paper tick: ${transitions} state ${transitions === 1 ? "change" : "changes"}`
+            : blocked.length > 0
+              ? `Paper tick: ${blocked[0]}`
+              : "Paper tick complete",
+      );
+      setRefreshNonce((n) => n + 1);
+    },
+    onError: (err) => {
+      setLastTickSummary(
+        err instanceof Error ? `Paper tick failed: ${err.message}` : "Paper tick failed",
+      );
+    },
   });
 
   const coin = symbol.replace(/USDT$/i, "").toLowerCase();
@@ -276,14 +340,46 @@ export default function Braid() {
   const markPriceY = priceRange > 0
     ? CHART_PAD.t + plotH * (1 - (lastClose - priceMin) / priceRange)
     : undefined;
+  const showOrdersLiqOverlay =
+    ordersExpanded && showLiqHeatmap && liqOverlayOpen;
+  const tradingViewFlag =
+    chartView.showOrderPlans && chartView.showPaperTrades
+      ? "Trading"
+      : chartView.showOrderPlans
+        ? "Orders"
+        : chartView.showPaperTrades
+          ? "Trades"
+          : null;
   const activeViewFlags = [
-    showCurrentTf ? "TF" : null,
-    showOtherTfs ? "Higher" : null,
-    showPools ? "Pools" : null,
-    showPools && showSweptPools ? "Swept" : null,
-    showPools && showDeadPools ? "Dead" : null,
-    showLiqHeatmap ? "Liq" : null,
+    chartView.showCurrentTf ? "TF" : null,
+    chartView.showOtherTfs ? "Higher" : null,
+    chartView.showPools ? "Pools" : null,
+    chartView.showPools && chartView.showSweptPools ? "Swept" : null,
+    chartView.showPools && chartView.showDeadPools ? "Dead" : null,
+    chartView.showRegimeStrip ? "Regime" : null,
+    tradingViewFlag,
+    showOrdersLiqOverlay ? "Liq" : null,
   ].filter(Boolean);
+  const activeViewLabel = VIEW_LABEL[expandedTab];
+  const settingsButtonLabel =
+    expandedTab === "default" ? "Settings" : "Default view";
+  const settingsButtonTitle =
+    expandedTab === "default"
+      ? "Open default chart settings"
+      : "Open settings for the default home view";
+  const primaryPlans =
+    data?.tradePlanResult?.plansPerTimeframe?.[data.primaryTimeframe] ?? [];
+  const paperPositions = data?.paperPositions ?? [];
+  const paperOpenPositions = data?.paperOpenPositions ?? [];
+  const paperRestingOrders = paperOpenPositions.filter(
+    (pos) => pos.fillPrice == null && pos.filledAtBarTs == null,
+  );
+  const paperFilledPositions = paperPositions.filter(
+    (pos) => pos.fillPrice != null || pos.filledAtBarTs != null,
+  );
+  const paperOpenTrades = paperOpenPositions.filter(
+    (pos) => pos.fillPrice != null || pos.filledAtBarTs != null,
+  );
 
   const viewSettings = (
     <div className="space-y-3 border-b border-black/5 pb-3">
@@ -361,6 +457,11 @@ export default function Braid() {
             checked={showDeadPools}
             onChange={setShowDeadPools}
             disabled={!showPools}
+          />
+          <ToggleSetting
+            label="Trading areas"
+            checked={showTradingAreas}
+            onChange={setShowTradingAreas}
           />
           <ToggleSetting
             label="Liq levels"
@@ -447,6 +548,7 @@ export default function Braid() {
           <div className="hidden md:flex items-center gap-2 text-xs text-[#888780]">
             <span>{count} candles</span>
             <span>{chartType}</span>
+            <span>{activeViewLabel}</span>
             {activeViewFlags.length > 0 && (
               <span>{activeViewFlags.join(" / ")}</span>
             )}
@@ -463,6 +565,11 @@ export default function Braid() {
                 </span>
               );
             })()}
+            {lastTickSummary && (
+              <span className="max-w-[260px] truncate" title={lastTickSummary}>
+                {lastTickSummary}
+              </span>
+            )}
           </div>
           {data && (
             <StaleBadge
@@ -474,16 +581,43 @@ export default function Braid() {
           <button
             onClick={() => setSettingsOpen(!settingsOpen)}
             className={`border rounded px-2 py-0.5 text-sm transition-colors ${settingsOpen ? "border-[#3d3d3a] bg-[#3d3d3a] text-white" : "border-black/15 hover:bg-[#f1efe8]"}`}
-            title="Open chart settings"
+            title={settingsButtonTitle}
           >
-            Settings
+            {settingsButtonLabel}
           </button>
+          {import.meta.env.DEV && (
+            <button
+              onClick={() => runPaperTick.mutate()}
+              disabled={runPaperTick.isPending}
+              className={`border rounded px-2 py-0.5 text-sm transition-colors ${runPaperTick.isPending ? "border-black/10 bg-[#f1efe8] text-[#888780] cursor-wait" : "border-black/15 hover:bg-[#f1efe8]"}`}
+              title="Advance the local paper-trading runner and refresh this chart"
+            >
+              {runPaperTick.isPending ? "Ticking..." : "Paper tick"}
+            </button>
+          )}
           <button
             onClick={() => setRefreshNonce((n) => n + 1)}
             disabled={isFetching}
             className={`border rounded px-2 py-0.5 text-sm transition-colors ${isFetching ? "border-black/10 bg-[#f1efe8] text-[#888780] cursor-wait" : "border-black/15 hover:bg-[#f1efe8]"}`}
           >
             {isFetching ? "..." : "Refresh"}
+          </button>
+          {user?.isAdmin && (
+            <Link href="/admin">
+              <button
+                className="border rounded px-2 py-0.5 text-sm transition-colors border-black/15 hover:bg-[#f1efe8]"
+                title="Open admin console"
+              >
+                Admin
+              </button>
+            </Link>
+          )}
+          <button
+            onClick={logout}
+            className="border rounded px-2 py-0.5 text-sm transition-colors border-black/15 hover:bg-[#f1efe8]"
+            title="Sign out"
+          >
+            Sign out
           </button>
         </div>
       </header>
@@ -507,6 +641,7 @@ export default function Braid() {
               <LeftFrameCanvas
                 state={data}
                 chartType={chartType}
+                monochromeCandles={chartView.monochromeCandles}
                 targetPoints={targetPoints}
                 showCurrentTf={chartView.showCurrentTf}
                 showOtherTfs={chartView.showOtherTfs}
@@ -524,7 +659,7 @@ export default function Braid() {
                     : 0
                 }
               />
-              {showLiqHeatmap && liqOverlayOpen && (
+              {showOrdersLiqOverlay && (
                 <LiqOverlay
                   symbol={symbol}
                   candles={data.candles}
@@ -544,12 +679,8 @@ export default function Braid() {
                   Always on (trades are the point of the system). */}
               <TradeOverlay
                 candles={data.candles}
-                plans={
-                  data.tradePlanResult?.plansPerTimeframe?.[
-                    data.primaryTimeframe
-                  ] ?? []
-                }
-                positions={data.paperPositions ?? []}
+                plans={chartView.showOrderPlans ? primaryPlans : []}
+                positions={chartView.showPaperTrades ? paperFilledPositions : []}
                 priceMin={priceMin}
                 priceMax={priceMax}
                 padLeft={CHART_PAD.l}
@@ -558,7 +689,7 @@ export default function Braid() {
                 padBottom={CHART_PAD.b}
               />
               {/* Decay slider — pinned bottom-left when overlay is open */}
-              {showLiqHeatmap && liqOverlayOpen && (
+              {showOrdersLiqOverlay && (
                 <div className="absolute bottom-2 left-16 flex items-center gap-2 bg-white/90 rounded px-3 py-1 border border-black/10 z-20">
                   <span className="text-[#888780] text-xs">Decay</span>
                   <input type="range" min={0} max={1} step={0.05} value={decayFactor}
@@ -652,15 +783,13 @@ export default function Braid() {
               label="ORDERS"
               expanded={ordersExpanded}
               markPriceY={markPriceY}
-              onToggle={() => {
-                const willOpen = !ordersExpanded;
-                toggleTab("orders");
-                setLiqOverlayOpen(willOpen);
-              }}
+              onToggle={() => toggleTab("orders")}
               chartHeight={chartHeight}
               collapsedContent={
                 <OrdersStrategyColumnCollapsed
                   tradePlan={data.tradePlan}
+                  tradePlans={primaryPlans}
+                  restingOrders={paperRestingOrders}
                   assessment={data.regimeAssessment}
                   chartHeight={chartHeight}
                 />
@@ -670,12 +799,31 @@ export default function Braid() {
                   info={
                     <OrdersStrategyColumnExpanded
                       tradePlan={data.tradePlan}
+                      tradePlans={primaryPlans}
+                      restingOrders={paperRestingOrders}
                       assessment={data.regimeAssessment}
                       chartHeight={chartHeight}
                     />
                   }
                   settings={
-                    <div className="text-xs text-[#888780] p-2 space-y-2">
+                    <div className="text-xs text-[#888780] p-2 space-y-3">
+                      <div className="space-y-2">
+                        <div className="text-[11px] font-medium uppercase tracking-wide text-[#888780]">
+                          Chart context
+                        </div>
+                        <ToggleSetting
+                          label="Liq context"
+                          checked={liqOverlayOpen}
+                          onChange={setLiqOverlayOpen}
+                          disabled={!showLiqHeatmap}
+                        />
+                        {!showLiqHeatmap && (
+                          <div>
+                            Turn on Liq levels in the default-view settings to
+                            make this available.
+                          </div>
+                        )}
+                      </div>
                       <div>
                         Decision-module tunables (entry-style matrix, REACH
                         asymmetry, slippage, kill-switch thresholds) — coming
@@ -697,10 +845,20 @@ export default function Braid() {
               onToggle={() => toggleTab("trades")}
               chartHeight={chartHeight}
               markPriceY={markPriceY}
-              collapsedContent={<TradesColumnCollapsed chartHeight={chartHeight} />}
+              collapsedContent={
+                <TradesColumnCollapsed
+                  chartHeight={chartHeight}
+                  openPositions={paperOpenTrades}
+                />
+              }
               expandedContent={
                 <ColumnInnerTabs
-                  info={<TradesColumnExpanded />}
+                  info={
+                    <TradesColumnExpanded
+                      positions={paperFilledPositions}
+                      openPositions={paperOpenTrades}
+                    />
+                  }
                   settings={
                     <div className="text-xs text-[#888780] p-2">
                       Paper-account settings (starting equity, kill-switch

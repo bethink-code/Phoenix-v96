@@ -1,6 +1,6 @@
 // applyFillRules — given an open order (entry / stop / target), the next
-// bar, and the slippage config, return the fill result if the bar's range
-// touched the order price; otherwise null.
+// bar, and the slippage config, return the fill result if the bar traded to
+// or through the order in a fillable direction; otherwise null.
 //
 // Slippage convention (research-backed):
 //   - Limit orders (entry-limit, target-limit): exact fill at order price.
@@ -14,8 +14,8 @@
 //   short stop hit → fillPrice = stopPrice × (1 + bps/10000)   (price rising)
 //
 // The fillMode='next-bar-touch' contract is the caller's responsibility —
-// applyFillRules just checks the bar range. The reducer enforces the
-// "bar after submission" invariant separately.
+// applyFillRules handles directional trigger semantics only. The reducer
+// enforces the "bar after submission" invariant separately.
 //
 // Pure function.
 
@@ -41,9 +41,7 @@ export function applyFillRules(
 ): FillResult | null {
   const { orderKind, orderPrice, side, bar } = input;
 
-  // Touch check — bar's range must contain the order price for a fill.
-  const touched = orderPrice >= bar.low && orderPrice <= bar.high;
-  if (!touched) return null;
+  if (!wasOrderTriggered(input)) return null;
 
   const isLimit =
     orderKind === "entry-limit" || orderKind === "target-limit";
@@ -62,6 +60,24 @@ export function applyFillRules(
       ? orderPrice * (1 - slipFactor)
       : orderPrice * (1 + slipFactor);
   return { kind: orderKind, fillPrice: slipped };
+}
+
+function wasOrderTriggered(input: ApplyFillRulesInput): boolean {
+  const { orderKind, orderPrice, side, bar } = input;
+
+  // Limit entries and targets fill when the market trades to or through the
+  // order on the favorable side. This covers both exact touches and gap /
+  // through bars that never print the order price inside the candle range.
+  if (orderKind === "entry-limit") {
+    return side === "long" ? bar.low <= orderPrice : bar.high >= orderPrice;
+  }
+  if (orderKind === "target-limit") {
+    return side === "long" ? bar.high >= orderPrice : bar.low <= orderPrice;
+  }
+
+  // Stop-market orders trigger once the adverse side reaches or moves beyond
+  // the stop.
+  return side === "long" ? bar.low <= orderPrice : bar.high >= orderPrice;
 }
 
 // Convenience helper used by reduceStep — checks all three orders against

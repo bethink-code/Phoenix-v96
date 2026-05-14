@@ -51,8 +51,8 @@ app.use(
   "/api",
   rateLimit({
     // 1000 req per 15 min per IP. Generous enough for an active dev
-    // session with multiple polling tabs (Dashboard + Experiments +
-    // Autoresearch all poll their endpoints), tight enough that a
+    // session with multiple Braid refreshes plus admin activity, tight
+    // enough that a
     // malicious actor still can't flood.
     windowMs: 15 * 60 * 1000,
     max: 1000,
@@ -90,9 +90,9 @@ app.use(
 );
 
 app.listen(PORT, () => {
-  console.log(`[phoenix-v96] server listening on :${PORT}`);
+  console.log(`[zenny-braid] server listening on :${PORT}`);
   console.log(
-    `[phoenix-v96] paper-trading=${process.env.PAPER_TRADING_MODE} env=${process.env.NODE_ENV}`
+    `[zenny-braid] paper-trading=${process.env.PAPER_TRADING_MODE} env=${process.env.NODE_ENV}`
   );
   startContinuityScheduler();
   startLiquidationListener();

@@ -1,19 +1,12 @@
-// Trade overlay — renders probable trades (TradePlans the system sees but
-// hasn't acted on) and actual paper-trading positions on top of the chart.
+// Trade overlay.
 //
-// Two layers:
-//
-// PROBABLE TRADES — dashed lines for every TradePlan in
-//   tradePlanResult.plansPerTimeframe[primary]. Shows entry/stop/target.
-//   These are "what the system would do if it were acting."
-//
-// ACTUAL TRADES — solid lines for every PaperPosition in paperPositions.
-//   Open positions render with a pulse and current state colour.
-//   Closed positions render desaturated with a P&L badge.
-//
-// Coordinates are derived from the same chart geometry as LeftFrameCanvas:
-// price → Y via (price - priceMin) / priceRange; bar index → X via the
-// candles array. Caller passes geometry as props.
+// The old renderer drew trades as horizontal level lines, which made them
+// compete visually with actual structure levels on the chart. This renderer
+// treats each trade as a vertical object:
+// - a stem from stop to target
+// - dots at the two ends
+// - an entry dot on the stem
+// - one compact badge describing whether the trade is a plan or live state
 
 import type { Candle } from "@shared/zennyTypes";
 import type {
@@ -25,8 +18,8 @@ import type {
 
 interface Props {
   candles: Candle[];
-  plans: TradePlanClient[]; // probable trades for the primary TF
-  positions: PaperPositionClient[]; // all paper positions for symbol+TF
+  plans: TradePlanClient[];
+  positions: PaperPositionClient[];
   priceMin: number;
   priceMax: number;
   padLeft: number;
@@ -35,13 +28,18 @@ interface Props {
   padBottom: number;
 }
 
-// Colour scheme
 const COLORS = {
-  entry: "rgba(80,120,200,",
-  stop: "rgba(226,75,74,",
-  target: "rgba(29,158,117,",
-  reach: "rgba(155,89,182,",  // purple = REACH
-  take: "rgba(80,120,200,",   // blue = TAKE
+  stop: "rgba(226,75,74,0.95)",
+  stopSoft: "rgba(226,75,74,0.22)",
+  target: "rgba(29,158,117,0.95)",
+  targetSoft: "rgba(29,158,117,0.22)",
+  reach: "rgba(155,89,182,0.92)",
+  reachSoft: "rgba(155,89,182,0.22)",
+  take: "rgba(80,120,200,0.92)",
+  takeSoft: "rgba(80,120,200,0.22)",
+  neutral: "rgba(61,61,58,0.72)",
+  neutralSoft: "rgba(61,61,58,0.12)",
+  white: "#ffffff",
 };
 
 const PHASE_LABEL: Record<TradePhaseClient, string> = {
@@ -49,15 +47,9 @@ const PHASE_LABEL: Record<TradePhaseClient, string> = {
   take: "TAKE",
 };
 
-const STATUS_BADGE_COLOR: Record<PositionStatusClient, string> = {
-  PLANNED: "rgba(140,140,140,0.85)",
-  LIVE: "rgba(80,120,200,0.85)",
-  FILLED: "rgba(200,154,74,0.9)",
-  CLOSED: "rgba(60,60,60,0.9)",
-  CANCELLED: "rgba(140,140,140,0.6)",
-  EXPIRED: "rgba(140,140,140,0.6)",
-  REJECTED: "rgba(226,75,74,0.6)",
-};
+const PLAN_FUTURE_LANE_STEP_PX = 14;
+const PLAN_PRICE_INDICATOR_OFFSET_PX = 28;
+const PLAN_FUTURE_LANE_MIN_PX = 12;
 
 export function TradeOverlay({
   candles,
@@ -73,29 +65,54 @@ export function TradeOverlay({
   const priceRange = priceMax - priceMin;
   if (priceRange <= 0 || candles.length === 0) return null;
 
-  const N = candles.length;
+  const candleCount = candles.length;
   const yFrac = (price: number) =>
     Math.max(0, Math.min(1, 1 - (price - priceMin) / priceRange));
-  const xFracForOpenTime = (openTime: number): number | null => {
-    // Find candle closest to openTime
-    let closestIdx = -1;
-    let closestDelta = Infinity;
-    for (let i = 0; i < N; i++) {
-      const d = Math.abs(candles[i].openTime - openTime);
-      if (d < closestDelta) {
-        closestDelta = d;
-        closestIdx = i;
+  const xFracForTime = (barTime: number): number | null => {
+    let closestIndex = -1;
+    let closestDelta = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < candleCount; i++) {
+      const delta = Math.abs(candles[i].openTime - barTime);
+      if (delta < closestDelta) {
+        closestDelta = delta;
+        closestIndex = i;
       }
     }
-    if (closestIdx < 0) return null;
-    return (closestIdx + 0.5) / N;
+    if (closestIndex < 0) return null;
+    return (closestIndex + 0.5) / candleCount;
   };
 
+  // Planned orders are future intent, not historical events. Anchor them in
+  // the same right-hand lane as the current-price indicator so they read as
+  // "current plan from here", while staying off the live candle area.
+  const indicatorLanePx = Math.max(
+    PLAN_FUTURE_LANE_MIN_PX,
+    padRight - PLAN_PRICE_INDICATOR_OFFSET_PX,
+  );
+  const planAnchors = plans.map((_plan, index) => ({
+    xFrac: 1,
+    laneOffsetPx: Math.max(
+      PLAN_FUTURE_LANE_MIN_PX,
+      indicatorLanePx - index * PLAN_FUTURE_LANE_STEP_PX,
+    ),
+  }));
+
+  const laneCounts = new Map<string, number>();
+  const positionAnchors = positions.map((pos) => {
+    const startTime =
+      pos.filledAtBarTs ?? pos.submittedAtBarTs ?? pos.emittedAtBarTs;
+    const xFrac = xFracForTime(startTime) ?? 0.96;
+    const laneKey = `${Math.round(xFrac * 1000)}`;
+    const laneIndex = laneCounts.get(laneKey) ?? 0;
+    laneCounts.set(laneKey, laneIndex + 1);
+    return {
+      xFrac,
+      laneOffsetPx: laneOffsetForIndex(laneIndex),
+    };
+  });
+
   return (
-    <div
-      className="absolute inset-0 z-10"
-      style={{ pointerEvents: "none" }}
-    >
+    <div className="absolute inset-0 z-10" style={{ pointerEvents: "none" }}>
       <div
         className="absolute"
         style={{
@@ -105,18 +122,24 @@ export function TradeOverlay({
           bottom: padBottom,
         }}
       >
-        {/* PROBABLE TRADES — dashed lines for every TradePlan */}
-        {plans.map((plan, i) => (
-          <ProbableTrade key={`plan-${i}`} plan={plan} yFrac={yFrac} />
+        {plans.map((plan, index) => (
+          <PlannedTradeStem
+            key={`plan-${plan.phase}-${plan.side}-${plan.entry}-${index}`}
+            plan={plan}
+            xFrac={planAnchors[index].xFrac}
+            laneOffsetPx={planAnchors[index].laneOffsetPx}
+            yFrac={yFrac}
+          />
         ))}
 
-        {/* ACTUAL TRADES — paper positions */}
-        {positions.map((pos) => (
-          <ActualTrade
+        {positions.map((pos, index) => (
+          <PaperTradeStem
             key={pos.id}
             pos={pos}
+            xFrac={positionAnchors[index].xFrac}
+            laneOffsetPx={positionAnchors[index].laneOffsetPx}
             yFrac={yFrac}
-            xFracForOpenTime={xFracForOpenTime}
+            xFracForTime={xFracForTime}
           />
         ))}
       </div>
@@ -124,233 +147,249 @@ export function TradeOverlay({
   );
 }
 
-// --- Probable trade ---------------------------------------------------------
-
-function ProbableTrade({
+function PlannedTradeStem({
   plan,
+  xFrac,
+  laneOffsetPx,
   yFrac,
 }: {
   plan: TradePlanClient;
-  yFrac: (p: number) => number;
+  xFrac: number;
+  laneOffsetPx: number;
+  yFrac: (price: number) => number;
 }) {
-  const phaseColor =
-    plan.phase === "reach" ? COLORS.reach : COLORS.take;
   return (
-    <>
-      <DashedLine
-        yFrac={yFrac(plan.entry)}
-        color={`${COLORS.entry}0.65)`}
-        label={`${PHASE_LABEL[plan.phase]} ${plan.side.toUpperCase()} entry ${formatPrice(plan.entry)}`}
-        labelColor={`${phaseColor}1.0)`}
-      />
-      <DashedLine
-        yFrac={yFrac(plan.stop)}
-        color={`${COLORS.stop}0.55)`}
-        label={`stop ${formatPrice(plan.stop)}`}
-      />
-      <DashedLine
-        yFrac={yFrac(plan.target)}
-        color={`${COLORS.target}0.6)`}
-        label={`target ${formatPrice(plan.target)} · R:R ${plan.riskRewardRatio.toFixed(1)}`}
-      />
-      {plan.target2 != null && (
-        <DashedLine
-          yFrac={yFrac(plan.target2)}
-          color={`${COLORS.target}0.35)`}
-          label={`TP1 ${formatPrice(plan.target2)}`}
-        />
-      )}
-    </>
+    <TradeStemShape
+      xFrac={xFrac}
+      laneOffsetPx={laneOffsetPx}
+      entryYFrac={yFrac(plan.entry)}
+      stopYFrac={yFrac(plan.stop)}
+      targetYFrac={yFrac(plan.target)}
+      dashed={true}
+      entryRing={true}
+      secondaryTargetYFrac={plan.target2 != null ? yFrac(plan.target2) : null}
+    />
   );
 }
 
-// --- Actual trade -----------------------------------------------------------
-
-function ActualTrade({
+function PaperTradeStem({
   pos,
+  xFrac,
+  laneOffsetPx,
   yFrac,
-  xFracForOpenTime,
+  xFracForTime,
 }: {
   pos: PaperPositionClient;
-  yFrac: (p: number) => number;
-  xFracForOpenTime: (t: number) => number | null;
+  xFrac: number;
+  laneOffsetPx: number;
+  yFrac: (price: number) => number;
+  xFracForTime: (barTime: number) => number | null;
 }) {
-  const isClosed = pos.status === "CLOSED";
   const isOpen = pos.status === "LIVE" || pos.status === "FILLED";
-  const isTerminal = !isOpen && pos.status !== "PLANNED";
+  const isClosed = pos.status === "CLOSED";
+  const isPlanned = pos.status === "PLANNED";
+  const isTerminal = !isOpen && !isPlanned;
 
-  const opacity = isClosed ? 0.45 : isOpen ? 0.95 : 0.6;
-  const sideLabel = pos.side.toUpperCase();
-  const phaseLabel = PHASE_LABEL[pos.phase];
-  const statusColor = STATUS_BADGE_COLOR[pos.status];
-
-  const fillX =
-    pos.filledAtBarTs != null ? xFracForOpenTime(pos.filledAtBarTs) : null;
-  const closeX =
-    pos.closedAtBarTs != null ? xFracForOpenTime(pos.closedAtBarTs) : null;
+  const exitXFrac =
+    pos.closedAtBarTs != null ? xFracForTime(pos.closedAtBarTs) : null;
+  const exitYFrac =
+    pos.closePrice != null ? yFrac(pos.closePrice) : yFrac(pos.targetPrice);
 
   return (
     <>
-      <SolidLine
-        yFrac={yFrac(pos.entryPrice)}
-        color={`${COLORS.entry}${opacity})`}
-        label={`${phaseLabel} ${sideLabel} · ${pos.status}${
-          pos.realisedPnl != null
-            ? ` · PnL ${formatPnl(pos.realisedPnl)}`
-            : ""
-        }`}
-        labelColor={statusColor}
+      <TradeStemShape
+        xFrac={xFrac}
+        laneOffsetPx={laneOffsetPx}
+        entryYFrac={yFrac(pos.fillPrice ?? pos.entryPrice)}
+        stopYFrac={yFrac(pos.stopPrice)}
+        targetYFrac={yFrac(pos.targetPrice)}
+        dashed={isPlanned}
+        faded={isClosed || isTerminal}
       />
-      <SolidLine
-        yFrac={yFrac(pos.stopPrice)}
-        color={`${COLORS.stop}${opacity * 0.85})`}
-        label={isTerminal ? "" : `stop ${formatPrice(pos.stopPrice)}`}
-      />
-      <SolidLine
-        yFrac={yFrac(pos.targetPrice)}
-        color={`${COLORS.target}${opacity * 0.85})`}
-        label={isTerminal ? "" : `target ${formatPrice(pos.targetPrice)}`}
-      />
-
-      {/* Markers — entry candle and (if closed) close candle */}
-      {fillX != null && (
-        <Marker
-          xFrac={fillX}
-          yFrac={yFrac(pos.fillPrice ?? pos.entryPrice)}
-          color={`${COLORS.entry}${opacity})`}
-          symbol="●"
-        />
-      )}
-      {closeX != null && (
-        <Marker
-          xFrac={closeX}
-          yFrac={yFrac(pos.closePrice ?? pos.targetPrice)}
+      {exitXFrac != null && (
+        <ExitMarker
+          xFrac={exitXFrac}
+          yFrac={exitYFrac}
           color={
-            pos.exitReason === "target"
-              ? `${COLORS.target}${opacity})`
-              : `${COLORS.stop}${opacity})`
+            pos.realisedPnl != null
+              ? pos.realisedPnl >= 0
+                ? COLORS.target
+                : COLORS.stop
+              : pos.exitReason === "target"
+                ? COLORS.target
+                : COLORS.stop
           }
-          symbol="✕"
         />
       )}
     </>
   );
 }
 
-// --- atomic SVG-ish helpers (DOM divs, mirroring LiqOverlay style) ----------
-
-function DashedLine({
-  yFrac,
-  color,
-  label,
-  labelColor,
+function TradeStemShape({
+  xFrac,
+  laneOffsetPx,
+  entryYFrac,
+  stopYFrac,
+  targetYFrac,
+  dashed = false,
+  faded = false,
+  entryRing = false,
+  secondaryTargetYFrac = null,
 }: {
-  yFrac: number;
-  color: string;
-  label?: string;
-  labelColor?: string;
+  xFrac: number;
+  laneOffsetPx: number;
+  entryYFrac: number;
+  stopYFrac: number;
+  targetYFrac: number;
+  dashed?: boolean;
+  faded?: boolean;
+  entryRing?: boolean;
+  secondaryTargetYFrac?: number | null;
 }) {
+  const segmentOpacity = faded ? 0.22 : 0.4;
+  const dotOpacity = faded ? 0.55 : 0.95;
+  const stopTopYFrac = Math.min(entryYFrac, stopYFrac);
+  const stopHeightPct = Math.max(0, Math.abs(stopYFrac - entryYFrac) * 100);
+  const targetTopYFrac = Math.min(entryYFrac, targetYFrac);
+  const targetHeightPct = Math.max(0, Math.abs(targetYFrac - entryYFrac) * 100);
+
   return (
     <>
       <div
         className="absolute"
         style={{
-          left: 0,
-          right: 0,
-          top: `${yFrac * 100}%`,
-          height: 0,
-          borderTop: `1px dashed ${color}`,
+          left: `calc(${xFrac * 100}% + ${laneOffsetPx}px)`,
+          top: `${stopTopYFrac * 100}%`,
+          height: `${stopHeightPct}%`,
+          borderLeft: dashed
+            ? `2px dashed ${applyOpacity(COLORS.stop, segmentOpacity)}`
+            : `2px solid ${applyOpacity(COLORS.stop, segmentOpacity)}`,
+          transform: "translateX(-50%)",
         }}
       />
-      {label && (
-        <div
-          className="absolute text-[10px] leading-none px-1 rounded bg-white/80 whitespace-nowrap"
-          style={{
-            right: 4,
-            top: `calc(${yFrac * 100}% - 8px)`,
-            color: labelColor ?? color,
-          }}
-        >
-          {label}
-        </div>
-      )}
-    </>
-  );
-}
-
-function SolidLine({
-  yFrac,
-  color,
-  label,
-  labelColor,
-}: {
-  yFrac: number;
-  color: string;
-  label?: string;
-  labelColor?: string;
-}) {
-  return (
-    <>
       <div
         className="absolute"
         style={{
-          left: 0,
-          right: 0,
-          top: `${yFrac * 100}%`,
-          height: 1,
-          background: color,
+          left: `calc(${xFrac * 100}% + ${laneOffsetPx}px)`,
+          top: `${targetTopYFrac * 100}%`,
+          height: `${targetHeightPct}%`,
+          borderLeft: dashed
+            ? `2px dashed ${applyOpacity(COLORS.target, segmentOpacity)}`
+            : `2px solid ${applyOpacity(COLORS.target, segmentOpacity)}`,
+          transform: "translateX(-50%)",
         }}
       />
-      {label && (
-        <div
-          className="absolute text-[10px] leading-none px-1 rounded bg-white whitespace-nowrap font-medium"
-          style={{
-            left: 4,
-            top: `calc(${yFrac * 100}% - 8px)`,
-            color: labelColor ?? color,
-            border: `1px solid ${color}`,
-          }}
-        >
-          {label}
-        </div>
+
+      <StemDot
+        xFrac={xFrac}
+        laneOffsetPx={laneOffsetPx}
+        yFrac={stopYFrac}
+        color={applyOpacity(COLORS.stop, dotOpacity)}
+        sizePx={10}
+      />
+      <StemDot
+        xFrac={xFrac}
+        laneOffsetPx={laneOffsetPx}
+        yFrac={targetYFrac}
+        color={applyOpacity(COLORS.target, dotOpacity)}
+        sizePx={10}
+      />
+      {secondaryTargetYFrac != null && (
+        <StemDot
+        xFrac={xFrac}
+        laneOffsetPx={laneOffsetPx}
+        yFrac={secondaryTargetYFrac}
+        color={applyOpacity(COLORS.target, faded ? 0.3 : 0.65)}
+        sizePx={8}
+        ring={true}
+      />
       )}
+      <StemDot
+        xFrac={xFrac}
+        laneOffsetPx={laneOffsetPx}
+        yFrac={entryYFrac}
+        color={applyOpacity(COLORS.neutral, dotOpacity)}
+        sizePx={12}
+        ring={entryRing}
+      />
     </>
   );
 }
 
-function Marker({
+function StemDot({
+  xFrac,
+  laneOffsetPx,
+  yFrac,
+  color,
+  sizePx,
+  ring = false,
+}: {
+  xFrac: number;
+  laneOffsetPx: number;
+  yFrac: number;
+  color: string;
+  sizePx: number;
+  ring?: boolean;
+}) {
+  return (
+    <div
+      className="absolute rounded-full"
+      style={{
+        left: `calc(${xFrac * 100}% + ${laneOffsetPx}px)`,
+        top: `${yFrac * 100}%`,
+        width: sizePx,
+        height: sizePx,
+        transform: "translate(-50%, -50%)",
+        background: ring ? COLORS.white : color,
+        border: `2px solid ${color}`,
+        boxShadow: "0 0 0 3px rgba(255,255,255,0.78)",
+      }}
+    />
+  );
+}
+
+function ExitMarker({
   xFrac,
   yFrac,
   color,
-  symbol,
 }: {
   xFrac: number;
   yFrac: number;
   color: string;
-  symbol: string;
 }) {
   return (
-    <div
-      className="absolute text-[14px] leading-none font-bold"
-      style={{
-        left: `${xFrac * 100}%`,
-        top: `${yFrac * 100}%`,
-        transform: "translate(-50%, -50%)",
-        color,
-      }}
-    >
-      {symbol}
-    </div>
+    <>
+      <div
+        className="absolute"
+        style={{
+          left: `${xFrac * 100}%`,
+          top: `calc(${yFrac * 100}% - 14px)`,
+          height: 28,
+          borderLeft: `1px solid ${applyOpacity(color, 0.6)}`,
+          transform: "translateX(-50%)",
+        }}
+      />
+      <StemDot
+        xFrac={xFrac}
+        laneOffsetPx={0}
+        yFrac={yFrac}
+        color={color}
+        sizePx={10}
+      />
+    </>
   );
 }
 
-function formatPrice(p: number): string {
-  if (p >= 10000) return p.toFixed(0);
-  if (p >= 100) return p.toFixed(1);
-  return p.toFixed(2);
+function laneOffsetForIndex(index: number): number {
+  if (index === 0) return 0;
+  const lane = Math.ceil(index / 2);
+  return index % 2 === 1 ? lane * 12 : -lane * 12;
 }
 
-function formatPnl(p: number): string {
-  const sign = p >= 0 ? "+" : "";
-  return `${sign}${p.toFixed(2)}`;
+function applyOpacity(color: string, opacity: number): string {
+  if (!color.startsWith("rgba(")) return color;
+  const body = color.slice(5, -1);
+  const parts = body.split(",");
+  if (parts.length !== 4) return color;
+  return `rgba(${parts[0]},${parts[1]},${parts[2]},${opacity})`;
 }

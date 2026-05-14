@@ -310,4 +310,23 @@ describe("reduceStep — short side", () => {
     // short: PnL = (entry - exit) * size = (100 - 90) * 20 = +200
     expect(pos.realisedPnl).toBe(200);
   });
+
+  it("short entry fills when the next bar stays entirely above the limit", () => {
+    let pos = newPos(plan({ side: "short", entry: 100, stop: 105, target: 90 }));
+    pos = reduceStep({
+      position: pos,
+      bar: bar({ openTime: TF_MS, high: 96, low: 94 }),
+      equity: EQUITY,
+      config: DEFAULT_EXECUTION_CONFIG,
+    });
+    expect(pos.status).toBe("LIVE");
+    pos = reduceStep({
+      position: pos,
+      bar: bar({ openTime: 2 * TF_MS, high: 106, low: 101 }),
+      equity: EQUITY,
+      config: DEFAULT_EXECUTION_CONFIG,
+    });
+    expect(pos.status).toBe("FILLED");
+    expect(pos.fillPrice).toBe(100);
+  });
 });

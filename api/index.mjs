@@ -1478,54 +1478,6 @@ function getBinance() {
   return singleton;
 }
 
-// server/modules/portfolioTier.ts
-function tierFor(capital) {
-  if (capital < 500) return "tiny";
-  if (capital < 5e3) return "small";
-  if (capital < 5e4) return "medium";
-  return "large";
-}
-function tierDefaults(tier) {
-  switch (tier) {
-    case "tiny":
-      return {
-        riskPercentPerTrade: "2.000",
-        maxConcurrentPositions: 1,
-        minRiskRewardRatio: "1.50",
-        minLevelRank: 1,
-        dailyDrawdownLimitPct: "5.00",
-        weeklyDrawdownLimitPct: "10.00"
-      };
-    case "small":
-      return {
-        riskPercentPerTrade: "1.500",
-        maxConcurrentPositions: 2,
-        minRiskRewardRatio: "2.00",
-        minLevelRank: 2,
-        dailyDrawdownLimitPct: "4.00",
-        weeklyDrawdownLimitPct: "8.00"
-      };
-    case "medium":
-      return {
-        riskPercentPerTrade: "1.000",
-        maxConcurrentPositions: 2,
-        minRiskRewardRatio: "2.00",
-        minLevelRank: 2,
-        dailyDrawdownLimitPct: "3.00",
-        weeklyDrawdownLimitPct: "6.00"
-      };
-    case "large":
-      return {
-        riskPercentPerTrade: "0.500",
-        maxConcurrentPositions: 3,
-        minRiskRewardRatio: "2.50",
-        minLevelRank: 3,
-        dailyDrawdownLimitPct: "2.00",
-        weeklyDrawdownLimitPct: "4.00"
-      };
-  }
-}
-
 // server/routes.ts
 function getUser(req) {
   return req.user;
@@ -1573,171 +1525,6 @@ function registerRoutes(app2) {
     });
     res.json({ ok: true });
   });
-  app2.get("/api/tenant", isAuthenticated, async (req, res) => {
-    const u = getUser(req);
-    const tenant = await storage.getOrCreateTenantForUser(u.id);
-    const config = await storage.getTenantConfig(tenant.id);
-    res.json({ tenant, config });
-  });
-  app2.get("/api/tenant/trades", isAuthenticated, async (req, res) => {
-    const u = getUser(req);
-    const tenant = await storage.getOrCreateTenantForUser(u.id);
-    const rows = await storage.listTrades(tenant.id);
-    res.json(rows);
-  });
-  app2.get("/api/tenant/regime-history", isAuthenticated, async (req, res) => {
-    const u = getUser(req);
-    const tenant = await storage.getOrCreateTenantForUser(u.id);
-    const rows = await storage.listRegimeChanges(tenant.id);
-    res.json(rows);
-  });
-  app2.get("/api/tenant/decisions", isAuthenticated, async (req, res) => {
-    const u = getUser(req);
-    const tenant = await storage.getOrCreateTenantForUser(u.id);
-    res.json(await storage.listBotDecisions(tenant.id));
-  });
-  app2.get("/api/tenant/costs", isAuthenticated, async (req, res) => {
-    const u = getUser(req);
-    const tenant = await storage.getOrCreateTenantForUser(u.id);
-    res.json(await storage.getTenantCosts(tenant.id));
-  });
-  app2.patch("/api/tenant/config", isAuthenticated, async (req, res) => {
-    const schema = z2.object({
-      paperStartingCapital: z2.string().optional(),
-      riskPercentPerTrade: z2.string().optional(),
-      maxConcurrentPositions: z2.number().int().min(1).max(10).optional(),
-      dailyDrawdownLimitPct: z2.string().optional(),
-      weeklyDrawdownLimitPct: z2.string().optional(),
-      minRiskRewardRatio: z2.string().optional(),
-      minLevelRank: z2.number().int().min(1).max(5).optional(),
-      tradingTimeframe: z2.enum(["15m", "1h", "4h", "12h", "1d"]).optional()
-    });
-    const parsed = schema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: "invalid" });
-    const u = getUser(req);
-    const tenant = await storage.getOrCreateTenantForUser(u.id);
-    const config = await storage.getTenantConfig(tenant.id);
-    let patch = parsed.data;
-    if (parsed.data.paperStartingCapital && config?.portfolioTier === "auto") {
-      const newCapital = Number(parsed.data.paperStartingCapital);
-      const newTier = tierFor(newCapital);
-      patch = { ...patch, ...tierDefaults(newTier) };
-    } else if (parsed.data.riskPercentPerTrade || parsed.data.maxConcurrentPositions || parsed.data.minRiskRewardRatio || parsed.data.minLevelRank || parsed.data.dailyDrawdownLimitPct || parsed.data.weeklyDrawdownLimitPct) {
-      patch = { ...patch, portfolioTier: "manual" };
-    }
-    await storage.updateTenantConfig(tenant.id, patch);
-    audit({
-      userId: u.id,
-      tenantId: tenant.id,
-      action: "update_tenant_config",
-      outcome: "success",
-      detail: patch,
-      ipAddress: getIp(req)
-    });
-    res.json({ ok: true });
-  });
-  app2.patch("/api/tenant/portfolio-tier", isAuthenticated, async (req, res) => {
-    const { tier } = z2.object({ tier: z2.enum(["auto", "tiny", "small", "medium", "large"]) }).parse(req.body);
-    const u = getUser(req);
-    const tenant = await storage.getOrCreateTenantForUser(u.id);
-    const config = await storage.getTenantConfig(tenant.id);
-    if (!config) return res.status(404).json({ error: "no_config" });
-    const capital = Number(config.paperStartingCapital);
-    const resolvedTier = tier === "auto" ? tierFor(capital) : tier;
-    const defaults = tierDefaults(resolvedTier);
-    await storage.applyPortfolioTier(
-      tenant.id,
-      tier === "auto" ? "auto" : resolvedTier,
-      defaults
-    );
-    audit({
-      userId: u.id,
-      tenantId: tenant.id,
-      action: "apply_portfolio_tier",
-      outcome: "success",
-      detail: { requestedTier: tier, resolvedTier, capital },
-      ipAddress: getIp(req)
-    });
-    res.json({ ok: true, resolvedTier, defaults });
-  });
-  app2.patch("/api/tenant/pair", isAuthenticated, async (req, res) => {
-    const { pairId } = z2.object({ pairId: z2.string().uuid().nullable() }).parse(req.body);
-    const u = getUser(req);
-    const tenant = await storage.getOrCreateTenantForUser(u.id);
-    await storage.setActivePair(tenant.id, pairId);
-    audit({
-      userId: u.id,
-      tenantId: tenant.id,
-      action: "set_active_pair",
-      outcome: "success",
-      detail: { pairId },
-      ipAddress: getIp(req)
-    });
-    res.json({ ok: true });
-  });
-  app2.patch("/api/tenant/autopilot", isAuthenticated, async (req, res) => {
-    const { autopilot } = z2.object({ autopilot: z2.boolean() }).parse(req.body);
-    const u = getUser(req);
-    const tenant = await storage.getOrCreateTenantForUser(u.id);
-    await storage.setAutopilot(tenant.id, autopilot);
-    audit({
-      userId: u.id,
-      tenantId: tenant.id,
-      action: "set_autopilot_regime",
-      outcome: "success",
-      detail: { autopilot },
-      ipAddress: getIp(req)
-    });
-    res.json({ ok: true });
-  });
-  app2.patch("/api/tenant/bot-status", isAuthenticated, async (req, res) => {
-    const { status } = z2.object({ status: z2.enum(["off", "active", "paused"]) }).parse(req.body);
-    const u = getUser(req);
-    const tenant = await storage.getOrCreateTenantForUser(u.id);
-    if (status === "active" && tenant.activeRegime === "no_trade" && !tenant.autopilotRegime) {
-      return res.status(400).json({ error: "regime_required" });
-    }
-    await storage.setBotStatus(tenant.id, status);
-    audit({
-      userId: u.id,
-      tenantId: tenant.id,
-      action: "set_bot_status",
-      outcome: "success",
-      detail: { status },
-      ipAddress: getIp(req)
-    });
-    res.json({ ok: true });
-  });
-  app2.get("/api/tenant/exchange-keys", isAuthenticated, async (req, res) => {
-    const u = getUser(req);
-    const tenant = await storage.getOrCreateTenantForUser(u.id);
-    res.json(await storage.listExchangeKeyMetadata(tenant.id));
-  });
-  app2.post("/api/tenant/exchange-keys", isAuthenticated, async (req, res) => {
-    const schema = z2.object({
-      exchange: z2.enum(["binance", "bybit"]),
-      apiKey: z2.string().min(10).max(256),
-      apiSecret: z2.string().min(10).max(256)
-    });
-    const parsed = schema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: "invalid" });
-    const u = getUser(req);
-    const tenant = await storage.getOrCreateTenantForUser(u.id);
-    await storage.saveExchangeKey({ ...parsed.data, tenantId: tenant.id });
-    audit({
-      userId: u.id,
-      tenantId: tenant.id,
-      action: "save_exchange_key",
-      resourceType: "exchange_key",
-      outcome: "success",
-      detail: { exchange: parsed.data.exchange },
-      ipAddress: getIp(req)
-    });
-    res.json({ ok: true });
-  });
-  app2.get("/api/markets", isAuthenticated, async (_req, res) => {
-    res.json(await storage.listEnabledPairs());
-  });
   app2.get("/api/admin/users", isAuthenticated, isAdmin, async (_req, res) => {
     res.json(await storage.listUsers());
   });
@@ -1779,24 +1566,34 @@ function registerRoutes(app2) {
       res.json({ ok: true });
     }
   );
-  app2.get("/api/admin/invites", isAuthenticated, isAdmin, async (_req, res) => {
-    res.json(await storage.listInvites());
-  });
-  app2.post("/api/admin/invites", isAuthenticated, isAdmin, async (req, res) => {
-    const parsed = insertInviteSchema.safeParse(req.body);
-    if (!parsed.success) return res.status(400).json({ error: "invalid" });
-    const row = await storage.addInvite(parsed.data.email, getUser(req).id);
-    audit({
-      userId: getUser(req).id,
-      action: "add_invite",
-      resourceType: "invite",
-      resourceId: row?.id,
-      outcome: "success",
-      detail: { email: parsed.data.email },
-      ipAddress: getIp(req)
-    });
-    res.json(row);
-  });
+  app2.get(
+    "/api/admin/invites",
+    isAuthenticated,
+    isAdmin,
+    async (_req, res) => {
+      res.json(await storage.listInvites());
+    }
+  );
+  app2.post(
+    "/api/admin/invites",
+    isAuthenticated,
+    isAdmin,
+    async (req, res) => {
+      const parsed = insertInviteSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: "invalid" });
+      const row = await storage.addInvite(parsed.data.email, getUser(req).id);
+      audit({
+        userId: getUser(req).id,
+        action: "add_invite",
+        resourceType: "invite",
+        resourceId: row?.id,
+        outcome: "success",
+        detail: { email: parsed.data.email },
+        ipAddress: getIp(req)
+      });
+      res.json(row);
+    }
+  );
   app2.delete(
     "/api/admin/invites/:id",
     isAuthenticated,
@@ -1878,18 +1675,23 @@ function registerRoutes(app2) {
     });
     res.json(row);
   });
-  app2.patch("/api/admin/pairs/:id", isAuthenticated, isAdmin, async (req, res) => {
-    await storage.updatePair(pid(req, "id"), req.body);
-    audit({
-      userId: getUser(req).id,
-      action: "update_pair",
-      resourceType: "market_pair",
-      resourceId: pid(req, "id"),
-      outcome: "success",
-      ipAddress: getIp(req)
-    });
-    res.json({ ok: true });
-  });
+  app2.patch(
+    "/api/admin/pairs/:id",
+    isAuthenticated,
+    isAdmin,
+    async (req, res) => {
+      await storage.updatePair(pid(req, "id"), req.body);
+      audit({
+        userId: getUser(req).id,
+        action: "update_pair",
+        resourceType: "market_pair",
+        resourceId: pid(req, "id"),
+        outcome: "success",
+        ipAddress: getIp(req)
+      });
+      res.json({ ok: true });
+    }
+  );
   app2.get(
     "/api/admin/exchanges/binance/symbols",
     isAuthenticated,
@@ -1913,22 +1715,27 @@ function registerRoutes(app2) {
       }
     }
   );
-  app2.delete("/api/admin/pairs/:id", isAuthenticated, isAdmin, async (req, res) => {
-    const id = pid(req, "id");
-    const result = await storage.deletePair(id);
-    if (!result.deleted) {
-      return res.status(409).json({ error: result.reason ?? "cannot_delete" });
+  app2.delete(
+    "/api/admin/pairs/:id",
+    isAuthenticated,
+    isAdmin,
+    async (req, res) => {
+      const id = pid(req, "id");
+      const result = await storage.deletePair(id);
+      if (!result.deleted) {
+        return res.status(409).json({ error: result.reason ?? "cannot_delete" });
+      }
+      audit({
+        userId: getUser(req).id,
+        action: "delete_pair",
+        resourceType: "market_pair",
+        resourceId: id,
+        outcome: "success",
+        ipAddress: getIp(req)
+      });
+      res.json({ ok: true });
     }
-    audit({
-      userId: getUser(req).id,
-      action: "delete_pair",
-      resourceType: "market_pair",
-      resourceId: id,
-      outcome: "success",
-      ipAddress: getIp(req)
-    });
-    res.json({ ok: true });
-  });
+  );
 }
 
 // server/modules/zenny/infrastructure/cache/candleCache.ts
@@ -4716,6 +4523,35 @@ function proposeReachTrade(input) {
   };
 }
 
+// server/modules/zenny/decision/selectTradePlans.ts
+var PHASE_PRIORITY = {
+  take: 0,
+  reach: 1
+};
+function selectTradePlansForTimeframe(plans, currentPrice) {
+  if (plans.length <= 1) return plans;
+  const [winner] = [...plans].sort(
+    (a, b) => compareTradePlans(a, b, currentPrice)
+  );
+  return winner ? [winner] : [];
+}
+function compareTradePlans(a, b, currentPrice) {
+  const actionabilityDiff = entryTravelInRiskUnits(a, currentPrice) - entryTravelInRiskUnits(b, currentPrice);
+  if (Math.abs(actionabilityDiff) > 1e-9) return actionabilityDiff;
+  const rawEntryDistanceDiff = Math.abs(a.entry - currentPrice) - Math.abs(b.entry - currentPrice);
+  if (Math.abs(rawEntryDistanceDiff) > 1e-9) return rawEntryDistanceDiff;
+  const rrDiff = b.riskRewardRatio - a.riskRewardRatio;
+  if (Math.abs(rrDiff) > 1e-9) return rrDiff;
+  const sizeDiff = b.sizeMultiplier - a.sizeMultiplier;
+  if (Math.abs(sizeDiff) > 1e-9) return sizeDiff;
+  return PHASE_PRIORITY[a.phase] - PHASE_PRIORITY[b.phase];
+}
+function entryTravelInRiskUnits(plan, currentPrice) {
+  const riskAbs = Math.abs(plan.entry - plan.stop);
+  if (riskAbs <= 0) return Number.POSITIVE_INFINITY;
+  return Math.abs(plan.entry - currentPrice) / riskAbs;
+}
+
 // server/modules/zenny/decision/wick/checkConfirmation.ts
 function checkConfirmation(input) {
   const { pool: pool2, candles, maxBarsAfterSweep } = input;
@@ -5042,9 +4878,10 @@ function assembleTradePlans(input) {
       config: input.reachConfig
     });
     if (reachPlan !== null) tfPlans.push(reachPlan);
-    if (tfPlans.length > 0) {
-      plansPerTimeframe[tf] = tfPlans;
-      perTimeframe[tf] = tfPlans[0];
+    const selectedPlans = selectTradePlansForTimeframe(tfPlans, currentPrice);
+    if (selectedPlans.length > 0) {
+      plansPerTimeframe[tf] = selectedPlans;
+      perTimeframe[tf] = selectedPlans[0];
     }
   }
   return {
@@ -5433,6 +5270,20 @@ async function fetchRecentLiquidations(opts) {
   }));
 }
 
+// server/modules/zenny/execution/computeSize.ts
+function computeSize(input) {
+  if (input.equity <= 0) return null;
+  if (input.plan.riskPct <= 0) return null;
+  if (input.plan.sizeMultiplier <= 0) return null;
+  const stopDistance = Math.abs(input.plan.entry - input.plan.stop);
+  if (stopDistance === 0) return null;
+  const riskBudget = input.equity * (input.plan.riskPct / 100) * input.plan.sizeMultiplier;
+  const size = riskBudget / stopDistance;
+  if (!Number.isFinite(size) || size <= 0) return null;
+  const notional = size * input.plan.entry;
+  return { size, notional };
+}
+
 // server/modules/zenny/execution/createPosition.ts
 function createPosition(input) {
   return {
@@ -5459,6 +5310,34 @@ function createPosition(input) {
     exitReason: null,
     rejectionReason: null,
     lastEvaluatedAt: input.emittedAtBarTs
+  };
+}
+function submitPosition(position, equity, submittedAtBarTs) {
+  const sizing = computeSize({
+    equity,
+    plan: {
+      entry: position.entryPrice,
+      stop: position.stopPrice,
+      riskPct: position.riskPct,
+      sizeMultiplier: position.sizeMultiplier
+    }
+  });
+  if (sizing === null) {
+    return {
+      ...position,
+      status: "REJECTED",
+      exitReason: "sizing",
+      rejectionReason: "computeSize returned null",
+      lastEvaluatedAt: submittedAtBarTs
+    };
+  }
+  return {
+    ...position,
+    status: "LIVE",
+    size: sizing.size,
+    notional: sizing.notional,
+    submittedAtBarTs,
+    lastEvaluatedAt: submittedAtBarTs
   };
 }
 
@@ -5532,8 +5411,7 @@ function drawdown(current, reference) {
 // server/modules/zenny/execution/applyFillRules.ts
 function applyFillRules(input) {
   const { orderKind, orderPrice, side, bar } = input;
-  const touched = orderPrice >= bar.low && orderPrice <= bar.high;
-  if (!touched) return null;
+  if (!wasOrderTriggered(input)) return null;
   const isLimit = orderKind === "entry-limit" || orderKind === "target-limit";
   const slipApplies = !isLimit || input.applySlippageToLimits;
   if (!slipApplies) {
@@ -5542,6 +5420,16 @@ function applyFillRules(input) {
   const slipFactor = input.slippageBps / 1e4;
   const slipped = side === "long" ? orderPrice * (1 - slipFactor) : orderPrice * (1 + slipFactor);
   return { kind: orderKind, fillPrice: slipped };
+}
+function wasOrderTriggered(input) {
+  const { orderKind, orderPrice, side, bar } = input;
+  if (orderKind === "entry-limit") {
+    return side === "long" ? bar.low <= orderPrice : bar.high >= orderPrice;
+  }
+  if (orderKind === "target-limit") {
+    return side === "long" ? bar.high >= orderPrice : bar.low <= orderPrice;
+  }
+  return side === "long" ? bar.low <= orderPrice : bar.high >= orderPrice;
 }
 function checkEntryFill(input) {
   return applyFillRules({
@@ -5572,20 +5460,6 @@ function checkTargetFill(input) {
     slippageBps: input.config.slippageBps,
     applySlippageToLimits: input.config.applySlippageToLimits
   });
-}
-
-// server/modules/zenny/execution/computeSize.ts
-function computeSize(input) {
-  if (input.equity <= 0) return null;
-  if (input.plan.riskPct <= 0) return null;
-  if (input.plan.sizeMultiplier <= 0) return null;
-  const stopDistance = Math.abs(input.plan.entry - input.plan.stop);
-  if (stopDistance === 0) return null;
-  const riskBudget = input.equity * (input.plan.riskPct / 100) * input.plan.sizeMultiplier;
-  const size = riskBudget / stopDistance;
-  if (!Number.isFinite(size) || size <= 0) return null;
-  const notional = size * input.plan.entry;
-  return { size, notional };
 }
 
 // server/modules/zenny/execution/resolveSameBarConflict.ts
@@ -6024,7 +5898,7 @@ async function runPaperTradeTick(input) {
   if (account.killStatus === "OK") {
     for (const plan of tfPlans) {
       if (openPhases.has(plan.phase)) continue;
-      const pos = createPosition({
+      const drafted = createPosition({
         id: makePositionId(
           input.symbol,
           input.timeframe,
@@ -6035,6 +5909,11 @@ async function runPaperTradeTick(input) {
         plan,
         emittedAtBarTs: latestClosedBar.openTime
       });
+      const pos = submitPosition(
+        drafted,
+        account.currentEquity,
+        latestClosedBar.closeTime
+      );
       await upsertPosition(pos);
       newPositionIds.push(pos.id);
       openPhases.add(plan.phase);
@@ -6130,6 +6009,26 @@ function getProvider() {
   }
   return sharedProvider;
 }
+async function runPaperTradeWatchlistTick(provider) {
+  const results = [];
+  for (const watch of PAPER_TRADE_WATCHLIST) {
+    try {
+      const r = await runPaperTradeTick({
+        provider,
+        symbol: watch.symbol,
+        timeframe: watch.timeframe
+      });
+      results.push(r);
+    } catch (e) {
+      results.push({
+        symbol: watch.symbol,
+        timeframe: watch.timeframe,
+        error: e instanceof Error ? e.message : String(e)
+      });
+    }
+  }
+  return results;
+}
 var VALID_TIMEFRAMES = /* @__PURE__ */ new Set([
   "15m",
   "1H",
@@ -6222,6 +6121,26 @@ function registerZennyRoutes(app2) {
     }
   );
   app2.post(
+    "/api/zenny/dev/paper-trade-tick",
+    isAuthenticated,
+    async (_req, res) => {
+      if (process.env.NODE_ENV === "production") {
+        return res.status(404).json({ error: "not_found" });
+      }
+      try {
+        const provider = getProvider();
+        const results = await runPaperTradeWatchlistTick(provider);
+        res.json({ ok: true, tickedAt: Date.now(), results });
+      } catch (err) {
+        console.error("[zenny] dev paper-trade-tick failed", err);
+        res.status(500).json({
+          error: "tick_failed",
+          message: err instanceof Error ? err.message : String(err)
+        });
+      }
+    }
+  );
+  app2.post(
     "/api/zenny/paper-trade-tick",
     async (req, res) => {
       const auth = req.headers.authorization ?? "";
@@ -6237,23 +6156,7 @@ function registerZennyRoutes(app2) {
       }
       try {
         const provider = getProvider();
-        const results = [];
-        for (const watch of PAPER_TRADE_WATCHLIST) {
-          try {
-            const r = await runPaperTradeTick({
-              provider,
-              symbol: watch.symbol,
-              timeframe: watch.timeframe
-            });
-            results.push(r);
-          } catch (e) {
-            results.push({
-              symbol: watch.symbol,
-              timeframe: watch.timeframe,
-              error: e instanceof Error ? e.message : String(e)
-            });
-          }
-        }
+        const results = await runPaperTradeWatchlistTick(provider);
         res.json({ ok: true, tickedAt: Date.now(), results });
       } catch (err) {
         console.error("[zenny] paper-trade-tick failed", err);

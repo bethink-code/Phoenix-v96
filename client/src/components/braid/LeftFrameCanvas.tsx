@@ -43,6 +43,9 @@ const C = {
   supDead: "rgba(29,158,117,0.55)",
   supDeadBdr: "rgba(29,158,117,0.95)",
   nowLine: "rgba(61,61,58,0.45)",
+  monoBodyUpFill: "rgba(186,186,181,0.92)",
+  monoBodyDnFill: "rgba(98,98,94,0.9)",
+  monoWick: "rgba(84,84,80,0.58)",
 };
 
 const PAD = CHART_PAD;
@@ -67,6 +70,7 @@ const TF_RANK: Record<string, number> = {
 interface Props {
   state: AnalysisStateClient;
   chartType?: "candles" | "line";
+  monochromeCandles?: boolean;
   // Target number of structural turning points when chartType="line".
   // The simplifier iterates epsilon via binary search until the RDP output
   // has approximately this many vertices. Universal across TFs — "give me
@@ -125,6 +129,7 @@ interface Dims {
 export function LeftFrameCanvas({
   state,
   chartType = "candles",
+  monochromeCandles = false,
   targetPoints = 15,
   showCurrentTf = true,
   showOtherTfs = true,
@@ -205,6 +210,7 @@ export function LeftFrameCanvas({
       showSweptPools,
       showDeadPools,
       chartType,
+      monochromeCandles,
       targetPoints,
       showRegimeStrip,
     });
@@ -214,6 +220,7 @@ export function LeftFrameCanvas({
     showSweptPools,
     showDeadPools,
     chartType,
+    monochromeCandles,
     targetPoints,
     showRegimeStrip,
     dims,
@@ -975,6 +982,7 @@ function drawCanvas(
     showSweptPools: boolean;
     showDeadPools: boolean;
     chartType: "candles" | "line";
+    monochromeCandles: boolean;
     targetPoints: number;
     showRegimeStrip: boolean;
   },
@@ -1155,7 +1163,11 @@ function drawCanvas(
       const yL = dims.toY(c.low);
       const isUp = c.close >= c.open;
 
-      ctx.strokeStyle = isUp ? C.wickUp : C.wickDn;
+      ctx.strokeStyle = opts.monochromeCandles
+        ? C.monoWick
+        : isUp
+          ? C.wickUp
+          : C.wickDn;
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(x, yH);
@@ -1168,7 +1180,13 @@ function drawCanvas(
 
       const bT = Math.min(yO, yC);
       const bH = Math.max(1.5, Math.abs(yC - yO));
-      ctx.fillStyle = isUp ? C.bodyUp : C.bodyDn;
+      ctx.fillStyle = opts.monochromeCandles
+        ? isUp
+          ? C.monoBodyUpFill
+          : C.monoBodyDnFill
+        : isUp
+          ? C.bodyUp
+          : C.bodyDn;
       ctx.fillRect(x - dims.halfWidth, bT, dims.halfWidth * 2, bH);
     }
   }

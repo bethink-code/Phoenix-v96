@@ -1,9 +1,9 @@
 {
-  "name": "phoenix-v96",
+  "name": "zenny-braid",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Multi-tenant crypto liquidity sweep trading bot",
+  "description": "Chart-first liquidity analysis and paper-trading workspace",
   "scripts": {
     "predev": "kill-port 5000 5173 5174 5175 5176 5177",
     "dev:server": "npx tsx watch server/index.ts",

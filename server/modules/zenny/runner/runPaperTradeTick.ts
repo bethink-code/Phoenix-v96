@@ -8,7 +8,7 @@
 //   5. Load any open position.
 //   6. If open: reduceStep with the latest closed bar.
 //      - On CLOSED transition: update account currentEquity + peakEquity.
-//   7. Else if no open AND TradePlan exists: createPosition + persist as PLANNED.
+//   7. Else if no open AND TradePlan exists: create + submit the paper order.
 //   8. Re-evaluate kill switch with new equity.
 //   9. Persist account + log tick.
 //
@@ -17,7 +17,7 @@
 import type { Candle, Timeframe } from "../../../../shared/zennyTypes";
 import { runAnalysis } from "../analysis/orchestrator";
 import { fetchRecentLiquidations } from "../analysis/data/fetchRecentLiquidations";
-import { createPosition } from "../execution/createPosition";
+import { createPosition, submitPosition } from "../execution/createPosition";
 import {
   DEFAULT_EXECUTION_CONFIG,
   type ExecutionConfig,
@@ -177,9 +177,9 @@ export async function runPaperTradeTick(
     }
   }
 
-  // Multi-plan handling — REACH and TAKE can both fire on the same TF.
-  // Dedup by (symbol, tf, phase): if there's already an open position for a
-  // phase, skip creating another one. Soft-kill blocks NEW entries.
+  // New-entry handling. The decision layer now selects one active plan per
+  // timeframe, but we still dedup by phase so stale open positions from older
+  // ticks do not get duplicated. Soft-kill blocks NEW entries.
   const tfPlans =
     analysisState.tradePlanResult.plansPerTimeframe?.[input.timeframe] ?? [];
   const stillOpen = (
@@ -194,7 +194,7 @@ export async function runPaperTradeTick(
   if (account.killStatus === "OK") {
     for (const plan of tfPlans) {
       if (openPhases.has(plan.phase)) continue; // dedup
-      const pos = createPosition({
+      const drafted = createPosition({
         id: makePositionId(
           input.symbol,
           input.timeframe,
@@ -205,6 +205,11 @@ export async function runPaperTradeTick(
         plan,
         emittedAtBarTs: latestClosedBar.openTime,
       });
+      const pos = submitPosition(
+        drafted,
+        account.currentEquity,
+        latestClosedBar.closeTime,
+      );
       await upsertPosition(pos);
       newPositionIds.push(pos.id);
       openPhases.add(plan.phase);

@@ -22,7 +22,7 @@ export default function TermsModal() {
         <h2 className="text-xl font-semibold">Terms of use</h2>
         <div className="mt-4 space-y-3 text-sm text-muted-foreground">
           <p>
-            <strong className="text-foreground">Phoenix v96 trades on your behalf.</strong>{" "}
+            <strong className="text-foreground">Zenny Braid evaluates and paper-trades on your behalf.</strong>{" "}
             You are responsible for the capital committed to your exchange account. The platform
             enforces risk limits you configure, but it cannot guarantee profit.
           </p>

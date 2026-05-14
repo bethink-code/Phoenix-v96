@@ -46,6 +46,9 @@ export interface ChartViewProps {
   // Always-on geometry (kept as fields for symmetry; effectively true
   // unless explicitly turned off by a future scope).
   showCandles: boolean;
+  // When true, candles render in a neutral black/white palette so overlays
+  // can carry the focus without the chart fighting for attention.
+  monochromeCandles: boolean;
   // Per-TF level / pool visibility — manual toggles in the default
   // scope, overridden when a scope is active.
   showCurrentTf: boolean;
@@ -57,6 +60,8 @@ export interface ChartViewProps {
   showLevels: boolean;
   // Regime overlay — top-edge strip coloured by recommended playbook.
   showRegimeStrip: boolean;
+  showOrderPlans: boolean;
+  showPaperTrades: boolean;
 }
 
 // Per-scope override map. Each scope spells out exactly what's shown.
@@ -66,6 +71,7 @@ const SCOPE_PRESETS: Record<Exclude<ChartScope, "default">, ChartViewProps> = {
   // REGIME — chart focused on regime/playbook timeline.
   regime: {
     showCandles: true,
+    monochromeCandles: false,
     showCurrentTf: false,
     showOtherTfs: false,
     showPools: false,
@@ -73,10 +79,13 @@ const SCOPE_PRESETS: Record<Exclude<ChartScope, "default">, ChartViewProps> = {
     showDeadPools: false,
     showLevels: false,
     showRegimeStrip: true,
+    showOrderPlans: false,
+    showPaperTrades: false,
   },
   // LEVELS — chart focused on structural lines and pool zones.
   levels: {
     showCandles: true,
+    monochromeCandles: false,
     showCurrentTf: true,
     showOtherTfs: true,
     showPools: true,
@@ -84,12 +93,15 @@ const SCOPE_PRESETS: Record<Exclude<ChartScope, "default">, ChartViewProps> = {
     showDeadPools: false,
     showLevels: true,
     showRegimeStrip: false,
+    showOrderPlans: false,
+    showPaperTrades: false,
   },
   // ORDERS — chart focused on active orders. Order rendering is not
   // yet implemented; the scope hides everything else so when orders
   // land they slot in cleanly.
   orders: {
     showCandles: true,
+    monochromeCandles: true,
     showCurrentTf: false,
     showOtherTfs: false,
     showPools: false,
@@ -97,11 +109,14 @@ const SCOPE_PRESETS: Record<Exclude<ChartScope, "default">, ChartViewProps> = {
     showDeadPools: false,
     showLevels: false,
     showRegimeStrip: false,
+    showOrderPlans: true,
+    showPaperTrades: false,
   },
   // TRADES — chart focused on completed trade markers. Same caveat as
   // orders — trade-marker rendering is not yet implemented.
   trades: {
     showCandles: true,
+    monochromeCandles: true,
     showCurrentTf: false,
     showOtherTfs: false,
     showPools: false,
@@ -109,6 +124,8 @@ const SCOPE_PRESETS: Record<Exclude<ChartScope, "default">, ChartViewProps> = {
     showDeadPools: false,
     showLevels: false,
     showRegimeStrip: false,
+    showOrderPlans: false,
+    showPaperTrades: true,
   },
 };
 

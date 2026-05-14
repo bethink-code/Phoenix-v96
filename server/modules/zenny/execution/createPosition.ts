@@ -8,6 +8,7 @@
 // for replay).
 
 import type { TradePlan } from "../decision/types";
+import { computeSize } from "./computeSize";
 import type { PositionRecord } from "./types";
 
 export interface CreatePositionInput {
@@ -44,5 +45,39 @@ export function createPosition(
     exitReason: null,
     rejectionReason: null,
     lastEvaluatedAt: input.emittedAtBarTs,
+  };
+}
+
+export function submitPosition(
+  position: PositionRecord,
+  equity: number,
+  submittedAtBarTs: number,
+): PositionRecord {
+  const sizing = computeSize({
+    equity,
+    plan: {
+      entry: position.entryPrice,
+      stop: position.stopPrice,
+      riskPct: position.riskPct,
+      sizeMultiplier: position.sizeMultiplier,
+    },
+  });
+  if (sizing === null) {
+    return {
+      ...position,
+      status: "REJECTED",
+      exitReason: "sizing",
+      rejectionReason: "computeSize returned null",
+      lastEvaluatedAt: submittedAtBarTs,
+    };
+  }
+
+  return {
+    ...position,
+    status: "LIVE",
+    size: sizing.size,
+    notional: sizing.notional,
+    submittedAtBarTs,
+    lastEvaluatedAt: submittedAtBarTs,
   };
 }

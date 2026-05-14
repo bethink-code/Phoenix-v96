@@ -1,23 +1,12 @@
-// ORDERS column content — the trading strategy for the current regime
-// and the concrete TradePlan it produced.
+// ORDERS column content - the strategy for the current regime and the
+// concrete order intentions it produced for the active timeframe.
 //
-// Replaces the previous Hyblock-liq-levels content. Liq-level data still
-// renders as a chart overlay (LiqOverlay) when ORDERS is expanded; this
-// component is about "what would I trade on this regime?" not "what's
-// in the order book / liquidation map."
-//
-// COLLAPSED — small vertical pill showing direction + R:R or "no trade."
-// EXPANDED  — full strategy block:
-//   • playbook + tagline + strength/confidence
-//   • TradePlan: side, entry, stop, target, R:R, size, with $ and %
-//   • Why-this-geometry rationale (from proposer)
-//   • Invalidation: the stop level + plain-language meaning
-//
-// Renders directly off AnalysisStateClient.tradePlan +
-// AnalysisStateClient.regimeAssessment.primary. Both come from the
-// orchestrator — no fetching here.
+// The chart can render multiple intentions at once (for example TAKE and
+// REACH on the same timeframe). This column needs to tell the same truth as
+// the chart, not collapse everything down to a single backward-compat plan.
 
 import type {
+  PaperPositionClient,
   PlaybookClient,
   RegimeAssessmentResultClient,
   TradePlanClient,
@@ -28,10 +17,8 @@ const C = {
   textStrong: "#3d3d3a",
   textDim: "#aaaaa3",
   rule: "rgba(0,0,0,0.06)",
-  bgSubtle: "rgba(0,0,0,0.025)",
   long: "#1d9e75",
   short: "#b14746",
-  amber: "#c89a4a",
 };
 
 const PLAYBOOK_LABEL: Record<PlaybookClient, string> = {
@@ -57,19 +44,52 @@ const PLAYBOOK_COLOR: Record<PlaybookClient, string> = {
 
 interface Props {
   tradePlan: TradePlanClient | null;
+  tradePlans: TradePlanClient[];
+  restingOrders: PaperPositionClient[];
   assessment: RegimeAssessmentResultClient | null;
   chartHeight: number;
 }
 
-// ---------------------------------------------------------------------------
-// Collapsed
-// ---------------------------------------------------------------------------
-
 export function OrdersStrategyColumnCollapsed({
   tradePlan,
+  tradePlans,
+  restingOrders,
   chartHeight,
 }: Props) {
-  if (!tradePlan) {
+  const displayPlan = tradePlan ?? tradePlans[0] ?? null;
+  if (!displayPlan) {
+    if (restingOrders.length > 0) {
+      const displayOrder = restingOrders[0];
+      const orderStateLabel =
+        displayOrder.submittedAtBarTs != null ? "on book" : "queued";
+      const sideColor = displayOrder.side === "long" ? C.long : C.short;
+      return (
+        <div
+          className="relative w-full flex flex-col items-center justify-center gap-1"
+          style={{ height: chartHeight }}
+        >
+          <div
+            style={{ color: sideColor, fontSize: 13, fontWeight: 600, lineHeight: 1 }}
+          >
+            {displayOrder.side === "long" ? "▲" : "▼"}
+          </div>
+          <div
+            style={{
+              color: C.textStrong,
+              fontSize: 8,
+              fontWeight: 600,
+              lineHeight: 1,
+              letterSpacing: "0.04em",
+            }}
+          >
+            {displayOrder.phase.slice(0, 3).toUpperCase()}
+          </div>
+          <div style={{ color: C.textDim, fontSize: 8, lineHeight: 1 }}>
+            {orderStateLabel}
+          </div>
+        </div>
+      );
+    }
     return (
       <div
         className="relative w-full flex items-center justify-center"
@@ -81,14 +101,22 @@ export function OrdersStrategyColumnCollapsed({
       </div>
     );
   }
-  const sideColor = tradePlan.side === "long" ? C.long : C.short;
-  const arrow = tradePlan.side === "long" ? "▲" : "▼";
-  const playbookColor = PLAYBOOK_COLOR[tradePlan.playbook];
+
+  const sideColor = displayPlan.side === "long" ? C.long : C.short;
+  const arrow = displayPlan.side === "long" ? "▲" : "▼";
+  const playbookColor = PLAYBOOK_COLOR[displayPlan.playbook];
+  const hasSubmittedOrder = restingOrders.some(
+    (order) => order.submittedAtBarTs != null,
+  );
+  const hasQueuedOrder =
+    restingOrders.length > 0 && !hasSubmittedOrder;
+  const restingLabel = hasSubmittedOrder ? "on book" : "queued";
+
   return (
     <div
       className="relative w-full flex flex-col items-center justify-center gap-1"
       style={{ height: chartHeight }}
-      title={`${PLAYBOOK_LABEL[tradePlan.playbook]} ${tradePlan.side.toUpperCase()} · entry ${formatPrice(tradePlan.entry)} · stop ${formatPrice(tradePlan.stop)} · target ${formatPrice(tradePlan.target)} · R:R ${tradePlan.riskRewardRatio.toFixed(1)}× · size ${tradePlan.sizeMultiplier.toFixed(1)}×`}
+      title={`${PLAYBOOK_LABEL[displayPlan.playbook]} ${displayPlan.side.toUpperCase()} - entry ${formatPrice(displayPlan.entry)} - stop ${formatPrice(displayPlan.stop)} - target ${formatPrice(displayPlan.target)} - R:R ${displayPlan.riskRewardRatio.toFixed(1)}x - size ${displayPlan.sizeMultiplier.toFixed(1)}x`}
     >
       <div
         style={{ color: sideColor, fontSize: 13, fontWeight: 600, lineHeight: 1 }}
@@ -104,7 +132,7 @@ export function OrdersStrategyColumnCollapsed({
           lineHeight: 1,
         }}
       >
-        {tradePlan.riskRewardRatio.toFixed(1)}R
+        {displayPlan.riskRewardRatio.toFixed(1)}R
       </div>
       <div
         style={{
@@ -115,39 +143,122 @@ export function OrdersStrategyColumnCollapsed({
           lineHeight: 1,
         }}
       >
-        {tradePlan.playbook.slice(0, 3).toUpperCase()}
+        {displayPlan.playbook.slice(0, 3).toUpperCase()}
+      </div>
+      {tradePlans.length > 1 && (
+        <div style={{ color: C.textDim, fontSize: 8, lineHeight: 1 }}>
+          {tradePlans.length}x
+        </div>
+      )}
+      {restingOrders.length > 0 && (
+        <div style={{ color: C.textDim, fontSize: 8, lineHeight: 1 }}>
+          {restingLabel}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function OrdersStrategyColumnExpanded({
+  tradePlan,
+  tradePlans,
+  restingOrders,
+  assessment,
+}: Props) {
+  const displayPlans =
+    tradePlans.length > 0 ? tradePlans : tradePlan ? [tradePlan] : [];
+  const sortedRestingOrders = restingOrders
+    .slice()
+    .sort(
+      (a, b) =>
+        (b.submittedAtBarTs ?? b.emittedAtBarTs) -
+        (a.submittedAtBarTs ?? a.emittedAtBarTs),
+    );
+  if (displayPlans.length === 0 && sortedRestingOrders.length === 0) {
+    return <NoTradeBlock assessment={assessment} />;
+  }
+
+  const primaryPlan = tradePlan ?? displayPlans[0] ?? null;
+
+  return (
+    <div className="flex flex-col gap-3" style={{ color: C.textStrong }}>
+      {primaryPlan ? (
+        <StrategyBlock playbook={primaryPlan.playbook} assessment={assessment} />
+      ) : (
+        <OrderStateOnlyBlock />
+      )}
+      {sortedRestingOrders.length > 0 && (
+        <RestingOrdersBlock restingOrders={sortedRestingOrders} />
+      )}
+      {displayPlans.length > 1 && (
+        <div
+          style={{
+            color: C.text,
+            fontSize: 11,
+            paddingTop: 8,
+            borderTop: `1px solid ${C.rule}`,
+          }}
+        >
+          {displayPlans.length} active order intentions on this timeframe.
+        </div>
+      )}
+      {displayPlans.map((plan, index) => (
+        <TradePlanBlock
+          key={`${plan.phase}-${plan.side}-${plan.entry}-${index}`}
+          plan={plan}
+          heading={
+            displayPlans.length > 1
+              ? `CURRENT ANALYSIS ${index + 1}`
+              : sortedRestingOrders.length > 0
+                ? "CURRENT ANALYSIS"
+                : "POSSIBLE TRADE"
+          }
+        />
+      ))}
+    </div>
+  );
+}
+
+function RestingOrdersBlock({
+  restingOrders,
+}: {
+  restingOrders: PaperPositionClient[];
+}) {
+  const submittedOrders = restingOrders.filter(
+    (order) => order.submittedAtBarTs != null,
+  );
+  const queuedOrders = restingOrders.filter(
+    (order) => order.submittedAtBarTs == null,
+  );
+  const summaryText =
+    submittedOrders.length > 0 && queuedOrders.length > 0
+      ? `${submittedOrders.length} paper order${submittedOrders.length === 1 ? "" : "s"} ${submittedOrders.length === 1 ? "is" : "are"} already on the book, and ${queuedOrders.length} ${queuedOrders.length === 1 ? "is" : "are"} still queued for the next runner step.`
+      : submittedOrders.length > 0
+        ? submittedOrders.length === 1
+          ? "1 paper order is already on the book and waiting for a wick fill."
+          : `${submittedOrders.length} paper orders are already on the book and waiting for wick fills.`
+        : queuedOrders.length === 1
+          ? "1 paper order is queued but has not been submitted onto the book yet."
+          : `${queuedOrders.length} paper orders are queued but have not been submitted onto the book yet.`;
+
+  return (
+    <div
+      style={{
+        color: C.text,
+        fontSize: 11,
+        paddingTop: 8,
+        borderTop: `1px solid ${C.rule}`,
+      }}
+    >
+      <div style={{ marginBottom: 8 }}>{summaryText}</div>
+      <div className="flex flex-col gap-2">
+        {restingOrders.map((order) => (
+          <RestingOrderBlock key={order.id} order={order} />
+        ))}
       </div>
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Expanded
-// ---------------------------------------------------------------------------
-
-export function OrdersStrategyColumnExpanded({
-  tradePlan,
-  assessment,
-}: Props) {
-  if (!tradePlan) {
-    return <NoTradeBlock assessment={assessment} />;
-  }
-  return (
-    <div className="flex flex-col gap-3" style={{ color: C.textStrong }}>
-      <StrategyBlock
-        playbook={tradePlan.playbook}
-        assessment={assessment}
-      />
-      <TradePlanBlock plan={tradePlan} />
-      <RationaleBlock rationale={tradePlan.rationale} />
-      <InvalidationBlock plan={tradePlan} />
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Sub-components
-// ---------------------------------------------------------------------------
 
 function StrategyBlock({
   playbook,
@@ -158,6 +269,7 @@ function StrategyBlock({
 }) {
   const color = PLAYBOOK_COLOR[playbook];
   const playbookData = assessment?.primary.playbooks[playbook];
+
   return (
     <div>
       <div
@@ -206,10 +318,48 @@ function StrategyBlock({
   );
 }
 
-function TradePlanBlock({ plan }: { plan: TradePlanClient }) {
+function OrderStateOnlyBlock() {
+  return (
+    <div>
+      <div
+        style={{
+          color: C.text,
+          fontSize: 10,
+          letterSpacing: "0.06em",
+          marginBottom: 4,
+        }}
+      >
+        STRATEGY
+      </div>
+      <div
+        style={{
+          color: C.textStrong,
+          fontSize: 16,
+          fontWeight: 600,
+          letterSpacing: "0.03em",
+        }}
+      >
+        ORDER STATE
+      </div>
+      <div style={{ color: C.text, fontSize: 11, marginTop: 2 }}>
+        No fresh setup is being proposed right now, but an older paper order is
+        still resting.
+      </div>
+    </div>
+  );
+}
+
+function TradePlanBlock({
+  plan,
+  heading,
+}: {
+  plan: TradePlanClient;
+  heading: string;
+}) {
   const sideColor = plan.side === "long" ? C.long : C.short;
   const stopDistance = ((plan.stop - plan.entry) / plan.entry) * 100;
   const targetDistance = ((plan.target - plan.entry) / plan.entry) * 100;
+
   return (
     <div
       style={{
@@ -225,8 +375,21 @@ function TradePlanBlock({ plan }: { plan: TradePlanClient }) {
             letterSpacing: "0.06em",
           }}
         >
-          POSSIBLE TRADE
+          {heading}
         </div>
+        <div
+          style={{
+            color: C.textDim,
+            fontSize: 10,
+            fontWeight: 600,
+            letterSpacing: "0.04em",
+          }}
+        >
+          {plan.phase.toUpperCase()}
+        </div>
+      </div>
+
+      <div className="flex justify-between items-baseline" style={{ marginTop: 6 }}>
         <div
           style={{
             color: sideColor,
@@ -236,6 +399,9 @@ function TradePlanBlock({ plan }: { plan: TradePlanClient }) {
           }}
         >
           {plan.side === "long" ? "▲ LONG" : "▼ SHORT"}
+        </div>
+        <div style={{ color: C.text, fontSize: 11 }}>
+          {PLAYBOOK_LABEL[plan.playbook]}
         </div>
       </div>
 
@@ -268,118 +434,162 @@ function TradePlanBlock({ plan }: { plan: TradePlanClient }) {
             className="tabular-nums"
             style={{ color: C.textStrong, fontWeight: 600 }}
           >
-            {plan.riskRewardRatio.toFixed(1)}×
+            {plan.riskRewardRatio.toFixed(1)}x
           </span>
         </span>
         <span style={{ color: C.text }}>
           Risk{" "}
-          <span
-            className="tabular-nums"
-            style={{ color: C.textStrong }}
-          >
+          <span className="tabular-nums" style={{ color: C.textStrong }}>
             {plan.riskPct.toFixed(2)}%
           </span>
         </span>
         <span style={{ color: C.text }}>
           Size{" "}
-          <span
-            className="tabular-nums"
-            style={{ color: C.textStrong }}
-          >
-            {plan.sizeMultiplier.toFixed(1)}×
+          <span className="tabular-nums" style={{ color: C.textStrong }}>
+            {plan.sizeMultiplier.toFixed(1)}x
           </span>
         </span>
       </div>
-    </div>
-  );
-}
 
-function RationaleBlock({ rationale }: { rationale: string[] }) {
-  if (rationale.length === 0) return null;
-  return (
-    <div
-      style={{
-        paddingTop: 8,
-        borderTop: `1px solid ${C.rule}`,
-      }}
-    >
-      <div
-        style={{
-          color: C.text,
-          fontSize: 10,
-          letterSpacing: "0.06em",
-          marginBottom: 4,
-        }}
-      >
-        WHY THIS GEOMETRY
-      </div>
-      <ul
-        style={{
-          listStyle: "none",
-          padding: 0,
-          margin: 0,
-          fontSize: 11,
-          color: C.textStrong,
-          lineHeight: 1.5,
-        }}
-      >
-        {rationale.map((line, i) => (
-          <li key={i} style={{ position: "relative", paddingLeft: 10 }}>
-            <span
-              style={{
-                position: "absolute",
-                left: 0,
-                top: 0,
-                color: C.textDim,
-              }}
-            >
-              ·
-            </span>
-            {line}
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-function InvalidationBlock({ plan }: { plan: TradePlanClient }) {
-  const direction =
-    plan.side === "long" ? "below" : "above";
-  return (
-    <div
-      style={{
-        paddingTop: 8,
-        borderTop: `1px solid ${C.rule}`,
-      }}
-    >
-      <div
-        style={{
-          color: C.text,
-          fontSize: 10,
-          letterSpacing: "0.06em",
-          marginBottom: 4,
-        }}
-      >
-        INVALIDATED IF
-      </div>
-      <div
-        style={{
-          fontSize: 11,
-          color: C.textStrong,
-          lineHeight: 1.5,
-        }}
-      >
-        Price closes {direction}{" "}
-        <span
-          className="tabular-nums"
-          style={{ fontWeight: 600 }}
+      {plan.rationale.length > 0 && (
+        <div
+          style={{
+            marginTop: 8,
+            paddingTop: 8,
+            borderTop: `1px dashed ${C.rule}`,
+          }}
         >
-          {formatPrice(plan.stop)}
+          <div
+            style={{
+              color: C.text,
+              fontSize: 10,
+              letterSpacing: "0.06em",
+              marginBottom: 4,
+            }}
+          >
+            WHY THIS GEOMETRY
+          </div>
+          <ul
+            style={{
+              listStyle: "none",
+              padding: 0,
+              margin: 0,
+              fontSize: 11,
+              color: C.textStrong,
+              lineHeight: 1.5,
+            }}
+          >
+            {plan.rationale.map((line, i) => (
+              <li key={i} style={{ position: "relative", paddingLeft: 10 }}>
+                <span
+                  style={{
+                    position: "absolute",
+                    left: 0,
+                    top: 0,
+                    color: C.textDim,
+                  }}
+                >
+                  .
+                </span>
+                {line}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RestingOrderBlock({
+  order,
+}: {
+  order: PaperPositionClient;
+}) {
+  const sideColor = order.side === "long" ? C.long : C.short;
+  const stateLabel =
+    order.submittedAtBarTs != null ? "RESTING PAPER ORDER" : "QUEUED PAPER ORDER";
+  const stopDistance = ((order.stopPrice - order.entryPrice) / order.entryPrice) * 100;
+  const targetDistance = ((order.targetPrice - order.entryPrice) / order.entryPrice) * 100;
+
+  return (
+    <div
+      style={{
+        paddingTop: 8,
+        borderTop: `1px dashed ${C.rule}`,
+      }}
+    >
+      <div className="flex justify-between items-baseline">
+        <div
+          style={{
+            color: C.text,
+            fontSize: 10,
+            letterSpacing: "0.06em",
+          }}
+        >
+          {stateLabel}
+        </div>
+        <div
+          style={{
+            color: C.textDim,
+            fontSize: 10,
+            fontWeight: 600,
+            letterSpacing: "0.04em",
+          }}
+        >
+          {order.phase.toUpperCase()}
+        </div>
+      </div>
+
+      <div className="flex justify-between items-baseline" style={{ marginTop: 6 }}>
+        <div
+          style={{
+            color: sideColor,
+            fontSize: 12,
+            fontWeight: 600,
+            letterSpacing: "0.04em",
+          }}
+        >
+          {order.side === "long" ? "▲ LONG" : "▼ SHORT"}
+        </div>
+        <div style={{ color: C.text, fontSize: 11 }}>{order.status}</div>
+      </div>
+
+      <div className="flex flex-col gap-1" style={{ marginTop: 8 }}>
+        <Row label="Entry" value={formatPrice(order.entryPrice)} />
+        <Row
+          label="Stop"
+          value={`${formatPrice(order.stopPrice)}  (${formatSignedPct(stopDistance)})`}
+          tone="negative"
+        />
+        <Row
+          label="Target"
+          value={`${formatPrice(order.targetPrice)}  (${formatSignedPct(targetDistance)})`}
+          tone="positive"
+        />
+      </div>
+
+      <div
+        className="flex gap-4"
+        style={{
+          marginTop: 8,
+          paddingTop: 8,
+          borderTop: `1px dashed ${C.rule}`,
+          fontSize: 11,
+        }}
+      >
+        <span style={{ color: C.text }}>
+          Risk{" "}
+          <span className="tabular-nums" style={{ color: C.textStrong }}>
+            {order.riskPct.toFixed(2)}%
+          </span>
         </span>
-        {" — "}
-        the {plan.side === "long" ? "support" : "resistance"} that anchors this
-        plan has failed.
+        <span style={{ color: C.text }}>
+          Size{" "}
+          <span className="tabular-nums" style={{ color: C.textStrong }}>
+            {order.sizeMultiplier.toFixed(1)}x
+          </span>
+        </span>
       </div>
     </div>
   );
@@ -426,11 +636,8 @@ function NoTradeBlock({
             color: C.text,
           }}
         >
-          <div style={{ marginBottom: 4 }}>
-            Each playbook is either below the threshold or vetoed by the
-            regime layer. Open the REGIME column to see strengths +
-            reasons per playbook.
-          </div>
+          Each playbook is either below threshold or vetoed by the regime
+          layer. Open the REGIME column to inspect the evidence.
         </div>
       )}
     </div>
@@ -452,6 +659,7 @@ function Row({
       : tone === "negative"
         ? C.short
         : C.textStrong;
+
   return (
     <div className="flex justify-between items-baseline">
       <span style={{ color: C.text, fontSize: 11 }}>{label}</span>
