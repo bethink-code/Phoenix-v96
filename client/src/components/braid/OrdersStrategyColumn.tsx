@@ -600,6 +600,9 @@ function NoTradeBlock({
 }: {
   assessment: RegimeAssessmentResultClient | null;
 }) {
+  const recommendedPlaybook = assessment?.primary.recommended?.playbook ?? null;
+  const regimeAllowsTrading = recommendedPlaybook !== null;
+
   return (
     <div className="flex flex-col gap-3" style={{ color: C.textStrong }}>
       <div>
@@ -624,7 +627,9 @@ function NoTradeBlock({
           NO TRADE
         </div>
         <div style={{ color: C.text, fontSize: 11, marginTop: 2 }}>
-          No playbook is recommended on the primary timeframe.
+          {regimeAllowsTrading && recommendedPlaybook
+            ? `${PLAYBOOK_LABEL[recommendedPlaybook]} is tradeable as the current environment, but the order engine did not find an executable setup on this timeframe.`
+            : "No playbook is recommended on the primary timeframe."}
         </div>
       </div>
       {assessment && (
@@ -636,8 +641,9 @@ function NoTradeBlock({
             color: C.text,
           }}
         >
-          Each playbook is either below threshold or vetoed by the regime
-          layer. Open the REGIME column to inspect the evidence.
+          {regimeAllowsTrading
+            ? "The regime layer is open, but the concrete order rules still did not produce a valid geometry. Open REGIME for context and wait for the actual setup conditions."
+            : "Each playbook is either below threshold or vetoed by the regime layer. Open the REGIME column to inspect the evidence."}
         </div>
       )}
     </div>
