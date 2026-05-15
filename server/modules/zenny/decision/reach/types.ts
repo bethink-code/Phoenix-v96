@@ -9,12 +9,18 @@
 // here are paper-test schedule items R1–R7. See
 // memory/zenny_two_phase_strategy.md and zenny_paper_testing_schedule.md.
 
+import type { Playbook } from "../../analysis/regime/types";
+
 export type ReachEntryMethod =
   | "at-market"
   | "pullback-swing"
   | "pullback-fvg";
 
 export interface ReachTradeConfig {
+  // REACH is a continuation idea. Keep it out of regimes where the cleaner
+  // behavior is to fade the edges instead of chasing the middle.
+  allowedPlaybooks: Playbook[];
+
   // R1 — pull asymmetry threshold. dominant/subordinate must exceed this for
   // a REACH to fire. Default 2.0 (no published anchor; closest is Dalton's
   // 150–300% HVN density and Proof Trading's ~2× outsized-liquidity gate).
@@ -52,6 +58,10 @@ export interface ReachTradeConfig {
   // R6 — sizing multiplier vs the TAKE base sizing. 1.0 = same R per trade
   // (Van Tharp). Half-Kelly intuition: drop to 0.5 if win rate < 35%.
   sizeMultiplierVsTake: number;
+
+  // Hard veto for silly geometry. If the reward doesn't at least clear this
+  // multiple of the risk, the plan never reaches the runner or UI.
+  minRiskRewardRatio: number;
 
   // R7 — conflict-zone distance to pool that suppresses NEW REACH entries.
   // When current price is within N × ATR of the dominant pool centre, we

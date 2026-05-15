@@ -21,7 +21,6 @@ import type { Candle, Timeframe } from "../../../../../shared/zennyTypes";
 import type { ExtractedArms } from "../../analysis/arms/extractArms";
 import type { AnalysisPool } from "../../analysis/orchestrator";
 import type {
-  Playbook,
   TfRegimeAssessment,
 } from "../../analysis/regime/types";
 import type { TradePlan, TradeSide } from "../types";
@@ -44,6 +43,9 @@ export function proposeReachTrade(
   input: ProposeReachTradeInput,
 ): TradePlan | null {
   const cfg = input.config ?? DEFAULT_REACH_CONFIG;
+  const playbook = input.assessment.recommended?.playbook;
+  if (!playbook) return null;
+  if (!cfg.allowedPlaybooks.includes(playbook)) return null;
 
   // Asymmetry gate.
   const asym = computeAsymmetry(input.arms);
@@ -134,19 +136,19 @@ export function proposeReachTrade(
   const riskAbs = Math.abs(entry - stop);
   const rewardAbs = Math.abs(target - entry);
   if (riskAbs === 0 || entry === 0) return null;
-
-  const playbook = input.assessment.recommended?.playbook ?? "trending";
+  const riskRewardRatio = rewardAbs / riskAbs;
+  if (riskRewardRatio < cfg.minRiskRewardRatio) return null;
 
   return {
     timeframe: input.timeframe,
-    playbook: playbook as Playbook,
+    playbook,
     phase: "reach",
     side,
     entry,
     stop,
     target,
     target2, // TP1 — execution v0 doesn't honour, but persisted for UI
-    riskRewardRatio: rewardAbs / riskAbs,
+    riskRewardRatio,
     riskPct: (riskAbs / entry) * 100,
     sizeMultiplier: cfg.sizeMultiplierVsTake,
     anchorPoolId: dominantPool.id,

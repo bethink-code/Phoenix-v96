@@ -64,6 +64,8 @@ export const DEFAULT_WICK_CONFIG: WickTradeConfig = {
     anticipatory: 0.5,
   },
 
+  minRiskRewardRatio: 1.0,
+
   // Beyond ~5 bars, the sweep is stale and the fade window has closed.
   maxBarsSinceSweep: 5,
 };

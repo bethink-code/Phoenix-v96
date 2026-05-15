@@ -90,6 +90,9 @@ export interface WickTradeConfig {
   anticipatory: AnticipatoryConfig;
   regimeMatrix: RegimeStyleMatrix;
   sizeMultiplier: SizeMultiplierMap;
+  // Hard veto for low-payoff setups. Valid geometry is not enough if the
+  // target is too small relative to the stop.
+  minRiskRewardRatio: number;
   // Maximum bars between the sweep candle and "now" for a fade entry to be
   // considered. Past this, the sweep is stale.
   maxBarsSinceSweep: number;

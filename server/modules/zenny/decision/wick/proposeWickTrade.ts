@@ -153,6 +153,8 @@ function tryStyle(args: TryStyleArgs): TradePlan | null {
   const riskAbs = Math.abs(entry - stop);
   const rewardAbs = Math.abs(targetOut.target - entry);
   if (riskAbs === 0 || entry === 0) return null;
+  const riskRewardRatio = rewardAbs / riskAbs;
+  if (riskRewardRatio < cfg.minRiskRewardRatio) return null;
 
   const sizeMultiplier = cfg.sizeMultiplier[style];
 
@@ -178,7 +180,7 @@ function tryStyle(args: TryStyleArgs): TradePlan | null {
     entry,
     stop,
     target: targetOut.target,
-    riskRewardRatio: rewardAbs / riskAbs,
+    riskRewardRatio,
     riskPct: (riskAbs / entry) * 100,
     sizeMultiplier,
     anchorPoolId: pool.id,

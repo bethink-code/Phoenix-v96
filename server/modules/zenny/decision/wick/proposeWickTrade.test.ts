@@ -332,6 +332,33 @@ describe("proposeWickTrade — RANGING + swept RESISTANCE", () => {
   });
 });
 
+describe("proposeWickTrade — quality vetoes", () => {
+  it("returns null when the target is too small relative to the stop", () => {
+    const lower = pool({
+      id: "l",
+      type: "SUPPORT",
+      linePrice: 100.2,
+      wickHigh: 100.8,
+      wickLow: 100,
+      status: "active",
+    });
+    const plan = proposeWickTrade({
+      timeframe: TF,
+      candles: candles({
+        lengthBeforeSweep: 5,
+        sweepCandleClose: 100.3,
+        postSweepCloses: [],
+        basePrice: 100.3,
+      }),
+      currentPrice: 100.3,
+      arms: arms({ lower, dominantSide: "lower" }),
+      pools: [lower],
+      assessment: assessment("ranging"),
+    });
+    expect(plan).toBeNull();
+  });
+});
+
 describe("proposeWickTrade — SUPPORT mirrors RESISTANCE", () => {
   it("midpoint entry on swept SUPPORT → long, entry = (wickLow+line)/2", () => {
     const lower = pool({

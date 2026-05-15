@@ -291,6 +291,39 @@ describe("proposeReachTrade — guards (return null)", () => {
   });
 });
 
+describe("proposeReachTrade — playbook gating", () => {
+  it("ranging playbook → null even when continuation geometry exists", () => {
+    const upperP = pool({
+      id: "u",
+      type: "RESISTANCE",
+      linePrice: 110,
+      wickHigh: 115,
+      wickLow: 108,
+    });
+    const lowerP = pool({
+      id: "l",
+      type: "SUPPORT",
+      linePrice: 95,
+      wickHigh: 96,
+      wickLow: 92,
+    });
+    const candles = trCandles(20, 100, 2);
+    const plan = proposeReachTrade({
+      timeframe: TF,
+      candles,
+      currentPrice: 100,
+      arms: arms({
+        upper: { pool: upperP, pull: 100 },
+        lower: { pool: lowerP, pull: 30 },
+        dominant: "upper",
+      }),
+      pools: [upperP, lowerP],
+      assessment: assessment("up", "ranging"),
+    });
+    expect(plan).toBeNull();
+  });
+});
+
 describe("proposeReachTrade — config knobs", () => {
   it("requireDirectionAlignment=false skips angle check", () => {
     const upperP = pool({

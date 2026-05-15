@@ -4400,6 +4400,8 @@ function computeAsymmetry(arms) {
 
 // server/modules/zenny/decision/reach/defaultConfig.ts
 var DEFAULT_REACH_CONFIG = {
+  // REACH is for continuation / drive trades, not for fading a range edge.
+  allowedPlaybooks: ["trending", "breakout"],
   // R1 — lowered 2.0 → 1.5 on 2026-05-09 after user observed setups
   // with asymmetry ~1.47 being missed. Still operates WITHIN the regime
   // gate; just relaxed the within-REACH threshold.
@@ -4418,6 +4420,7 @@ var DEFAULT_REACH_CONFIG = {
   maxBarsInTrade: null,
   // R6 — same R as TAKE per Van Tharp
   sizeMultiplierVsTake: 1,
+  minRiskRewardRatio: 1,
   // R7
   conflictZoneAtrMultiple: 1,
   // Effort vs Result filter — disabled until volume normalisation lands
@@ -4447,6 +4450,9 @@ function findRecentSwingHigh(candles, lookbackBars) {
 // server/modules/zenny/decision/reach/proposeReachTrade.ts
 function proposeReachTrade(input) {
   const cfg = input.config ?? DEFAULT_REACH_CONFIG;
+  const playbook = input.assessment.recommended?.playbook;
+  if (!playbook) return null;
+  if (!cfg.allowedPlaybooks.includes(playbook)) return null;
   const asym = computeAsymmetry(input.arms);
   if (asym === null) return null;
   if (asym.asymmetry < cfg.pullAsymmetryThreshold) return null;
@@ -4498,7 +4504,8 @@ function proposeReachTrade(input) {
   const riskAbs = Math.abs(entry - stop);
   const rewardAbs = Math.abs(target - entry);
   if (riskAbs === 0 || entry === 0) return null;
-  const playbook = input.assessment.recommended?.playbook ?? "trending";
+  const riskRewardRatio = rewardAbs / riskAbs;
+  if (riskRewardRatio < cfg.minRiskRewardRatio) return null;
   return {
     timeframe: input.timeframe,
     playbook,
@@ -4509,7 +4516,7 @@ function proposeReachTrade(input) {
     target,
     target2,
     // TP1 — execution v0 doesn't honour, but persisted for UI
-    riskRewardRatio: rewardAbs / riskAbs,
+    riskRewardRatio,
     riskPct: riskAbs / entry * 100,
     sizeMultiplier: cfg.sizeMultiplierVsTake,
     anchorPoolId: dominantPool.id,
@@ -4726,6 +4733,7 @@ var DEFAULT_WICK_CONFIG = {
     beyond: 0.7,
     anticipatory: 0.5
   },
+  minRiskRewardRatio: 1,
   // Beyond ~5 bars, the sweep is stale and the fade window has closed.
   maxBarsSinceSweep: 5
 };
@@ -4800,6 +4808,8 @@ function tryStyle(args) {
   const riskAbs = Math.abs(entry - stop);
   const rewardAbs = Math.abs(targetOut.target - entry);
   if (riskAbs === 0 || entry === 0) return null;
+  const riskRewardRatio = rewardAbs / riskAbs;
+  if (riskRewardRatio < cfg.minRiskRewardRatio) return null;
   const sizeMultiplier = cfg.sizeMultiplier[style];
   const rationale = [
     `playbook ${playbook} \u2192 entry style ${style}`,
@@ -4822,7 +4832,7 @@ function tryStyle(args) {
     entry,
     stop,
     target: targetOut.target,
-    riskRewardRatio: rewardAbs / riskAbs,
+    riskRewardRatio,
     riskPct: riskAbs / entry * 100,
     sizeMultiplier,
     anchorPoolId: pool2.id,
